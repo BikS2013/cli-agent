@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "_comment": "cli-agent config.json — non-secret runtime defaults. Secrets belong in ~/.tool-agents/cli-agent/.env",
+
+  "provider": "azure-openai",
+  "model": "gpt-4o",
+  "maxSteps": 25,
+  "allowMutations": false,
+  "verbose": false,
+
+  "tools": [],
+
+  "capabilities": {
+    "depth": 2,
+    "maxBytesPerTool": 10240,
+    "timeoutMs": 5000,
+    "totalTimeoutMs": 60000,
+    "subcommandExtractor": ""
+  },
+
+  "bash": {
+    "allow": [],
+    "allowedRoots": [],
+    "passEnv": ["PATH", "HOME", "LANG", "TERM"],
+    "timeoutMs": 30000,
+    "maxOutputBytes": 1048576
+  },
+
+  "webSearch": {
+    "backend": "tavily"
+  },
+
+  "fileEdit": {
+    "root": "",
+    "allowPaths": []
+  }
+}
