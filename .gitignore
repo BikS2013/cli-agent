@@ -5,3 +5,8 @@ dist/
 !.env.example
 coverage/
 *.js.map
+
+# TUI persistence (test artefacts; real persistence lives under ~/.tool-agents/cli-agent/history)
+.agent-memory.json
+.agent-model.json
+.agent-monitor/

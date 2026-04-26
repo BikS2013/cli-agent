@@ -105,3 +105,46 @@ CLI flag > shell env var > ~/.tool-agents/cli-agent/.env > config.json > throw
 | 5 | Upstream / provider error |
 | 6 | IO error |
 | 130 | SIGINT during interactive session |
+
+## TUI
+
+Bare `cli-agent` invocation drops into a raw-mode terminal UI with token-by-token
+streaming, an animated spinner, in-flight tool-call indicators, ESC-to-abort,
+multiline input editing, input history, and a 15-command slash catalogue.
+
+```
+$ cli-agent
+cli-agent TUI (LangGraph)
+LLM: azure-openai / gpt-5.4
+Logs: ~/.tool-agents/cli-agent/logs/session-2026-04-26T20-06-37-…jsonl
+Session: 7c3a502b
+Commands: /help /history /memory /new /last /quit  (try /help for the full list)
+Shift+Enter or Ctrl+J for newline; Enter to send; ESC during a turn aborts.
+
+You> what is the active git branch?
+⠋ Thinking...
+Agent
+  ↳ calling bash_run(...) ✓ (38ms)
+The active git branch is `master`.
+
+You> /quit
+[system] goodbye.
+```
+
+### Slash command catalogue
+
+| Group | Commands |
+|---|---|
+| Core | `/help`, `/quit` (`/exit`), `/new` (`/reset`), `/clear` |
+| History & memory | `/history`, `/last` (`/raw`), `/copy`, `/memory` |
+| Runtime switching | `/model [<id>]`, `/provider [<name>]`, `/tools <add\|remove\|list> [name] [--save]`, `/allow-mutations on\|off` |
+| Capability inspection | `/capabilities`, `/refresh-capabilities [<tool>]`, `/tool-help <tool> [<sub>]` |
+
+### Modes at a glance
+
+| Invocation | Mode |
+|---|---|
+| `cli-agent` (no args) | Raw-mode TUI |
+| `cli-agent "prompt"` | Streaming one-shot (tokens to stdout as they arrive) |
+| `cli-agent --interactive` / `-i` | Legacy readline REPL (lightweight fallback for non-TTY) |
+| `CLI_AGENT_NO_TUI=1 cli-agent` | Refuses to enter the TUI; user is told to add `--interactive` or pass a prompt |

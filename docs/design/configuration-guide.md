@@ -236,3 +236,49 @@ Paths outside the root (including symlinks resolved outside) are rejected with
 
 Log files are stored at `~/.tool-agents/cli-agent/logs/session-<UTC>-<id>.jsonl`
 with mode 0600. The directory is created with mode 0700.
+
+---
+
+## TUI configuration
+
+The raw-mode TUI (entered when bare `cli-agent` is invoked) reads its own
+small set of configuration knobs. None of them are required; defaults are
+documented.
+
+### `CLI_AGENT_NO_TUI`
+
+| Aspect | Value |
+|---|---|
+| Purpose | Force the bare `cli-agent` invocation to refuse the TUI. Useful when running inside a TTY-capable terminal that nevertheless cannot host the raw-mode UI (e.g. specific tmux configurations, broken terminfo, pair-programming over SSH multiplexers, etc.). |
+| Type | string (boolean-ish — only `1` is interpreted as on) |
+| Default | unset (TUI enabled when stdout is a TTY) |
+| How to obtain | The user sets it in their shell, e.g. `export CLI_AGENT_NO_TUI=1` in `.zshrc` / `.bashrc`. |
+| Recommended storage | Shell rc file, NOT `.env` (it is purely a UX preference, not a secret). |
+| Effect when set to `1` | Bare invocation prints `cli-agent: CLI_AGENT_NO_TUI=1 is set — refusing to enter the TUI. Re-run with --interactive for the readline REPL or pass a positional prompt for one-shot mode.` and exits with code 2. |
+
+The TUI also refuses (without this env var) when `process.stdout.isTTY !== true`
+or `TERM === 'dumb'`. Those refusals print a slightly different message that
+points at the underlying TTY problem.
+
+### Internal clipboard allowlist
+
+The `/copy` slash command dispatches to a hard-coded TUI-internal allowlist:
+
+```
+pbcopy                                     (macOS)
+xclip -selection clipboard                 (Linux)
+xsel --clipboard --input                   (Linux fallback if xclip is missing)
+clip.exe                                   (Windows, also used under WSL)
+/mnt/c/Windows/System32/clip.exe           (WSL absolute-path fallback)
+```
+
+This allowlist is **not user-extensible**. It is independent of `bash.allow`
+(the user-controlled allowlist that governs `bash_run`). If none of the above
+binaries is present on the host, `/copy` surfaces a `clipboard not available
+on this platform` message — never silent-fail.
+
+### History layout (no env vars; documented for completeness)
+
+The TUI persists per-thread JSONL files plus an `index.jsonl` and a
+`cursor.json` under `~/.tool-agents/cli-agent/history/` (directory mode 0700,
+files mode 0600). The location is fixed; there is no env-var override.

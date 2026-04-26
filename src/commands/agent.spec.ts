@@ -1,8 +1,13 @@
 /**
  * Command module tests.
+ *
+ * NOTE: With the TUI introduction, bare invocation (no prompt, no -i) drops
+ * into the raw-mode TUI rather than throwing E_USAGE. The non-TTY guard inside
+ * startTui() takes over instead. The streaming one-shot path replaces the
+ * legacy runOneShotAgent for any positional prompt.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 
 // Prevent real config loading
 vi.mock('../config/agent-config.js', async (importOriginal) => {
@@ -11,7 +16,6 @@ vi.mock('../config/agent-config.js', async (importOriginal) => {
     ...actual,
     loadAgentConfig: vi.fn().mockImplementation((flags: Record<string, unknown>) => {
       if (!flags['provider'] && !flags['tools']) {
-        // Simulate missing provider
         const err = Object.assign(new Error('Required configuration missing'), { code: 'E_CONFIG_MISSING', exitCode: 3 });
         return Promise.reject(err);
       }
@@ -45,22 +49,38 @@ vi.mock('../config/agent-config.js', async (importOriginal) => {
 });
 
 vi.mock('../agent/run.js', () => ({
-  runOneShotAgent: vi.fn().mockResolvedValue('Test answer from agent'),
   runInteractiveAgent: vi.fn().mockResolvedValue(undefined),
+  // eslint-disable-next-line require-yield
+  streamOneShotAgent: vi.fn().mockImplementation(async function* () {
+    yield { kind: 'token', text: 'Test ' };
+    yield { kind: 'token', text: 'answer' };
+    return 'Test answer';
+  }),
+}));
+
+vi.mock('../tui/index.js', () => ({
+  startTui: vi.fn().mockResolvedValue(undefined),
+  canHostTui: vi.fn().mockReturnValue(true),
 }));
 
 import { runAgentCommand } from './agent.js';
 
 describe('runAgentCommand', () => {
-  it('throws UsageError when prompt is null and not interactive', async () => {
-    await expect(runAgentCommand(null, {})).rejects.toMatchObject({
-      code: 'E_USAGE',
-    });
+  it('drops into the TUI when neither prompt nor --interactive is given', async () => {
+    const { startTui } = await import('../tui/index.js');
+    await runAgentCommand(null, { provider: 'openai' });
+    expect(startTui).toHaveBeenCalled();
   });
 
-  it('calls runOneShotAgent when prompt provided', async () => {
-    const { runOneShotAgent } = await import('../agent/run.js');
+  it('streams one-shot tokens when a positional prompt is provided', async () => {
+    const { streamOneShotAgent } = await import('../agent/run.js');
     await runAgentCommand('hello', { provider: 'openai' });
-    expect(runOneShotAgent).toHaveBeenCalled();
+    expect(streamOneShotAgent).toHaveBeenCalled();
+  });
+
+  it('routes --interactive to the legacy readline REPL', async () => {
+    const { runInteractiveAgent } = await import('../agent/run.js');
+    await runAgentCommand(null, { provider: 'openai', interactive: true });
+    expect(runInteractiveAgent).toHaveBeenCalled();
   });
 });

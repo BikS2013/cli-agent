@@ -56,15 +56,94 @@
         All eight standard LLM providers are supported out of the box (see Provider
         Configuration below). The default provider is azure-openai.
 
+        ## TUI mode
+
+        Bare `cli-agent` invocation (no positional prompt and no `-i`/`--interactive`)
+        drops into a raw-mode terminal UI: a streaming token-by-token renderer with
+        an animated spinner, in-flight tool-call indicators, ESC-to-abort, multiline
+        input editing, input history, and a slash-command catalogue. The TUI is a
+        single-process Node.js implementation — no Ink, no Blessed, no readline.
+
+        Bare `cli-agent`            → TUI (drops into raw-mode interactive UI)
+        cli-agent &lt;prompt&gt;          → one-shot streaming (tokens written as they arrive)
+        cli-agent -i | --interactive → readline REPL (lightweight legacy fallback)
+
+        Detect TTY-incompatibility (`!process.stdout.isTTY`, `TERM=dumb`, or the
+        explicit `CLI_AGENT_NO_TUI=1` opt-out) and the bare invocation refuses with a
+        friendly fallback message pointing at `--interactive`.
+
+        ### Slash commands
+
+        Core
+            /help                   List all registered slash commands and keybindings
+            /quit | /exit           Graceful shutdown; persists thread index, closes log
+            /new  | /reset          Start a fresh thread (preserves provider/model/tools)
+            /clear                  Clear the visible transcript (history files untouched)
+
+        History &amp; memory
+            /history [offset]       Browse the most recent threads (newest first)
+            /last | /raw            Re-render the last assistant reply
+            /copy                   Copy the last assistant reply to the system clipboard
+            /memory                 Diagnostic view of MemorySaver state for the active thread
+
+        Runtime switching
+            /model [&lt;id&gt;]           Show or swap the active LLM model id (graph rebuilt in place)
+            /provider [&lt;name&gt;]      Show or swap the active provider (one of the 8 standard names)
+            /tools &lt;add|remove|list&gt; [name] [--save]
+                                    Manage the wrapped-CLI tool list; --save persists to config.json
+            /allow-mutations on|off Toggle mutating file_* tools and rebuild the catalog
+
+        Capability inspection
+            /capabilities           Per-tool freshness column (✓ fresh / ⚠ stale / ✗ missing)
+            /refresh-capabilities [&lt;tool&gt;] | /refresh-caps
+                                    Re-run capability discovery (single tool or all configured)
+            /tool-help &lt;tool&gt; [&lt;sub&gt;] | /help-tool
+                                    TUI twin of the runtime tool_help LLM tool
+
+        ### Keybindings
+
+        Enter                       Submit current input
+        Shift+Enter / Ctrl+J        Insert newline (Shift+Enter requires a CSI-u-capable
+                                    terminal — Kitty / Ghostty / iTerm2 with the right
+                                    setting; Ctrl+J is the universal fallback)
+        ←/→                         Cursor left/right within the line
+        ↑/↓                         Move between buffer lines, or browse input history
+                                    at the top/bottom edge
+        Home / End / Ctrl+A / Ctrl+E  Cursor to start/end of line
+        Option+←/→ / Ctrl+←/→       Word-by-word motion
+        Backspace / Delete          Delete char left / at cursor
+        Ctrl+W / Alt+Backspace      Delete word left
+        Ctrl+U / Ctrl+K             Delete to start / end of line
+        Ctrl+C                      During input: clear buffer; during a turn: abort the LLM call
+        ESC                         During a turn: abort the LLM call via AbortController
+        Ctrl+D                      On empty input: exit the TUI
+
+        ### Persistent history layout
+
+        Per-thread JSONL files plus an index live under the per-user config folder:
+
+        ~/.tool-agents/cli-agent/history/      (mode 0700)
+            thread-&lt;UTC-iso&gt;-&lt;threadId&gt;.jsonl  (mode 0600 — one line per turn)
+            index.jsonl                         (mode 0600 — one line per thread; atomic)
+            cursor.json                         (mode 0600 — last active threadId + ts)
+
+        Per-turn JSONL records the user prompt and the assistant final text only —
+        chunk-level fragments stay in `~/.tool-agents/cli-agent/logs/`.
+
         ## Subcommands
 
         cli-agent [prompt]
-            Run the agent with a one-shot prompt. The agent exits after the LLM
-            produces a final answer or exceeds --max-steps.
+            Run the agent with a one-shot prompt. Streams tokens to stdout as they
+            arrive; exits after the LLM produces a final answer or exceeds --max-steps.
+
+        cli-agent (no args)
+            Drops into the raw-mode TUI. Refuses with a friendly fallback message on
+            non-TTY contexts or when CLI_AGENT_NO_TUI=1 is set.
 
         cli-agent --interactive / -i
-            Enter an interactive REPL session. Each user turn is processed as a
-            separate agent invocation sharing the same capability documents.
+            Enter the legacy readline REPL session. Each user turn is processed as a
+            separate agent invocation sharing the same capability documents. Useful in
+            non-TTY contexts (scripts, restricted SSH shells).
 
         cli-agent show-capabilities --tool &lt;name&gt;
             Print the compiled Markdown capability document for the named tool to
@@ -73,6 +152,24 @@
         cli-agent refresh-capabilities [--tool &lt;name&gt;]
             Re-run the --help introspection pass and regenerate the cached capability
             documents. If --tool is omitted, refreshes all tools declared in config.json.
+
+        ## Capability Cache Behavior
+
+        On every agent invocation, for each declared --tool &lt;name&gt;:
+          - If ~/.tool-agents/cli-agent/capabilities/&lt;tool&gt;.md ALREADY EXISTS,
+            the agent skips capability discovery entirely — no `which`, no
+            `&lt;tool&gt; --version`, no `--help` calls, no LLM call. The cached
+            document is loaded as-is and embedded in the system prompt.
+            This makes warm-cache startup essentially free (a few ms per
+            tool instead of 10-30 s on cold cache).
+          - If the file is ABSENT, full discovery runs: probe binary,
+            recursively introspect --help, call the LLM to extract
+            subcommands, write the cache file.
+          - To force re-discovery (e.g. after upgrading a wrapped binary
+            to a new major version), pass --refresh-capabilities or run
+            `cli-agent refresh-capabilities --tool &lt;name&gt;`. This is the
+            only way to refresh the cache; the agent does NOT auto-detect
+            binary upgrades.
 
         ## CLI Parameters
 

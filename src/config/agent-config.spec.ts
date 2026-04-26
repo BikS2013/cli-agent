@@ -7,22 +7,31 @@ import os from 'node:os';
 import path from 'node:path';
 import { loadAgentConfig, SUPPORTED_PROVIDERS, AGENT_TOOL_NAME } from './agent-config.js';
 
-// Prevent actual filesystem bootstrap during tests
+// Prevent actual filesystem bootstrap during tests.
+// IMPORTANT: source code uses both `import fsp from 'node:fs/promises'` (default
+// import) and `import { fn } from 'node:fs/promises'` (named imports). vi.mock
+// must therefore expose BOTH a `default` object and the same names at the top
+// level, otherwise default-import sites silently bypass the mock and hit the
+// real filesystem (e.g. the user's ~/.tool-agents/cli-agent/.env).
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
-  return {
-    ...actual,
+  const enoent = () =>
+    Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+  const mocks = {
     mkdir: vi.fn().mockResolvedValue(undefined),
     chmod: vi.fn().mockResolvedValue(undefined),
-    access: vi.fn().mockRejectedValue(Object.assign(new Error('ENOENT'), { code: 'ENOENT' })),
+    access: vi.fn().mockImplementation(enoent),
     writeFile: vi.fn().mockResolvedValue(undefined),
     readFile: vi.fn().mockImplementation((p: string) => {
       if (String(p).endsWith('.env')) return Promise.resolve('');
-      if (String(p).endsWith('config.json')) {
-        return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
-      }
-      return Promise.reject(Object.assign(new Error('ENOENT'), { code: 'ENOENT' }));
+      if (String(p).endsWith('config.json')) return enoent();
+      return enoent();
     }),
+  };
+  return {
+    ...actual,
+    ...mocks,
+    default: { ...actual, ...mocks },
   };
 });
 

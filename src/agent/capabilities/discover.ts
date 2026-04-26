@@ -15,7 +15,7 @@ import { runHelp } from './runHelp.js';
 import { extractSubcommands } from './extractSubcommands.js';
 import { composeCapabilityDoc } from './composeMarkdown.js';
 import { readCacheEntry, writeCacheEntry } from './cache.js';
-import { getBinaryInfo, isCacheValid } from './invalidate.js';
+import { getBinaryInfo } from './invalidate.js';
 import type { AgentConfig } from '../../config/agent-config.js';
 import type { BaseChatModel } from '../providers/types.js';
 import type { Logger } from '../logging.js';
@@ -60,6 +60,29 @@ export async function discoverTool(
   deadline: number,
 ): Promise<DiscoveryResult> {
   const start = Date.now();
+
+  // Doc-exists shortcut: if a capability document already exists for this
+  // tool and the user has not forced a refresh, trust it and skip every
+  // probe (no `which`, no `<tool> --version`, no LLM call). This is the
+  // fastest startup path and is safe because:
+  //  - Re-discovery on demand is one command away: `cli-agent
+  //    refresh-capabilities --tool <name>` or the `--refresh-capabilities`
+  //    flag.
+  //  - The version-hash invalidation that used to fire here was a
+  //    convenience, not a correctness requirement; binary upgrades are
+  //    rare and the user can refresh explicitly.
+  if (!forceRefresh) {
+    const existing = await readCacheEntry(cfg.capabilitiesDir, tool);
+    if (existing) {
+      return {
+        tool,
+        status: 'cached',
+        bytes: existing.fullContent.length,
+        durationMs: Date.now() - start,
+      };
+    }
+  }
+
   const turnId = newTurnId();
 
   logger.log({
@@ -72,7 +95,7 @@ export async function discoverTool(
     cwd: process.cwd(),
   });
 
-  // Check binary exists
+  // Check binary exists (only reached on cache miss or forced refresh)
   const binaryInfo = await getBinaryInfo(tool, cfg.capabilities.timeoutMs);
   if (!binaryInfo) {
     const msg = `Binary '${tool}' not found on PATH. Add it to PATH or check the tool name.`;
@@ -104,20 +127,11 @@ export async function discoverTool(
     return { tool, status: 'not-found', message: msg, durationMs: Date.now() - start };
   }
 
-  // Check cache validity
-  if (!forceRefresh) {
-    const cached = await readCacheEntry(cfg.capabilitiesDir, tool);
-    if (cached && isCacheValid(cached.frontmatter, binaryInfo)) {
-      return {
-        tool,
-        status: 'cached',
-        bytes: cached.fullContent.length,
-        durationMs: Date.now() - start,
-      };
-    }
-  }
-
-  // Read existing doc to preserve USER-NOTES
+  // Read existing doc (only used here to preserve USER-NOTES across
+  // regeneration). The doc-exists shortcut above already returned early
+  // when a cached doc was acceptable, so reaching this line means we are
+  // either forcing a refresh or recovering from a binary-not-found
+  // placeholder; either way we still want to keep the user's notes.
   const existing = await readCacheEntry(cfg.capabilitiesDir, tool);
 
   // Introspect top-level help

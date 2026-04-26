@@ -107,3 +107,84 @@ all configured tools, printing a per-tool status table to stderr.
 - Child env stripped to `passEnv` list; credential-shaped vars stripped unconditionally.
 - Per-call timeout (max 300s); SIGTERM then SIGKILL after 2s.
 - Per-stream output cap; truncation with `_truncated: true` marker.
+
+## TUI Subsystem (FR-TUI-*)
+
+### FR-TUI-001 — Bare invocation drops into the TUI
+`cli-agent` with no positional prompt and no `-i`/`--interactive` enters the
+raw-mode TUI. The legacy readline REPL remains accessible via `--interactive`
+for non-TTY environments.
+
+### FR-TUI-002 — TTY-incompatibility refusal
+The TUI checks `process.stdout.isTTY`, `TERM != dumb`, and the explicit
+`CLI_AGENT_NO_TUI=1` opt-out. On any failing condition the bare invocation
+prints a friendly message pointing at `--interactive` and exits with code 2.
+
+### FR-TUI-003 — Token-by-token streaming
+The agent's response renders one chunk at a time via the new
+`streamOneShot()` async generator over LangChain's `streamEvents v2`. Each
+chunk is written directly to stdout — no buffering of the full response.
+
+### FR-TUI-004 — Tool-call indicators
+On `on_tool_start` the TUI prints `↳ calling <toolName>(...)`. On
+`on_tool_end` it appends ` ✓ (Nms)`. The spinner switches its label to
+"Processing tool result…" between events.
+
+### FR-TUI-005 — ESC and Ctrl+C abort
+Pressing ESC or Ctrl+C during a turn aborts the in-flight LLM call via an
+`AbortController` whose `signal` is passed through `streamOneShot` into
+LangChain. The TUI renders `[aborted]` and remains alive for the next turn.
+
+### FR-TUI-006 — Multiline editing with universal Ctrl+J fallback
+The line-editor implements byte-level escape framing per spec §5.1 and routes
+printable bytes through a stateful UTF-8 decoder per spec §5.2. Shift+Enter is
+accepted in every known encoding; Ctrl+J (0x0A) is the universal newline
+fallback for terminals that send plain CR for both Enter and Shift+Enter.
+
+### FR-TUI-007 — Slash command dispatcher
+Names + aliases are case-sensitive. The 15 in-scope commands cover four
+groups: core (/help /quit /new /clear), history+memory (/history /last /copy
+/memory), runtime switching (/model /provider /tools /allow-mutations), and
+capability inspection (/capabilities /refresh-capabilities /tool-help).
+
+### FR-TUI-008 — Mid-session model swap
+`/model <id>` rebuilds the LLM via the existing provider factory and re-creates
+the agent graph in place. The thread persists; on construction error the
+previous graph stays active.
+
+### FR-TUI-009 — Mid-session provider swap
+`/provider <name>` validates against `SUPPORTED_PROVIDERS` and reconstructs the
+graph. On `ConfigurationError` (missing required env vars), the swap is
+refused and the original error message is surfaced to the user.
+
+### FR-TUI-010 — Runtime tool catalogue manipulation
+`/tools add|remove|list [--save]` mutates the active wrapped-CLI list. `add`
+triggers in-line capability discovery for the new tool. `--save` persists the
+change to `~/.tool-agents/cli-agent/config.json`.
+
+### FR-TUI-011 — Mutation gate toggle
+`/allow-mutations on|off` flips the `cfg.allowMutations` flag and rebuilds the
+tool catalog before the next user prompt.
+
+### FR-TUI-012 — Capability freshness UI
+`/capabilities` lists every active wrapped tool with a freshness column
+(✓ fresh / ⚠ stale / ✗ missing) computed from the same `isCacheValid()` the
+agent uses internally. `/refresh-capabilities` is the TUI twin of the existing
+CLI subcommand.
+
+### FR-TUI-013 — Cross-platform clipboard
+`/copy` dispatches to `pbcopy` / `xclip` (with `xsel` fallback) / `clip.exe`
+(WSL: `/mnt/c/Windows/System32/clip.exe`) via the `bash/exec.ts` spawner. The
+internal allowlist is hard-coded and independent of `bash.allow`.
+
+### FR-TUI-014 — History persistence
+Per-thread JSONL files plus an atomic `index.jsonl` plus a `cursor.json`
+stored under `~/.tool-agents/cli-agent/history/` (dir 0700, files 0600). Per-
+turn records carry user prompt + assistant final text only; chunks remain in
+`~/.tool-agents/cli-agent/logs/`.
+
+### FR-TUI-015 — `llm_chunk` / `llm_final` log events wired
+The streaming seam emits `llm_chunk` for every `on_chat_model_stream` event
+and `llm_final` on `on_chat_model_end`. Both carry `sessionId` + `turnId` so
+post-hoc analysis can group by turn. Closes the deferred logging item that
+`runOneShotAgent`'s non-streaming path could not satisfy.

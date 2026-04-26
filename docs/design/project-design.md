@@ -125,3 +125,81 @@ Files: `~/.tool-agents/cli-agent/logs/session-<UTC>-<sessionId>.jsonl` (mode 060
 ## 8. Module Layout
 
 See `docs/design/plan-001-agent-subcommand.md` §6 for the full file inventory.
+
+## 9. TUI Subsystem
+
+The raw-mode terminal UI lives entirely under `src/tui/` and is decoupled from
+the agent core through the streaming seam introduced in this iteration.
+
+### File map
+
+```
+src/tui/
+  index.ts                  startTui(cfg) — entry; banner; main read-dispatch loop
+  controller.ts             TuiController — session state, AbortController, streaming loop
+  spinner.ts                Braille spinner with ANSI save/restore
+  ansi.ts                   Inline ANSI color + cursor primitives
+  utf8.ts                   Stateful UTF-8 decoder (StringDecoder wrapper)
+  clipboard.ts              Cross-platform copy via the bash/exec.ts helper
+  input/
+    line-editor.ts          Raw-mode multiline reader (escape framing + UTF-8)
+    keybindings.ts          Documented key→action map (rendered by /help)
+  transcript/
+    types.ts                TurnRecord / ThreadIndexEntry / CursorState
+    persist.ts              ~/.tool-agents/cli-agent/history/* CRUD
+  slash/
+    registry.ts             SlashCommand + dispatcher
+    help.ts quit.ts new.ts clear.ts
+    history.ts last.ts copy.ts memory.ts
+    model.ts provider.ts tools.ts allow-mutations.ts
+    capabilities.ts refresh-capabilities.ts tool-help.ts
+```
+
+### Streaming seam
+
+`src/agent/graph.ts` now exports `streamOneShot()` — an async generator over
+`agentGraph.graph.streamEvents(input, { version: 'v2' })`. Translation table:
+
+```
+on_chat_model_stream   → AgentStreamEvent { kind: 'token', text: chunk.content }
+                          + emits llm_chunk JSONL log line (sessionId+turnId scoped)
+on_chat_model_end      → emits llm_final JSONL log line (sessionId+turnId scoped)
+on_tool_start          → AgentStreamEvent { kind: 'tool_call_start', toolName, args }
+on_tool_end            → AgentStreamEvent { kind: 'tool_call_end', toolName, durationMs }
+```
+
+`src/agent/run.ts` wraps the generator in `streamOneShotAgent(cfg, prompt)`,
+which mirrors the existing `runOneShotAgent` setup (logger, session_start,
+user_prompt, session_end) and is consumed by both the TUI controller and the
+one-shot CLI dispatch in `src/commands/agent.ts`.
+
+### Event flow (per turn)
+
+```
+user types → readInput()                   src/tui/input/line-editor.ts
+   │
+   ├─ if "/…" → dispatchSlash()             src/tui/slash/registry.ts → command modules
+   │
+   └─ else  → controller.runTurn()          src/tui/controller.ts
+              │
+              ├─ persistTurn('user', …)     src/tui/transcript/persist.ts
+              ├─ spinner.start("Thinking…")
+              └─ for await event of streamOneShot(...):
+                   token            → write to stdout, accumulate
+                   tool_call_start  → "↳ calling <name>(...)" + spinner.setLabel("Processing…")
+                   tool_call_end    → " ✓ (Nms)" + spinner.start()
+              ├─ persistTurn('assistant', …)
+              └─ persistIndex()
+```
+
+### Persistence (independent of the existing logs/)
+
+```
+~/.tool-agents/cli-agent/history/      mode 0700
+  thread-<UTC-iso>-<threadId>.jsonl   mode 0600 — one line per turn
+  index.jsonl                          mode 0600 — atomic upsert per thread
+  cursor.json                          mode 0600 — last active thread for "resume?"
+```
+
+Per-turn JSONL records the user prompt and assistant final text only. Chunk-
+level fragments stay in `~/.tool-agents/cli-agent/logs/` (the standard logger).
