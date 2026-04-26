@@ -6,7 +6,7 @@ import type { AgentCliFlags } from '../config/agent-config.js';
 import { loadAgentConfig } from '../config/agent-config.js';
 import { createLogger } from '../agent/logging.js';
 import { createLLM } from '../agent/providers/registry.js';
-import { discoverTool } from '../agent/capabilities/discover.js';
+import { discoverTool, defaultDiscoveryReporter } from '../agent/capabilities/discover.js';
 import { isLoggingDisabledByEnv } from '../config/agent-config.js';
 import { UsageError } from '../errors.js';
 
@@ -37,10 +37,11 @@ export async function runRefreshCapabilities(
 
   process.stderr.write(`Refreshing capabilities for: ${toolsToRefresh.join(', ')}\n\n`);
 
+  const reporter = defaultDiscoveryReporter();
   const rows: Array<{ tool: string; status: string; bytes: number; durationMs: number }> = [];
 
   for (const tool of toolsToRefresh) {
-    const result = await discoverTool(tool, cfg, llm, logger, true, deadline);
+    const result = await discoverTool(tool, cfg, llm, logger, true, deadline, reporter);
     rows.push({
       tool: result.tool,
       status: result.status,

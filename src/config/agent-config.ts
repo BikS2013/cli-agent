@@ -49,6 +49,15 @@ export interface CapabilitiesConfig {
   readonly timeoutMs?: number;
   readonly totalTimeoutMs?: number;
   readonly subcommandExtractor?: string;
+  /**
+   * If the top-level `--help` output is below this many bytes, the agent
+   * skips the LLM-based subcommand extraction and embeds the raw help
+   * verbatim in the capability document. Saves ~500-3000 ms per small
+   * tool (e.g. `zip`) at the cost of slightly less structure in the
+   * embedded prompt section. Set to 0 to always run the LLM extractor.
+   * Default: 4096.
+   */
+  readonly skipLlmBelowBytes?: number;
 }
 
 export interface BashConfig {
@@ -154,6 +163,7 @@ export interface AgentCliFlags {
   readonly introspectMaxBytes?: number;
   readonly introspectTimeoutMs?: number;
   readonly introspectTotalBudgetMs?: number;
+  readonly introspectSkipLlmBelowBytes?: number;
   readonly refreshCapabilities?: boolean;
   readonly system?: string;
   readonly systemFile?: string;
@@ -485,6 +495,7 @@ export async function loadAgentConfig(
     timeoutMs: flags.introspectTimeoutMs ?? capConfig.timeoutMs ?? 5000,
     totalTimeoutMs: flags.introspectTotalBudgetMs ?? capConfig.totalTimeoutMs ?? 60000,
     subcommandExtractor: capConfig.subcommandExtractor ?? '',
+    skipLlmBelowBytes: flags.introspectSkipLlmBelowBytes ?? capConfig.skipLlmBelowBytes ?? 4096,
   };
 
   // Bash config

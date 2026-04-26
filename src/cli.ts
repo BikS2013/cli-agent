@@ -51,6 +51,7 @@ program
   .option('--introspect-max-bytes <n>', 'Per-tool capability byte budget', (v) => parseInt(v, 10))
   .option('--introspect-timeout-ms <ms>', 'Per --help call timeout (ms)', (v) => parseInt(v, 10))
   .option('--introspect-total-budget-ms <ms>', 'Total capability discovery budget (ms)', (v) => parseInt(v, 10))
+  .option('--introspect-skip-llm-below-bytes <n>', 'Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)', (v) => parseInt(v, 10))
   .option('--refresh-capabilities', 'Force regenerate cached capability docs', false)
   .option('--verbose', 'Emit structured debug logs to stderr', false)
   .action(async (prompt: string | undefined, opts: Record<string, unknown>) => {
@@ -81,6 +82,7 @@ program
         introspectMaxBytes: opts['introspectMaxBytes'] as number | undefined,
         introspectTimeoutMs: opts['introspectTimeoutMs'] as number | undefined,
         introspectTotalBudgetMs: opts['introspectTotalBudgetMs'] as number | undefined,
+        introspectSkipLlmBelowBytes: opts['introspectSkipLlmBelowBytes'] as number | undefined,
         refreshCapabilities: opts['refreshCapabilities'] as boolean | undefined,
         verbose: opts['verbose'] as boolean | undefined,
         system: opts['system'] as string | undefined,

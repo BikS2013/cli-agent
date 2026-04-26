@@ -22,7 +22,7 @@ function makeBaseConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     capabilitiesDir: '/tmp/.tool-agents/cli-agent/capabilities',
     logsDir: '/tmp/.tool-agents/cli-agent/logs',
     tools: [],
-    capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, subcommandExtractor: '' },
+    capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, subcommandExtractor: '', skipLlmBelowBytes: 4096 },
     bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH', 'HOME', 'LANG', 'TERM'], timeoutMs: 30000, maxOutputBytes: 1048576 },
     webSearch: { backend: 'tavily' },
     fileEdit: { root: '/tmp', allowPaths: [] },

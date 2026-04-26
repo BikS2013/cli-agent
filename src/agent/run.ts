@@ -11,7 +11,7 @@ import { buildToolCatalog } from './tools/registry.js';
 import { buildSystemPrompt, loadSystemPromptFile } from './system-prompt.js';
 import { buildAgentGraph, runOneShot, streamOneShot, type AgentStreamEvent, type AgentGraph } from './graph.js';
 import { createLogger, CLI_VERSION } from './logging.js';
-import { discoverAllTools } from './capabilities/discover.js';
+import { discoverAllTools, defaultDiscoveryReporter } from './capabilities/discover.js';
 import { composeCapabilitiesSystemPrompt } from './capabilities/compose-system-prompt.js';
 import { redactString } from '../util/redact.js';
 
@@ -30,7 +30,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
 
   // Capability discovery
   if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger);
+    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
 
   // Build system prompt
@@ -130,7 +130,7 @@ export async function* streamOneShotAgent(
   const tools = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger);
+    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
 
   const capSection = await composeCapabilitiesSystemPrompt(
@@ -230,7 +230,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
   const tools = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger);
+    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
 
   const capSection = await composeCapabilitiesSystemPrompt(
@@ -269,7 +269,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
   const tools = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger);
+    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
 
   const capSection = await composeCapabilitiesSystemPrompt(

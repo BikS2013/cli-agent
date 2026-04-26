@@ -92,6 +92,21 @@ describe('TuiController.runTurn', () => {
     expect(ctl.messages.map((m) => m.role)).toEqual(['user', 'assistant']);
     expect(ctl.lastAssistantText).toBe('Hello, world!');
 
+    // Regression: after tool_call_end the controller restarts the
+    // spinner; the very next 'token' event must pause it BEFORE writing,
+    // otherwise braille frames from the spinner timer race the token
+    // output and produce corruption like "⠧ Processing tool result... :"
+    // landing in the middle of streamed text. Assert that no braille
+    // frame character appears inside the assembled assistant text
+    // (the agent's actual reply must be clean).
+    const BRAILLE_FRAMES = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+    for (const frame of BRAILLE_FRAMES) {
+      expect(ctl.lastAssistantText).not.toContain(frame);
+    }
+    // And the literal "Processing tool result..." spinner label must
+    // not appear inside the assistant text either.
+    expect(ctl.lastAssistantText).not.toContain('Processing tool result');
+
     // History file written
     const histDir = path.join(tmpHome, '.tool-agents', 'cli-agent', 'history');
     const files = await fsp.readdir(histDir);

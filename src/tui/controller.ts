@@ -150,9 +150,18 @@ export class TuiController {
 
     const ensureHeader = (): void => {
       if (headerPrinted) return;
-      spinner.stop();
       this.stdout.write(`${BOLD}${CYAN}Agent${RESET} `);
       headerPrinted = true;
+    };
+
+    // Helper: stop the spinner (idempotent — no-op if not running) before
+    // any visible output. The spinner's animation timer races with stdout
+    // writes for the same line; if we don't pause it first, the braille
+    // frame and the streaming token text collide on the same column and
+    // produce the "⠧ Processing tool result... :" / truncated-spinner
+    // corruption pattern.
+    const pauseSpinnerForOutput = (): void => {
+      if (spinner.isActive()) spinner.stop();
     };
 
     try {
@@ -171,28 +180,36 @@ export class TuiController {
         const ev: AgentStreamEvent = next.value;
         switch (ev.kind) {
           case 'token':
+            pauseSpinnerForOutput();
             ensureHeader();
             this.stdout.write(ev.text);
             assembled += ev.text;
             break;
           case 'tool_call_start':
+            pauseSpinnerForOutput();
             ensureHeader();
             this.stdout.write(`\n  ${CYAN}↳${RESET} calling ${BOLD}${ev.toolName}${RESET}(...)`);
             toolCallTimes.set(ev.toolName, Date.now());
             break;
           case 'tool_call_end': {
-            this.stdout.write(` ${GREEN}✓${RESET} ${DIM}(${ev.durationMs}ms)${RESET}`);
+            pauseSpinnerForOutput();
+            this.stdout.write(` ${GREEN}✓${RESET} ${DIM}(${ev.durationMs}ms)${RESET}\n`);
             toolCalls.push({ toolName: ev.toolName, durationMs: ev.durationMs, ok: ev.ok });
+            // Resume the spinner on its own fresh line — the agent will
+            // either send tokens next (which will pause it again) or run
+            // another tool call.
             spinner.setLabel('Processing tool result...');
             spinner.start();
             break;
           }
           case 'reasoning':
             // optional channel — render dim
+            pauseSpinnerForOutput();
             ensureHeader();
             this.stdout.write(`${DIM}${ev.text}${RESET}`);
             break;
           case 'error':
+            pauseSpinnerForOutput();
             this.stderr.write(`\n${RED}error[${ev.code}]:${RESET} ${ev.message}\n`);
             break;
         }
