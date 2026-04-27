@@ -109,6 +109,7 @@ export async function discoverAllTools(
   logger: Logger,
   forceRefresh = false,
   onPhase?: DiscoveryProgress,
+  forceFullInvestigation = false,
 ): Promise<DiscoveryResult[]> {
   const results: DiscoveryResult[] = [];
   const deadline = Date.now() + cfg.capabilities.totalTimeoutMs;
@@ -120,7 +121,7 @@ export async function discoverAllTools(
       continue;
     }
 
-    const result = await discoverTool(tool, cfg, model, logger, forceRefresh, deadline, onPhase);
+    const result = await discoverTool(tool, cfg, model, logger, forceRefresh, deadline, onPhase, forceFullInvestigation);
     results.push(result);
   }
 
@@ -135,6 +136,7 @@ export async function discoverTool(
   forceRefresh: boolean,
   deadline: number,
   onPhase?: DiscoveryProgress,
+  forceFullInvestigation = false,
 ): Promise<DiscoveryResult> {
   const start = Date.now();
   onPhase?.({ kind: 'start', tool });
@@ -240,9 +242,13 @@ export async function discoverTool(
   //   2. The full help fits in the system-prompt budget anyway, so the
   //      model gets the same information either way.
   // Set skipLlmBelowBytes to 0 to disable this and always run the LLM.
+  //
+  // `forceFullInvestigation` (set by the explicit `refresh-capabilities`
+  // entry points) bypasses this fast path so the user always gets a
+  // complete LLM-driven introspection regardless of help size.
   let subcommandInfos: Awaited<ReturnType<typeof extractSubcommands>> = [];
   const threshold = cfg.capabilities.skipLlmBelowBytes;
-  if (threshold > 0 && topLevelHelp.text.length < threshold) {
+  if (!forceFullInvestigation && threshold > 0 && topLevelHelp.text.length < threshold) {
     onPhase?.({
       kind: 'extract_skipped',
       tool,

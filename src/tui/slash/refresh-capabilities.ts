@@ -44,7 +44,11 @@ const refreshCmd: SlashCommand = {
       };
       let result;
       try {
-        result = await discoverTool(tool, c.cfg, llm, c.logger, true, deadline, reporter);
+        // forceFullInvestigation=true → bypass the skipLlmBelowBytes
+        // fast path so the LLM extractor always runs. /refresh-capabilities
+        // is the user's explicit "redo everything" knob; partial discovery
+        // here would defeat its purpose.
+        result = await discoverTool(tool, c.cfg, llm, c.logger, true, deadline, reporter, true);
       } catch (e) {
         spinner.stop();
         ctx.printSystem(`'${tool}' failed: ${e instanceof Error ? e.message : String(e)}`);

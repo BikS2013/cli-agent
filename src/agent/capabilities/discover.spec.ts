@@ -211,6 +211,47 @@ describe('discoverTool — doc-exists shortcut', () => {
     extractSpy.mockRestore();
   });
 
+  it('forceFullInvestigation=true: bypasses skipLlmBelowBytes even for tiny --help', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
+
+    // Same setup as the "default skip" test (tiny help, threshold=4096),
+    // but pass forceFullInvestigation=true to assert the LLM still runs.
+    const runHelpMod = await import('./runHelp.js');
+    const extractMod = await import('./extractSubcommands.js');
+    const runHelpSpy = vi.spyOn(runHelpMod, 'runHelp').mockResolvedValue({
+      text: 'short help text — only flags here, no subcommands\n'.repeat(20),
+      truncated: false,
+    } as unknown as Awaited<ReturnType<typeof runHelpMod.runHelp>>);
+    const extractSpy = vi.spyOn(extractMod, 'extractSubcommands').mockResolvedValue([]);
+
+    vi.mocked(invalidate.getBinaryInfo).mockResolvedValueOnce({
+      resolvedPath: '/fake/bin/zip',
+      mtimeMs: 1000000,
+      versionString: 'zip 3.0',
+      versionHash: 'sha256:fake',
+    });
+
+    const events: string[] = [];
+    await discoverTool(
+      'zip',
+      makeCfg(tmpDir),                  // default skipLlmBelowBytes=4096
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      true,                             // forceRefresh
+      Date.now() + 60000,
+      (e) => events.push(e.kind),
+      true,                             // forceFullInvestigation ← under test
+    );
+
+    expect(extractSpy).toHaveBeenCalled();
+    expect(events).toContain('extract_start');
+    expect(events).toContain('extract_end');
+    expect(events).not.toContain('extract_skipped');
+
+    runHelpSpy.mockRestore();
+    extractSpy.mockRestore();
+  });
+
   it('skipLlmBelowBytes=0: even a tiny --help runs the LLM call', async () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
 

@@ -96,7 +96,9 @@
         Capability inspection
             /capabilities           Per-tool freshness column (✓ fresh / ⚠ stale / ✗ missing)
             /refresh-capabilities [&lt;tool&gt;] | /refresh-caps
-                                    Re-run capability discovery (single tool or all configured)
+                                    Re-run capability discovery (single tool or all configured).
+                                    Always performs the complete investigation including the
+                                    LLM extractor, bypassing the skipLlmBelowBytes fast path.
             /tool-help &lt;tool&gt; [&lt;sub&gt;] | /help-tool
                                     TUI twin of the runtime tool_help LLM tool
 
@@ -152,6 +154,10 @@
         cli-agent refresh-capabilities [--tool &lt;name&gt;]
             Re-run the --help introspection pass and regenerate the cached capability
             documents. If --tool is omitted, refreshes all tools declared in config.json.
+            This subcommand always performs the COMPLETE investigation including the LLM
+            extractor, regardless of how small the top-level --help happens to be — the
+            `capabilities.skipLlmBelowBytes` fast path is bypassed so a manual refresh
+            always produces a fully LLM-analyzed capability document.
 
         ## Capability Cache Behavior
 

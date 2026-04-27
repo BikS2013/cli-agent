@@ -41,7 +41,12 @@ export async function runRefreshCapabilities(
   const rows: Array<{ tool: string; status: string; bytes: number; durationMs: number }> = [];
 
   for (const tool of toolsToRefresh) {
-    const result = await discoverTool(tool, cfg, llm, logger, true, deadline, reporter);
+    // forceFullInvestigation=true → bypass the skipLlmBelowBytes fast
+    // path so the LLM extractor always runs, regardless of how small
+    // the top-level --help happens to be. `refresh-capabilities` is the
+    // user's explicit "redo everything" knob, so partial discovery here
+    // would defeat its purpose.
+    const result = await discoverTool(tool, cfg, llm, logger, true, deadline, reporter, true);
     rows.push({
       tool: result.tool,
       status: result.status,

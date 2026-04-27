@@ -92,7 +92,13 @@ stdout or exit 2 if the tool is not cached.
 ## FR-AGT-015: refresh-capabilities Subcommand
 
 `cli-agent refresh-capabilities [--tool <name>]` must re-run discovery for the named tool or
-all configured tools, printing a per-tool status table to stderr.
+all configured tools, printing a per-tool status table to stderr. The refresh path must
+perform the COMPLETE capability investigation, including the LLM extractor invocation,
+regardless of the size of the top-level `--help` output. The
+`capabilities.skipLlmBelowBytes` small-tool fast path that fires during normal startup
+discovery must be bypassed here so that an explicit user-driven refresh always produces a
+fully LLM-analyzed capability document. The TUI `/refresh-capabilities` slash command shares
+this contract.
 
 ## FR-AGT-016: Interactive Mode
 
