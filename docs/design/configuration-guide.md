@@ -237,6 +237,36 @@ Paths outside the root (including symlinks resolved outside) are rejected with
 Log files are stored at `~/.tool-agents/cli-agent/logs/session-<UTC>-<id>.jsonl`
 with mode 0600. The directory is created with mode 0700.
 
+## System prompt selection
+
+Three sources, all routed through the same resolver and the same precedence
+chain (CLI > env > config.json > default file path):
+
+| Source | How to set |
+|---|---|
+| CLI flag | `--system-prompt <path-or-name>` |
+| Env var  | `CLI_AGENT_SYSTEM_PROMPT=<path-or-name>` (in shell, agent `.env`, or local `.env`) |
+| config.json | `{ "systemPromptFile": "<path-or-name>" }` |
+| Default | seeded file at `~/.tool-agents/cli-agent/capabilities/system-prompt.md` |
+
+### `CLI_AGENT_SYSTEM_PROMPT`
+
+| Aspect | Value |
+|---|---|
+| Purpose | Selects the BASE system prompt file. Replaces the seeded default for the whole invocation. `--system` and `--system-file` continue to APPEND on top. |
+| Type | string (path or bare filename) |
+| Default | unset → use the seeded `system-prompt.md` |
+| Resolution | Absolute path → verbatim. Bare filename (no `/` or `\`) → joined onto `~/.tool-agents/cli-agent/capabilities/`. Relative path with separators → joined onto `process.cwd()`. |
+| How to obtain | Edit your own copy of the prompt, save it, then point this variable at it. The seeded default at `~/.tool-agents/cli-agent/capabilities/system-prompt.md` is a good starting point. |
+| Recommended storage | For per-machine defaults: `~/.tool-agents/cli-agent/.env`. For per-project overrides: a local `.env`. For one-off tests: the `--system-prompt` flag. |
+| Error mode | If the resolved path does not exist or is not readable, the agent exits with code 2 (UsageError). There is NO silent fallback to the built-in default — the built-in is only used to seed the default file on first run. |
+
+The seeded default file is written at mode `0600` and lives alongside the
+per-tool capability documents in the `capabilities/` folder. The agent will
+never enumerate that folder for tool discovery (it reads files by exact
+name), so the reserved filename `system-prompt.md` cannot collide with any
+wrapped CLI.
+
 ---
 
 ## TUI configuration

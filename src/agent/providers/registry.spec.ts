@@ -31,6 +31,9 @@ function makeBaseConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     webSearchBackend: 'tavily',
     bashAllow: [],
     bashPassSecrets: [],
+    systemPromptPath: '/tmp/.tool-agents/cli-agent/capabilities/system-prompt.md',
+    systemAppendText: undefined,
+    systemAppendFile: undefined,
     providerEnv: {
       OPENAI_API_KEY: 'sk-test',
       OPENAI_BASE_URL: undefined,

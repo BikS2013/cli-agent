@@ -7,7 +7,7 @@ import { buildAgentGraph } from '../../agent/graph.js';
 import { createLLM } from '../../agent/providers/registry.js';
 import { buildToolCatalog } from '../../agent/tools/registry.js';
 import { composeCapabilitiesSystemPrompt } from '../../agent/capabilities/compose-system-prompt.js';
-import { buildSystemPrompt } from '../../agent/system-prompt.js';
+import { buildSystemPromptForCfg } from '../../agent/system-prompt.js';
 
 const newCmd: SlashCommand = {
   name: '/new',
@@ -24,7 +24,7 @@ const newCmd: SlashCommand = {
       c.cfg.tools,
       c.cfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPrompt(capSection);
+    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection);
     c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, c.cfg.maxSteps);
     ctx.printSystem(`new thread started: ${c.threadId.slice(0, 8)}…`);
   },

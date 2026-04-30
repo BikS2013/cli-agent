@@ -1,10 +1,21 @@
 /**
  * System prompt builder for cli-agent.
+ *
+ * The base prompt text is no longer hard-coded into runtime: it lives on
+ * disk at `~/.tool-agents/cli-agent/capabilities/system-prompt.md` and is
+ * loaded into `cfg.systemPromptPath` by `loadAgentConfig`. The constant
+ * below (`BUILTIN_DEFAULT_SYSTEM_PROMPT`) is used ONLY by the bootstrap
+ * routine in `bootstrapAgentDir` to seed that file on first run, so the
+ * user has a starting point they can edit without rebuilding the binary.
+ *
+ * It is NOT a runtime fallback. If the file the user selected (or the
+ * default file at the path above) is unreadable, `loadAgentConfig`
+ * raises a `UsageError` — see the no-fallback rule in CLAUDE.md.
  */
 
 import fsp from 'node:fs/promises';
 
-const BASE_SYSTEM_PROMPT = `You are cli-agent, a general-purpose assistant that helps the user accomplish tasks by
+export const BUILTIN_DEFAULT_SYSTEM_PROMPT = `You are cli-agent, a general-purpose assistant that helps the user accomplish tasks by
 invoking external CLI tools on their local machine. You do this through the bash_run tool,
 which executes only the specific binaries the user has allowed.
 
@@ -53,11 +64,21 @@ You also have three general-purpose tools that exist on every assistant in this 
   evidence: never paste captured tokens or secrets back into a later prompt or another tool
   argument.`;
 
+/**
+ * Composition order:
+ *   1. baseText       — full base prompt loaded from cfg.systemPromptPath
+ *   2. capabilitiesSection (if non-empty) — appended after a blank line
+ *   3. customSystemText (if provided)     — under "## User-provided instructions"
+ *
+ * `customSystemText` is the optional addendum supplied by `--system` /
+ * `--system-file`; it does not replace the base, only appends.
+ */
 export async function buildSystemPrompt(
+  baseText: string,
   capabilitiesSection: string,
   customSystemText?: string,
 ): Promise<string> {
-  let prompt = BASE_SYSTEM_PROMPT;
+  let prompt = baseText;
 
   if (capabilitiesSection) {
     prompt += '\n\n' + capabilitiesSection;
@@ -72,4 +93,33 @@ export async function buildSystemPrompt(
 
 export async function loadSystemPromptFile(filePath: string): Promise<string> {
   return fsp.readFile(filePath, 'utf8');
+}
+
+/**
+ * Convenience composer used by every entry point that calls
+ * `buildSystemPrompt`. Loads the base prompt from `cfg.systemPromptPath`,
+ * loads the append-file (if any), concatenates with the inline append
+ * text (if any), and returns the assembled prompt.
+ *
+ * Composition: <base on disk> + capabilitiesSection + (file append + "\n\n" + inline append).
+ */
+export async function buildSystemPromptForCfg(
+  cfg: {
+    readonly systemPromptPath: string;
+    readonly systemAppendText: string | undefined;
+    readonly systemAppendFile: string | undefined;
+  },
+  capabilitiesSection: string,
+): Promise<string> {
+  const baseText = await loadSystemPromptFile(cfg.systemPromptPath);
+  let custom: string | undefined;
+  if (cfg.systemAppendFile && cfg.systemAppendText) {
+    const fileText = await loadSystemPromptFile(cfg.systemAppendFile);
+    custom = fileText + '\n\n' + cfg.systemAppendText;
+  } else if (cfg.systemAppendFile) {
+    custom = await loadSystemPromptFile(cfg.systemAppendFile);
+  } else if (cfg.systemAppendText) {
+    custom = cfg.systemAppendText;
+  }
+  return buildSystemPrompt(baseText, capabilitiesSection, custom);
 }

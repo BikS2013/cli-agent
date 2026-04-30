@@ -39,6 +39,7 @@ program
   .option('--env-file <path>', 'Path to .env file')
   .option('--max-steps <n>', 'Maximum ReAct steps', (v) => parseInt(v, 10))
   .option('--temperature <t>', 'Sampling temperature', (v) => parseFloat(v))
+  .option('--system-prompt <path-or-name>', 'Select the BASE system prompt file. Resolution: absolute path → verbatim; bare filename → joined onto <capabilitiesDir>; relative path with separators → joined onto cwd. Omit to use the seeded default at <capabilitiesDir>/system-prompt.md.')
   .option('--system <text>', 'Append text to system prompt')
   .option('--system-file <path>', 'Append file contents to system prompt')
   .option('--per-tool-budget <bytes>', 'Per-tool result byte budget', (v) => parseInt(v, 10))
@@ -87,6 +88,7 @@ program
         verbose: opts['verbose'] as boolean | undefined,
         system: opts['system'] as string | undefined,
         systemFile: opts['systemFile'] as string | undefined,
+        systemPromptFile: opts['systemPrompt'] as string | undefined,
       });
     });
   });

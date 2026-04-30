@@ -46,6 +46,38 @@ The system prompt must include the base rules, the standard cross-cutting tools 
 and the compiled capability sections. Documents exceeding `maxBytesPerTool` must be
 embedded as synopsis + TOC only, with the full body available on demand via `tool_help`.
 
+The base rules text must be loaded from disk at runtime (not from a TypeScript constant).
+Composition order: `<base text from cfg.systemPromptPath>` + `<capabilities section>` +
+`<--system-file contents>` + `<--system inline text>`. The `--system` and `--system-file`
+flags MUST NOT silently disappear when a custom base prompt is selected; they always
+append on top of whichever base is in effect.
+
+## FR-AGT-008a: External Default System Prompt with Selectable Override
+
+The default system prompt must live on disk as a regular file the user can edit, not as
+a hard-coded string in the binary. On first run the agent must seed
+`~/.tool-agents/cli-agent/capabilities/system-prompt.md` with the built-in default
+(mode `0600`); on subsequent runs the file on disk is the source of truth.
+
+A new CLI flag `--system-prompt <path-or-name>` must select the BASE system prompt
+according to these resolution rules:
+
+| Input form                   | Resolution                                      |
+|------------------------------|-------------------------------------------------|
+| Absolute path                | Used verbatim.                                  |
+| Bare filename (no separator) | Joined onto `cfg.capabilitiesDir`.              |
+| Relative path with separator | Joined onto `process.cwd()`.                    |
+| Flag omitted                 | `<capabilitiesDir>/system-prompt.md` (default). |
+
+The selection must also be configurable via the env var `CLI_AGENT_SYSTEM_PROMPT` and
+the `config.json` key `systemPromptFile`, participating in the standard four-tier
+precedence chain (CLI flag > env (any tier) > config.json > default file path).
+
+If the resolved path is missing or unreadable, the agent must raise a `UsageError`
+(exit code 2) with a message naming the raw input value, the fully resolved absolute
+path, and the resolution rules. There must be NO silent fallback to the built-in
+default — the built-in is used only as the bootstrap seed for the default file.
+
 ## FR-AGT-009: Standard Cross-Cutting Tools
 
 The agent must ship with: `file_read`, `file_list`, `file_write`, `file_edit`, `file_append`,

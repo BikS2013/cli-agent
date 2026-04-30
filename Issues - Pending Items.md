@@ -12,11 +12,6 @@
 - A full robots.txt parser (honoring `Disallow: /path`, `User-agent:` sections, `Crawl-delay`, etc.)
   is deferred as it requires a dependency or significant custom parsing logic.
 
-### [LOW] `--system` and `--system-file` flags parsed but not passed to buildSystemPrompt
-- The CLI accepts `--system <text>` and `--system-file <path>` flags but `runAgentCommand`
-  does not yet forward them to `buildSystemPrompt`. The system prompt always uses the base
-  template only. Fix: pass `opts.system` / read `opts.systemFile` and forward to `buildSystemPrompt`.
-
 ### [LOW] `config.json` not auto-seeded on first run
 - If `~/.tool-agents/cli-agent/config.json` does not exist, the agent starts without defaults
   (throws if `provider` is not provided by any other source). The guide says to copy
@@ -45,6 +40,13 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — `--system` / `--system-file` flags now wired through buildSystemPrompt
+- `cfg.systemAppendText` and `cfg.systemAppendFile` are populated by `loadAgentConfig`.
+  All six `buildSystemPrompt` call sites switched to the new helper
+  `buildSystemPromptForCfg()` in `src/agent/system-prompt.ts`, which loads the base
+  text from `cfg.systemPromptPath` and composes the file/inline addenda on top.
+  Closed as part of the externalize-system-prompt change (FR-AGT-008a).
 
 ### Done — see plan-002-tui.md
 - `[MEDIUM] llm_chunk events not yet wired to streaming` — closed by plan-002.

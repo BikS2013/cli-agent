@@ -104,6 +104,42 @@ the cache is invalidated. `--refresh-capabilities` bypasses the cache entirely.
 
 The USER-NOTES section is preserved byte-for-byte across re-introspection.
 
+The same folder also stores ONE non-tool file: `system-prompt.md` (mode 0600), which
+holds the externalized BASE system prompt (see Section 5a). The capability cache
+addresses files by exact tool name (`<tool>.md`), so this reserved name does not
+participate in tool discovery and does not collide with any real wrapped CLI.
+
+## 5a. External System Prompt
+
+The base system prompt is loaded at runtime from a file on disk, not from a TypeScript
+constant. Default location: `~/.tool-agents/cli-agent/capabilities/system-prompt.md`.
+The agent seeds this file with the built-in default (`BUILTIN_DEFAULT_SYSTEM_PROMPT`)
+on first run; thereafter, the file on disk is the source of truth — users edit it to
+change the agent's behavior without rebuilding.
+
+The user can override the base file via:
+
+  - CLI flag `--system-prompt <path-or-name>`
+  - env var `CLI_AGENT_SYSTEM_PROMPT`
+  - config.json key `systemPromptFile`
+
+Resolution rules (same for all three sources):
+
+  1. Absolute path                → used verbatim
+  2. Bare filename                → joined onto `cfg.capabilitiesDir`
+  3. Relative path with separator → joined onto `process.cwd()`
+
+`loadAgentConfig` resolves the value, then verifies the file is readable; missing or
+unreadable files raise `UsageError` (exit 2). The built-in constant is the bootstrap
+seed only — it is NEVER used as a runtime fallback.
+
+`--system <text>` and `--system-file <path>` continue to APPEND on top of whichever
+base prompt is selected. Composition is centralized in `buildSystemPromptForCfg()`
+(`src/agent/system-prompt.ts`) so all six call sites — the four agent runners in
+`src/agent/run.ts` and the five TUI slash commands that rebuild the graph
+(`/new`, `/model`, `/provider`, `/tools`, `/allow-mutations`) — get identical
+composition behavior.
+
 ## 6. Logging Schema
 
 Eight mandatory event kinds: `session_start`, `user_prompt`, `llm_chunk`, `llm_final`,

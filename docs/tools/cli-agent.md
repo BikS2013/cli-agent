@@ -22,7 +22,8 @@
           [--env-file &lt;path&gt;]
           [--max-steps &lt;n&gt;]
           [--temperature &lt;t&gt;]
-          [--system &lt;text&gt; | --system-file &lt;path&gt;]
+          [--system-prompt &lt;path-or-name&gt;]    # select BASE prompt file; replaces default
+          [--system &lt;text&gt; | --system-file &lt;path&gt;]   # APPEND on top of base
           [--per-tool-budget &lt;bytes&gt;]
           [--allow-mutations]
           [--bash-allow &lt;csv&gt;]
@@ -177,6 +178,44 @@
             only way to refresh the cache; the agent does NOT auto-detect
             binary upgrades.
 
+        The capabilities folder also stores ONE non-tool file:
+
+          - `system-prompt.md` — the BASE system prompt (see "System Prompt
+            Selection" below). The agent reads tool capability documents by
+            exact filename match (`&lt;tool&gt;.md`), so this reserved name does
+            NOT collide with any wrapped CLI unless someone literally wraps
+            a CLI named `system-prompt`.
+
+        ## System Prompt Selection
+
+        The base system prompt — the long instruction block that establishes
+        the agent's persona, rules, and tool inventory — lives on disk at:
+
+          ~/.tool-agents/cli-agent/capabilities/system-prompt.md  (mode 0600)
+
+        On first run, the agent seeds this file with the built-in default. On
+        subsequent runs, the file on disk is the source of truth — edit it to
+        change how the agent behaves, no rebuild required.
+
+        To use a DIFFERENT base prompt for a single invocation (or always),
+        pass `--system-prompt &lt;path-or-name&gt;`:
+
+          - absolute path             → used verbatim
+          - bare filename             → resolved against the capabilities folder
+          - relative path with slash  → resolved against the current working dir
+
+        Equivalent env var: `CLI_AGENT_SYSTEM_PROMPT`.
+        Equivalent config.json key: `systemPromptFile`.
+        Precedence: CLI flag &gt; env (any tier) &gt; config.json &gt; default file path.
+
+        If the resolved path is missing or unreadable, the agent exits with
+        code 2 (UsageError) — no silent fallback to the built-in default. The
+        built-in default is used ONLY as the bootstrap seed.
+
+        `--system &lt;text&gt;` and `--system-file &lt;path&gt;` continue to APPEND on
+        top of whichever base prompt is selected, under a `## User-provided
+        instructions` section.
+
         ## CLI Parameters
 
         --tool &lt;name&gt;
@@ -208,11 +247,28 @@
         --temperature &lt;t&gt;
             Sampling temperature passed to the LLM API. Float in [0, 2].
 
+        --system-prompt &lt;path-or-name&gt;
+            Select the BASE system prompt file (replaces today's hard-coded default).
+            Resolution rules:
+              - absolute path             → used verbatim
+              - bare filename (no slash)  → joined onto &lt;capabilitiesDir&gt;
+              - relative path with slash  → joined onto cwd
+            Omit the flag to use the seeded default at
+              &lt;capabilitiesDir&gt;/system-prompt.md
+            (the agent writes the built-in default to that path on first run, so users
+            can edit it without rebuilding). If the resolved path does not exist, the
+            agent exits with code 2 (UsageError) — no silent fallback to the built-in.
+            Equivalent env var: CLI_AGENT_SYSTEM_PROMPT (same resolution rules).
+            Equivalent config.json key: systemPromptFile (string).
+            Precedence: CLI flag &gt; env &gt; config.json &gt; default file path.
+
         --system &lt;text&gt;
-            Append extra text to the system prompt (inline form).
+            Append extra text to the system prompt (inline form). Composes ON TOP
+            of whichever base prompt --system-prompt selected.
 
         --system-file &lt;path&gt;
-            Append the contents of a file to the system prompt.
+            Append the contents of a file to the system prompt. Composes ON TOP
+            of whichever base prompt --system-prompt selected.
 
         --per-tool-budget &lt;bytes&gt;
             Override capabilities.maxBytesPerTool for this invocation.

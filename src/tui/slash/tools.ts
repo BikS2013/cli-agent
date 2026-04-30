@@ -16,7 +16,7 @@ import { createLLM } from '../../agent/providers/registry.js';
 import { buildToolCatalog } from '../../agent/tools/registry.js';
 import { discoverTool } from '../../agent/capabilities/discover.js';
 import { composeCapabilitiesSystemPrompt } from '../../agent/capabilities/compose-system-prompt.js';
-import { buildSystemPrompt } from '../../agent/system-prompt.js';
+import { buildSystemPromptForCfg } from '../../agent/system-prompt.js';
 import { agentToolAgentsDir } from '../../config/agent-config.js';
 import { BOLD, DIM, RESET } from '../ansi.js';
 
@@ -44,7 +44,7 @@ async function rebuildGraph(c: import('../controller.js').TuiController): Promis
     newCfg.tools,
     newCfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPrompt(capSection);
+  const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection);
   c.cfg = newCfg;
   c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps);
 }

@@ -8,7 +8,7 @@ import type { AgentConfig } from '../config/agent-config.js';
 import { agentToolAgentsDir, isLoggingDisabledByEnv } from '../config/agent-config.js';
 import { createLLM } from './providers/registry.js';
 import { buildToolCatalog } from './tools/registry.js';
-import { buildSystemPrompt, loadSystemPromptFile } from './system-prompt.js';
+import { buildSystemPromptForCfg } from './system-prompt.js';
 import { buildAgentGraph, runOneShot, streamOneShot, type AgentStreamEvent, type AgentGraph } from './graph.js';
 import { createLogger, CLI_VERSION } from './logging.js';
 import { discoverAllTools, defaultDiscoveryReporter } from './capabilities/discover.js';
@@ -33,19 +33,15 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
 
-  // Build system prompt
+  // Build system prompt (base loaded from cfg.systemPromptPath; --system /
+  // --system-file additions composed on top by buildSystemPromptForCfg).
   const capSection = await composeCapabilitiesSystemPrompt(
     cfg.capabilitiesDir,
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
 
-  let customText: string | undefined;
-  if (cfg.baseUrl === undefined) {
-    // Check for system prompt flag — access via config if stored
-  }
-
-  const systemPrompt = await buildSystemPrompt(capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
 
   logger.log({
     kind: 'session_start',
@@ -138,7 +134,7 @@ export async function* streamOneShotAgent(
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPrompt(capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
 
   logger.log({
     kind: 'session_start',
@@ -238,7 +234,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPrompt(capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
 
   logger.log({
     kind: 'session_start',
@@ -277,7 +273,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPrompt(capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
 
   logger.log({
     kind: 'session_start',

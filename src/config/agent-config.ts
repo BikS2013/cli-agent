@@ -16,7 +16,8 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { ConfigurationError, ProviderNotSupportedError } from '../errors.js';
+import { ConfigurationError, ProviderNotSupportedError, UsageError } from '../errors.js';
+import { BUILTIN_DEFAULT_SYSTEM_PROMPT } from '../agent/system-prompt.js';
 
 export const AGENT_TOOL_NAME = 'cli-agent';
 
@@ -91,6 +92,9 @@ export interface AgentConfigFile {
   readonly bash?: BashConfig;
   readonly webSearch?: WebSearchConfig;
   readonly fileEdit?: FileEditConfig;
+  /** Selects the BASE system prompt file. Same resolution rules as the
+   * `--system-prompt` CLI flag (absolute / bare filename / relative). */
+  readonly systemPromptFile?: string;
 }
 
 /** Frozen provider env snapshot — factories read only from this. */
@@ -140,6 +144,14 @@ export interface AgentConfig {
   readonly webSearchBackend: string | undefined;
   readonly bashAllow: ReadonlyArray<string>;
   readonly bashPassSecrets: ReadonlyArray<string>;
+  /** Absolute path to the BASE system prompt file. Always populated and
+   * always existing on disk — `loadAgentConfig` raises a `UsageError` if
+   * the user-selected file is unreadable. */
+  readonly systemPromptPath: string;
+  /** Optional inline addendum (`--system <text>`). Appended verbatim. */
+  readonly systemAppendText: string | undefined;
+  /** Optional file addendum (`--system-file <path>`). Read by callers. */
+  readonly systemAppendFile: string | undefined;
 }
 
 /** CLI flags. */
@@ -167,6 +179,13 @@ export interface AgentCliFlags {
   readonly refreshCapabilities?: boolean;
   readonly system?: string;
   readonly systemFile?: string;
+  /** Selects the BASE system prompt file. Three resolution forms:
+   *   absolute path → use verbatim
+   *   bare filename → resolved against `cfg.capabilitiesDir`
+   *   relative path with separators → resolved against `process.cwd()`
+   * Omitting the flag falls through to env / config.json / the seeded
+   * default at `<capabilitiesDir>/system-prompt.md`. */
+  readonly systemPromptFile?: string;
 }
 
 /* ---------- Paths ---------- */
@@ -181,6 +200,16 @@ export function agentDotEnvPath(override?: string): string {
 
 export function agentCapabilitiesDir(): string {
   return path.join(agentToolAgentsDir(), 'capabilities');
+}
+
+/** Reserved filename inside capabilitiesDir for the BASE system prompt.
+ * The capability cache reads files by exact tool name (`<tool>.md`) so
+ * this only collides if someone wraps a CLI literally named
+ * `system-prompt` — accepted edge case. */
+export const SYSTEM_PROMPT_FILENAME = 'system-prompt.md';
+
+export function defaultSystemPromptPath(): string {
+  return path.join(agentCapabilitiesDir(), SYSTEM_PROMPT_FILENAME);
 }
 
 export function agentLogsDir(): string {
@@ -210,6 +239,25 @@ export async function bootstrapAgentDir(dir?: string): Promise<void> {
     await fsp.access(envPath, fs.constants.F_OK);
     envExists = true;
   } catch { envExists = false; }
+
+  // Seed system-prompt.md only if absent. Built-in default is the
+  // bootstrap source; it is NOT a runtime fallback (see system-prompt.ts).
+  const systemPromptPath = path.join(capabilitiesDir, SYSTEM_PROMPT_FILENAME);
+  let systemPromptExists = false;
+  try {
+    await fsp.access(systemPromptPath, fs.constants.F_OK);
+    systemPromptExists = true;
+  } catch { systemPromptExists = false; }
+
+  if (!systemPromptExists) {
+    try {
+      await fsp.writeFile(systemPromptPath, BUILTIN_DEFAULT_SYSTEM_PROMPT, { mode: 0o600, flag: 'wx' });
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code !== 'EEXIST') throw e;
+    }
+  }
+  try { await fsp.chmod(systemPromptPath, 0o600); } catch { /* tolerated */ }
 
   if (!envExists) {
     // Seed with all placeholders commented — never write real values
@@ -269,6 +317,10 @@ export async function bootstrapAgentDir(dir?: string): Promise<void> {
       '#',
       '# --- Logging ---',
       '# CLI_AGENT_LOG=',
+      '#',
+      '# --- System prompt selection ---',
+      '# Absolute path, bare filename (resolved under capabilities/), or relative path.',
+      '# CLI_AGENT_SYSTEM_PROMPT=',
       '',
     ].join('\n');
     try {
@@ -369,6 +421,7 @@ const OTHER_ENV_KEYS = [
   'WEB_SEARCH_BACKEND', 'BASH_ALLOWED_COMMANDS', 'FILE_EDIT_ROOT', 'CLI_AGENT_LOG',
   'WEB_SEARCH_URL', 'WEB_SEARCH_API_KEY',
   'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'BRAVE_API_KEY', 'WEB_SEARCH_MAX_REQUESTS',
+  'CLI_AGENT_SYSTEM_PROMPT',
 ] as const;
 
 const ALL_ENV_KEYS = [...PROVIDER_ENV_KEYS, ...OTHER_ENV_KEYS] as const;
@@ -411,6 +464,33 @@ async function readBashAllowFile(filePath: string): Promise<string[]> {
     if ((e as { code?: string }).code === 'ENOENT') return [];
     throw e;
   }
+}
+
+/* ---------- System prompt path resolution ---------- */
+
+/**
+ * Resolve the user-supplied `--system-prompt` value (or its env / config
+ * equivalent) into an absolute path. Three rules:
+ *   1. Absolute path → used verbatim.
+ *   2. Bare filename (no path separator)  → joined onto capabilitiesDir.
+ *   3. Relative path with separators       → resolved against `cwd`.
+ * Returns the absolute path. Does NOT check for existence — caller does.
+ */
+export function resolveSystemPromptPath(
+  raw: string,
+  capabilitiesDir: string,
+  cwd: string,
+): string {
+  if (path.isAbsolute(raw)) return raw;
+  // A bare filename is one whose basename equals itself — i.e. no path
+  // separator anywhere. `path.sep` differs by platform; check both `/`
+  // and `\` so Windows-style separators in user input also count as a
+  // relative path rather than a bare filename.
+  const hasSeparator = raw.includes('/') || raw.includes('\\');
+  if (!hasSeparator) {
+    return path.join(capabilitiesDir, raw);
+  }
+  return path.resolve(cwd, raw);
 }
 
 /* ---------- Main loader ---------- */
@@ -531,6 +611,46 @@ export async function loadAgentConfig(
     fileEditConfig.root ??
     cwd;
 
+  // System prompt selection (precedence: CLI flag > env > config.json >
+  // bootstrapped default at <capabilitiesDir>/system-prompt.md). Whichever
+  // wins, the resolved absolute path must exist; otherwise UsageError.
+  const capabilitiesDir = path.join(agentDir, 'capabilities');
+  const systemPromptRaw =
+    flags.systemPromptFile ??
+    layered['CLI_AGENT_SYSTEM_PROMPT'] ??
+    configFile?.systemPromptFile;
+  let systemPromptPath: string;
+  if (systemPromptRaw && systemPromptRaw.length > 0) {
+    systemPromptPath = resolveSystemPromptPath(systemPromptRaw, capabilitiesDir, cwd);
+    try {
+      await fsp.access(systemPromptPath, fs.constants.R_OK);
+    } catch {
+      throw new UsageError(
+        `System prompt file not found or not readable.\n` +
+        `  raw value: ${systemPromptRaw}\n` +
+        `  resolved path: ${systemPromptPath}\n` +
+        `  resolution rules: absolute path → verbatim; bare filename → joined onto ${capabilitiesDir}; ` +
+        `relative path with separators → joined onto ${cwd}.`,
+        { rawValue: systemPromptRaw, resolvedPath: systemPromptPath },
+      );
+    }
+  } else {
+    // Default — bootstrapped at agent-dir setup; readability checked here too
+    // because a hostile user could have removed it between bootstrap and now.
+    systemPromptPath = path.join(capabilitiesDir, SYSTEM_PROMPT_FILENAME);
+    try {
+      await fsp.access(systemPromptPath, fs.constants.R_OK);
+    } catch {
+      throw new UsageError(
+        `Default system prompt file is missing.\n` +
+        `  expected at: ${systemPromptPath}\n` +
+        `  the file is normally seeded on first run; restore it from the built-in default ` +
+        `or pass --system-prompt <path>.`,
+        { resolvedPath: systemPromptPath },
+      );
+    }
+  }
+
   return {
     provider,
     model,
@@ -555,6 +675,9 @@ export async function loadAgentConfig(
     webSearchBackend,
     bashAllow: mergedBashAllow,
     bashPassSecrets: flags.bashPassSecret ?? [],
+    systemPromptPath,
+    systemAppendText: flags.system,
+    systemAppendFile: flags.systemFile,
   };
 }
 

@@ -9,7 +9,7 @@ import { buildAgentGraph } from '../../agent/graph.js';
 import { createLLM } from '../../agent/providers/registry.js';
 import { buildToolCatalog } from '../../agent/tools/registry.js';
 import { composeCapabilitiesSystemPrompt } from '../../agent/capabilities/compose-system-prompt.js';
-import { buildSystemPrompt } from '../../agent/system-prompt.js';
+import { buildSystemPromptForCfg } from '../../agent/system-prompt.js';
 
 const allowMutCmd: SlashCommand = {
   name: '/allow-mutations',
@@ -29,7 +29,7 @@ const allowMutCmd: SlashCommand = {
       newCfg.tools,
       newCfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPrompt(capSection);
+    const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection);
     c.cfg = newCfg;
     c.sessionAllowMutations = newCfg.allowMutations;
     c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps);
