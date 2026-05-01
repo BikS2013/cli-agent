@@ -21,7 +21,7 @@
  * are extracted so the line-editor regression tests can drive them directly.
  */
 
-import { GREEN, RESET, CLEAR_LINE, cursorUp, cursorDown, cursorLeft } from '../ansi.js';
+import { GREEN, RESET, CLEAR_LINE, cursorUp, cursorDown, cursorRight } from '../ansi.js';
 import { createUtf8Decoder, type Utf8Decoder } from '../utf8.js';
 
 export interface ReadInputOptions {
@@ -32,7 +32,8 @@ export interface ReadInputOptions {
   readonly stdout?: NodeJS.WriteStream;
 }
 
-interface EditorState {
+/** Exported for tests. */
+export interface EditorState {
   lines: string[];
   /** Logical column within the current line (UTF-16 code-unit count, mirrors String.length). */
   col: number;
@@ -145,59 +146,125 @@ function insertChar(state: EditorState, ch: string): void {
 }
 
 /**
+ * Number of terminal rows a single rendered line occupies, given its prompt
+ * width, content visual width, and the terminal's column count. A line that
+ * fills `cols` exactly visually occupies one row in most terminals (the
+ * cursor parks at the "phantom column" until the next char arrives) — we
+ * round up so we still clear/redraw the second row when one exists.
+ */
+function rowsForLine(promptWidth: number, contentWidth: number, cols: number): number {
+  if (cols <= 0) return 1;
+  const total = promptWidth + contentWidth;
+  if (total === 0) return 1;
+  return Math.max(1, Math.ceil(total / cols));
+}
+
+/** Resolve the terminal column count, with a sane default for non-TTY streams. */
+function getCols(out: NodeJS.WriteStream): number {
+  const c = (out as { columns?: number }).columns;
+  return typeof c === 'number' && c > 0 ? c : 80;
+}
+
+/**
  * Re-render the buffer from the prompt position.
  *
- * Strategy: walk back to the prompt origin (number of buffer lines − row), clear
- * each line, redraw all lines, then position cursor on the right line + column.
+ * IMPORTANT: this routine tracks **terminal rows**, not logical lines. A
+ * single logical line whose visual width plus prompt exceeds the terminal
+ * column count wraps to two or more terminal rows; the previous version of
+ * this function conflated the two and left a trail of stale prompts behind
+ * each keystroke once a line wrapped (visible bug: Greek/long input would
+ * smear copies of `You> ...` across the screen).
  *
- * Returns the number of lines we are now occupying (useful for the caller to
- * track when transitioning into agent output).
+ * Strategy:
+ *   1. Move cursor to the top-left of the previous render (using
+ *      `prevTermRows`, the row count returned by the previous call).
+ *   2. Clear every terminal row we previously occupied.
+ *   3. Move back to the top.
+ *   4. Redraw all logical lines as before — the terminal handles the wrap.
+ *   5. Position the cursor by computing the target terminal row/column
+ *      from the active logical line + col + prompt width + terminal cols.
+ *   6. Return the new terminal row count for the next call.
+ *
+ * Caveat: this still does not react to mid-edit terminal resizes (SIGWINCH).
+ * If `process.stdout.columns` changes between calls, the clear math will be
+ * wrong. A SIGWINCH-driven full clear is a separate enhancement.
  */
 export function redrawCurrentLine(
   state: EditorState,
   prompt: string,
   continuationPrompt: string,
   out: NodeJS.WriteStream,
-  prevLines: number,
+  prevTermRows: number,
 ): number {
-  // Move to top of previous render
-  if (prevLines > 1) {
-    out.write(cursorUp(prevLines - 1));
+  const cols = getCols(out);
+
+  // Move to top of previous render and clear every row we occupied.
+  if (prevTermRows > 1) {
+    out.write(cursorUp(prevTermRows - 1));
   }
   out.write('\r');
-  // Clear all lines we previously occupied
-  for (let i = 0; i < prevLines; i++) {
+  for (let i = 0; i < prevTermRows; i++) {
     out.write(CLEAR_LINE);
-    if (i < prevLines - 1) out.write('\n');
+    if (i < prevTermRows - 1) out.write('\n');
   }
-  // Move back to top
-  if (prevLines > 1) {
-    out.write(cursorUp(prevLines - 1));
+  if (prevTermRows > 1) {
+    out.write(cursorUp(prevTermRows - 1));
   }
   out.write('\r');
 
-  // Draw all lines
+  // Draw all logical lines — terminal handles soft-wrap.
+  const promptWFirst = visualWidth(prompt);
+  const promptWCont = visualWidth(continuationPrompt);
   for (let i = 0; i < state.lines.length; i++) {
     const p = i === 0 ? prompt : continuationPrompt;
     out.write(p + state.lines[i]!);
     if (i < state.lines.length - 1) out.write('\n');
   }
 
-  // Position cursor on the right line + column
-  const linesAfter = state.lines.length - 1 - state.row;
-  if (linesAfter > 0) {
-    out.write(cursorUp(linesAfter));
-  }
-  // Cursor is at end of the active line; move it to col + prompt-width
-  const promptWidth = state.row === 0 ? visualWidth(prompt) : visualWidth(continuationPrompt);
-  const lineLen = state.lines[state.row]!.length;
-  const desiredCol = promptWidth + state.col;
-  const currentCol = promptWidth + lineLen;
-  if (currentCol > desiredCol) {
-    out.write(cursorLeft(currentCol - desiredCol));
+  // Compute total terminal rows the new render occupies.
+  let totalTermRows = 0;
+  for (let i = 0; i < state.lines.length; i++) {
+    const pw = i === 0 ? promptWFirst : promptWCont;
+    totalTermRows += rowsForLine(pw, state.lines[i]!.length, cols);
   }
 
-  return state.lines.length;
+  // Compute the target cursor position in terminal-row / terminal-col space.
+  let targetRowAbs = 0;
+  for (let i = 0; i < state.row; i++) {
+    const pw = i === 0 ? promptWFirst : promptWCont;
+    targetRowAbs += rowsForLine(pw, state.lines[i]!.length, cols);
+  }
+  const promptWidthForActive = state.row === 0 ? promptWFirst : promptWCont;
+  const cursorVisualOffset = promptWidthForActive + state.col;
+  const subRow = Math.floor(cursorVisualOffset / cols);
+  const targetCol = cursorVisualOffset % cols;
+  targetRowAbs += subRow;
+
+  // After drawing, terminal cursor is at the END of the LAST logical line.
+  // That position is (totalTermRows - 1) at column ((promptWLast + lastW) % cols),
+  // unless the last line wraps exactly at `cols` (in which case the cursor is
+  // on the same row, at the phantom column — same row index for our purposes).
+  const lastIdx = state.lines.length - 1;
+  const lastPW = lastIdx === 0 ? promptWFirst : promptWCont;
+  const lastVisual = lastPW + state.lines[lastIdx]!.length;
+  const lastWraps = cols > 0 && lastVisual > 0 && lastVisual % cols === 0;
+  const currentRowAbs = totalTermRows - 1;
+  const currentCol = lastWraps ? cols : lastVisual % cols;
+
+  // Move vertically.
+  const rowDelta = currentRowAbs - targetRowAbs;
+  if (rowDelta > 0) {
+    out.write(cursorUp(rowDelta));
+  } else if (rowDelta < 0) {
+    out.write(cursorDown(-rowDelta));
+  }
+  // Snap horizontally: \r → col 0, then advance to targetCol.
+  out.write('\r');
+  if (targetCol > 0) {
+    out.write(cursorRight(targetCol));
+  }
+
+  return totalTermRows;
 }
 
 /** ANSI-aware visual width — strips CSI/SS3 sequences. */

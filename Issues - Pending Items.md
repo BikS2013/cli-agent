@@ -2,6 +2,17 @@
 
 ## Pending
 
+### [LOW] TUI does not react to terminal resize (SIGWINCH) mid-edit
+- The wrap-redraw fix tracks terminal rows correctly given the current `process.stdout.columns`
+  value, but if the user resizes the terminal between two keystrokes the previous render's row
+  count was computed against the old width. The next redraw's clear math will be off by however
+  many rows the resize introduced or removed, leaving stale text or over-clearing real output.
+- Suggested fix: subscribe to `process.stdout.on('resize', ...)` and on each event call
+  `redrawCurrentLine` with `prevTermRows = 1` after first issuing a clear-screen-from-cursor-down
+  (`\x1b[J`). Or: reset the editor's `prevTermRows` cache to `state.lines.length` on resize.
+- Workaround for users: avoid resizing the terminal while editing; press Enter or Ctrl+C to
+  resync.
+
 ### [LOW] Suggest hardening the asset-copy postbuild step
 - `scripts/copy-vendored-assets.mjs` (added during Phase 10 verification) walks `src/`
   and copies `.md` / `.txt` / `.json` files into `dist/` so the vendored
@@ -71,6 +82,28 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — TUI input renderer smeared `You> ...` lines when input wrapped past terminal width
+- **Symptom**: typing a long line (e.g. Greek prose past ~80 chars) produced a cascade of duplicate
+  `You> ...` lines, one per keystroke, growing across the screen.
+- **Root cause**: `redrawCurrentLine` (`src/tui/input/line-editor.ts`) tracked `state.lines.length`
+  — the count of *logical* lines (split on user-pressed newlines) — and used that as the count of
+  terminal rows it had previously occupied. When a logical line was longer than `process.stdout.columns`
+  it soft-wrapped to multiple terminal rows, but `prevLines` stayed `1`, so only one row was cleared
+  per redraw. Subsequent redraws started one row below the previous content, leaving stale prompt
+  copies above.
+- **Fix**: `redrawCurrentLine` now tracks **terminal rows**, computing
+  `ceil((promptWidth + contentWidth) / cols)` per logical line. The clear loop, the cursor-positioning
+  math, and the returned row count all use this terminal-row metric. Cursor is positioned with
+  `cursorUp` + `\r` + `cursorRight(targetCol)` instead of relying on `cursorLeft` from end-of-line
+  (which broke once the end-of-line wrapped).
+- **Regression coverage**: `src/tui/input/line-editor-wrap.spec.ts` — 9 tests covering wrap math,
+  Greek BMP input, multi-line buffer with one wrapped line, phantom-column boundary, non-TTY stdout,
+  and the second-redraw clear count (the exact failure mode of the original bug).
+- **Limitation deferred**: SIGWINCH (terminal resize mid-edit) is not yet handled. If `columns`
+  changes between two `redrawCurrentLine` calls, the clear math reverts to using the previous
+  call's row count. Suggested follow-up: subscribe to the `resize` event on `process.stdout` and
+  force a full clear-and-redraw.
 
 ### Done — Subcommand `--tool` flag shadowed by parent's repeatable `--tool` option (Commander.js)
 - **Symptom**: `cli-agent refresh-capabilities --tool <name>` (and `show-capabilities --tool <name>`)
