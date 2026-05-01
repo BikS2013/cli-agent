@@ -26,7 +26,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
   const threadId = randomUUID();
 
   const llm = createLLM(cfg);
-  const tools = buildToolCatalog(cfg, logger);
+  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
   // Capability discovery
   if (cfg.tools.length > 0) {
@@ -41,7 +41,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
     cfg.capabilities.maxBytesPerTool,
   );
 
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
 
   logger.log({
     kind: 'session_start',
@@ -68,7 +68,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
     );
   }
 
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps);
+  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 
   let answer: string;
   let terminatedByError = false;
@@ -123,7 +123,7 @@ export async function* streamOneShotAgent(
   const threadId = randomUUID();
 
   const llm = createLLM(cfg);
-  const tools = buildToolCatalog(cfg, logger);
+  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
@@ -134,7 +134,7 @@ export async function* streamOneShotAgent(
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
 
   logger.log({
     kind: 'session_start',
@@ -161,7 +161,7 @@ export async function* streamOneShotAgent(
     );
   }
 
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps);
+  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 
   let assembled = '';
   let terminatedByError = false;
@@ -223,7 +223,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
   const sessionId = logger.currentSessionId;
 
   const llm = createLLM(cfg);
-  const tools = buildToolCatalog(cfg, logger);
+  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
@@ -234,7 +234,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
 
   logger.log({
     kind: 'session_start',
@@ -247,7 +247,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
     cliVersion: CLI_VERSION,
   });
 
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps);
+  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
   return { agentGraph, logger, sessionId };
 }
 
@@ -262,7 +262,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
   let threadId = randomUUID();
 
   const llm = createLLM(cfg);
-  const tools = buildToolCatalog(cfg, logger);
+  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
@@ -273,7 +273,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
 
   logger.log({
     kind: 'session_start',
@@ -286,7 +286,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     cliVersion: CLI_VERSION,
   });
 
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps);
+  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 
   process.stdout.write(`cli-agent interactive session (provider: ${cfg.provider}, model: ${cfg.model})\n`);
   process.stdout.write('Type your message, /exit to quit, /reset to start a new conversation.\n\n');

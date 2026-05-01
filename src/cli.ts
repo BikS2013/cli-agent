@@ -19,6 +19,13 @@ import { runShowCapabilities } from './commands/show-capabilities.js';
 import { runRefreshCapabilities } from './commands/refresh-capabilities.js';
 import { CliAgentError } from './errors.js';
 import { redactString } from './util/redact.js';
+import { mapAgentToolFlags } from './cli-agent-tools-flags.js';
+
+// Re-export so existing import sites (and downstream tooling) can continue
+// to load `mapAgentToolFlags` from the cli module if they wish, but tests
+// should import it directly from `./cli-agent-tools-flags.js` to avoid
+// triggering the Commander parse side-effect at the bottom of this file.
+export { mapAgentToolFlags };
 
 const program = new Command();
 
@@ -55,6 +62,22 @@ program
   .option('--introspect-skip-llm-below-bytes <n>', 'Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)', (v) => parseInt(v, 10))
   .option('--refresh-capabilities', 'Force regenerate cached capability docs', false)
   .option('--verbose', 'Emit structured debug logs to stderr', false)
+  // ---- Agent-tools pack (umbrella) ----
+  .option('--agent-tools', 'Enable the agent-tools pack umbrella (default; rarely needed)')
+  .option('--no-agent-tools', 'Disable the agent-tools pack umbrella (no agt_* tools registered)')
+  // ---- Agent-tools pack (per-tool) ----
+  .option('--enable-agt-glob', 'Enable agt_glob (default-on)')
+  .option('--disable-agt-glob', 'Disable agt_glob')
+  .option('--enable-agt-grep', 'Enable agt_grep (default-on)')
+  .option('--disable-agt-grep', 'Disable agt_grep')
+  .option('--enable-agt-multiedit', 'Enable agt_multiedit (default-on; mutation-gated)')
+  .option('--disable-agt-multiedit', 'Disable agt_multiedit')
+  .option('--enable-agt-patch', 'Enable agt_patch (default-on; mutation-gated)')
+  .option('--disable-agt-patch', 'Disable agt_patch')
+  .option('--enable-agt-todo-read', 'Enable agt_todo_read (default-off)')
+  .option('--disable-agt-todo-read', 'Disable agt_todo_read')
+  .option('--enable-agt-todo-write', 'Enable agt_todo_write (default-off)')
+  .option('--disable-agt-todo-write', 'Disable agt_todo_write')
   .action(async (prompt: string | undefined, opts: Record<string, unknown>) => {
     await handleErrors(async () => {
       const tools = (opts['tool'] as string[]) ?? [];
@@ -62,6 +85,7 @@ program
         ? String(opts['bashAllow']).split(',').map((s: string) => s.trim())
         : undefined;
       const bashPassSecret = (opts['bashPassSecret'] as string[]) ?? [];
+      const agentTools = mapAgentToolFlags(opts);
 
       await runAgentCommand(prompt ?? null, {
         interactive: opts['interactive'] as boolean | undefined,
@@ -89,6 +113,7 @@ program
         system: opts['system'] as string | undefined,
         systemFile: opts['systemFile'] as string | undefined,
         systemPromptFile: opts['systemPrompt'] as string | undefined,
+        agentTools,
       });
     });
   });
@@ -98,9 +123,15 @@ program
   .command('show-capabilities')
   .description('Print the cached capability document for a wrapped tool.')
   .option('--tool <name>', 'Tool name to show')
-  .action(async (opts: { tool?: string }) => {
+  .action(async function (this: Command, opts: { tool?: string }) {
     await handleErrors(async () => {
-      await runShowCapabilities(opts.tool);
+      // Parent program also defines `--tool` (repeatable aggregator). When the
+      // user types `cli-agent show-capabilities --tool foo`, Commander routes
+      // the value into the parent's parsed opts, leaving `opts.tool` undefined
+      // here. Recover it from the merged globals.
+      const merged = this.optsWithGlobals() as Record<string, unknown>;
+      const toolName = opts.tool ?? pickFirstTool(merged['tool']);
+      await runShowCapabilities(toolName);
     });
   });
 
@@ -113,9 +144,13 @@ program
   .option('-m, --model <id>', 'Model ID')
   .option('--config <path>', 'Path to config.json')
   .option('--env-file <path>', 'Path to .env file')
-  .action(async (opts: Record<string, unknown>) => {
+  .action(async function (this: Command, opts: Record<string, unknown>) {
     await handleErrors(async () => {
-      await runRefreshCapabilities(opts['tool'] as string | undefined, {
+      // See note in `show-capabilities`: parent's `--tool` shadows ours.
+      const merged = this.optsWithGlobals();
+      const toolName =
+        (opts['tool'] as string | undefined) ?? pickFirstTool(merged['tool']);
+      await runRefreshCapabilities(toolName, {
         provider: opts['provider'] as string | undefined,
         model: opts['model'] as string | undefined,
         configFile: opts['config'] as string | undefined,
@@ -123,6 +158,17 @@ program
       });
     });
   });
+
+/**
+ * Parent's `--tool` is registered with `collectTool`, so its value is a
+ * `string[]`. Subcommands that expect a single tool name should take the
+ * first element when falling back to the parent's value.
+ */
+function pickFirstTool(v: unknown): string | undefined {
+  if (Array.isArray(v) && v.length > 0 && typeof v[0] === 'string') return v[0];
+  if (typeof v === 'string' && v.length > 0) return v;
+  return undefined;
+}
 
 /* ---------- Error handler ---------- */
 

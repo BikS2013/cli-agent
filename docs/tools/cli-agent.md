@@ -468,4 +468,128 @@
         cli-agent --tool gh --env-file /secrets/litellm.env -p litellm \
           "Create a GitHub issue summarizing the build failures from the last CI run"
     </info>
+    <agentToolsPack>
+        ## Agent-tools pack (curated subset, vendored from `BikS2013/agent-tools`)
+
+        ### Purpose
+
+        cli-agent ships a curated 6-tool subset of the upstream
+        [`BikS2013/agent-tools`](https://github.com/BikS2013/agent-tools) library,
+        registered alongside the standard `file_*` / `web_*` / `bash_*` toolkit.
+        The 4 default-on tools (`agt_glob`, `agt_grep`, `agt_multiedit`,
+        `agt_patch`) provide filesystem search and content-mutation primitives;
+        the 2 default-off tools (`agt_todo_read`, `agt_todo_write`) maintain a
+        per-session in-memory todo list.
+
+        Each wrapped tool routes all security-sensitive operations through
+        `cliAgentPermissionPolicy(cfg)` — the bridge factory in
+        `src/agent/tools/agent-tools/permissions.ts` that delegates
+        `evaluateBash` to cli-agent's bash allowlist (fail-closed when the
+        allowlist is empty) and `evaluateFsWrite` to cli-agent's sandbox +
+        mutation gate (denied unless `--allow-mutations` is on AND the path
+        resolves under `fileEdit.root` / `fileEdit.allowPaths`). The upstream
+        interface has no read gate; reads are jailed by `ToolContext.cwd`.
+        Credential stripping is provided by the standalone `scrubEnv(cfg, env)`
+        helper exported from the same module (it is NOT a `PermissionPolicy`
+        method — the upstream interface does not declare one). The policy
+        object is constructed once per session and shared across every bundled
+        wrapper.
+
+        ### Tools
+
+        | Tool name        | Default                                    | Mutating? | Purpose (1 line) |
+        |------------------|--------------------------------------------|-----------|------------------|
+        | `agt_glob`       | on                                         | no        | filesystem glob matching (uses `fast-glob`) |
+        | `agt_grep`       | on                                         | no        | regex content search (`@vscode/ripgrep` if available, JS fallback otherwise) |
+        | `agt_multiedit`  | on (gated by `--allow-mutations`)          | yes       | atomic multi-edit on a single file |
+        | `agt_patch`      | on (gated by `--allow-mutations`)          | yes       | apply unified-diff / opencode-style patch envelope |
+        | `agt_todo_read`  | off                                        | no        | read session-scoped in-memory todo list |
+        | `agt_todo_write` | off                                        | no        | write session-scoped in-memory todo list (NOT host-mutating; not gated) |
+
+        ### Opt-out flags (CLI)
+
+        | Flag                                              | Effect                                            |
+        |---------------------------------------------------|---------------------------------------------------|
+        | `--no-agent-tools`                                | umbrella OFF (entire pack disabled regardless of per-tool flags) |
+        | `--agent-tools`                                   | umbrella ON (default; rarely needed explicitly)   |
+        | `--enable-agt-glob`     / `--disable-agt-glob`    | per-tool override for `agt_glob`                  |
+        | `--enable-agt-grep`     / `--disable-agt-grep`    | per-tool override for `agt_grep`                  |
+        | `--enable-agt-multiedit`/ `--disable-agt-multiedit` | per-tool override for `agt_multiedit` (still gated by `--allow-mutations`) |
+        | `--enable-agt-patch`    / `--disable-agt-patch`   | per-tool override for `agt_patch` (still gated by `--allow-mutations`) |
+        | `--enable-agt-todo-read`/ `--disable-agt-todo-read` | per-tool override for `agt_todo_read`           |
+        | `--enable-agt-todo-write`/`--disable-agt-todo-write` | per-tool override for `agt_todo_write`         |
+
+        Passing both `--enable-agt-<tool>` and `--disable-agt-<tool>` for the
+        same tool raises a `UsageError` (exit 2). Precedence is **fail-fast**,
+        not silent winner-take-all.
+
+        ### Opt-out env vars
+
+        | Env var                                | Effect                                                |
+        |----------------------------------------|-------------------------------------------------------|
+        | `CLI_AGENT_DISABLE_AGENT_TOOLS=1`      | umbrella OFF (truthy disables the pack)               |
+        | `CLI_AGENT_AGT_GLOB=true|false`        | per-tool override for `agt_glob`                      |
+        | `CLI_AGENT_AGT_GREP=true|false`        | per-tool override for `agt_grep`                      |
+        | `CLI_AGENT_AGT_MULTIEDIT=true|false`   | per-tool override for `agt_multiedit`                 |
+        | `CLI_AGENT_AGT_PATCH=true|false`       | per-tool override for `agt_patch`                     |
+        | `CLI_AGENT_AGT_TODO_READ=true|false`   | per-tool override for `agt_todo_read`                 |
+        | `CLI_AGENT_AGT_TODO_WRITE=true|false`  | per-tool override for `agt_todo_write`                |
+
+        Each per-tool env var is parsed as a tri-state: `1` / `true` enable,
+        `0` / `false` disable, missing → defer to the next tier.
+
+        ### config.json shape
+
+        Persisted defaults live in
+        `~/.tool-agents/cli-agent/config.json` under the `agentTools` key:
+
+        ```json
+        {
+          "agentTools": {
+            "enabled": true,
+            "tools": {
+              "glob": true,
+              "grep": true,
+              "multiedit": true,
+              "patch": true,
+              "todoRead": false,
+              "todoWrite": false
+            }
+          }
+        }
+        ```
+
+        Every field is optional. Defaults shown above are applied AFTER all four
+        precedence tiers have been consulted; they are explicit starting values,
+        NOT runtime fallbacks for missing required config (per project convention).
+
+        ### Precedence
+
+        Mirrors cli-agent's standard four-tier resolution chain:
+
+        ```
+        CLI flag (--no-agent-tools / --enable-agt-* / --disable-agt-*)
+          > shell env var (CLI_AGENT_DISABLE_AGENT_TOOLS / CLI_AGENT_AGT_*)
+          > ~/.tool-agents/cli-agent/.env
+          > local ./.env
+          > config.json (agentTools.enabled, agentTools.tools.*)
+          > default
+        ```
+
+        ### Mutation gating
+
+        `agt_multiedit` and `agt_patch` are excluded from the LLM-visible
+        catalog when `--allow-mutations` is off, regardless of per-tool flags
+        or umbrella state — mirroring the `file_write` / `file_edit` /
+        `file_append` rule (FR-AGT-010).
+
+        ### Provenance
+
+        The pack is vendored — not installed from npm — under
+        `src/agent/tools/agent-tools-vendored/`, pinned at upstream SHA
+        `b8ab63b2f4124325a31e00c9afd3645f02ffd072` (`BikS2013/agent-tools`,
+        MIT-licensed). Re-sync via `bash scripts/sync-agent-tools.sh
+        --sha <new-sha>`; provenance, sync date, and the file allow-list are
+        recorded in `src/agent/tools/agent-tools-vendored/PROVENANCE.md`.
+    </agentToolsPack>
 </cliAgent>

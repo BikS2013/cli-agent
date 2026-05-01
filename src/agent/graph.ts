@@ -7,9 +7,12 @@ import { createReactAgent } from '@langchain/langgraph/prebuilt';
 import { HumanMessage } from '@langchain/core/messages';
 import { MemorySaver } from '@langchain/langgraph';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
 import type { Logger } from './logging.js';
+import type { AgentConfig } from '../config/agent-config.js';
+import type { AgentToolsSession } from './tools/agent-tools/index.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyGraph = ReturnType<typeof createReactAgent>;
@@ -17,6 +20,19 @@ type AnyGraph = ReturnType<typeof createReactAgent>;
 export interface AgentGraph {
   readonly graph: AnyGraph;
   readonly checkpointer: MemorySaver;
+  /**
+   * Absolute working directory injected into every agent-tools wrapper
+   * via `RunnableConfig.configurable.workingDirectory`. Sourced from
+   * `cfg.fileEdit.root` at graph-build time so the value stays stable
+   * across turns even if the process cwd later changes.
+   */
+  readonly workingDirectory: string;
+  /**
+   * Per-graph in-memory store backing the `agt_todo_read` /
+   * `agt_todo_write` pair. Created exactly ONCE per graph so the todo
+   * list survives across turns within the same conversation.
+   */
+  readonly agentToolsSession: AgentToolsSession;
 }
 
 /**
@@ -38,6 +54,7 @@ export function buildAgentGraph(
   tools: DynamicStructuredTool[],
   systemPrompt: string,
   _maxSteps: number,
+  cfg: AgentConfig,
 ): AgentGraph {
   const checkpointer = new MemorySaver();
 
@@ -48,7 +65,14 @@ export function buildAgentGraph(
     checkpointSaver: checkpointer,
   });
 
-  return { graph, checkpointer };
+  // Pin the working directory and create the per-graph session ONCE so
+  // both survive across turns within the same conversation. The session
+  // is shared by reference with every `agt_todo_*` invocation via
+  // `RunnableConfig.configurable.agentToolsSession`.
+  const workingDirectory = path.resolve(cfg.fileEdit.root);
+  const agentToolsSession: AgentToolsSession = { todos: null };
+
+  return { graph, checkpointer, workingDirectory, agentToolsSession };
 }
 
 export async function runOneShot(
@@ -59,7 +83,15 @@ export async function runOneShot(
 ): Promise<string> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const invokeOptions: Record<string, any> = {
-    configurable: { thread_id: threadId },
+    configurable: {
+      thread_id: threadId,
+      // Required by every agent-tools wrapper; resolved at graph-build
+      // time from `cfg.fileEdit.root` so the value never drifts.
+      workingDirectory: agentGraph.workingDirectory,
+      // Per-graph store; shared by reference so todo state survives
+      // across turns within the same conversation.
+      agentToolsSession: agentGraph.agentToolsSession,
+    },
     recursionLimit: maxSteps * 2,
   };
 
@@ -126,7 +158,16 @@ export async function* streamOneShot(
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const streamConfig: Record<string, any> = {
-    configurable: { thread_id: threadId },
+    configurable: {
+      thread_id: threadId,
+      // Same wiring as `runOneShot` — every agent-tools wrapper reads
+      // `workingDirectory` and (todo pair) `agentToolsSession` from the
+      // configurable bag; the abort `signal` propagates from the
+      // streaming options below.
+      workingDirectory: agentGraph.workingDirectory,
+      agentToolsSession: agentGraph.agentToolsSession,
+      ...(opts.abortSignal ? { signal: opts.abortSignal } : {}),
+    },
     version: 'v2',
     recursionLimit: maxSteps * 2,
   };

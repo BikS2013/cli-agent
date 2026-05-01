@@ -312,3 +312,93 @@ on this platform` message — never silent-fail.
 The TUI persists per-thread JSONL files plus an `index.jsonl` and a
 `cursor.json` under `~/.tool-agents/cli-agent/history/` (directory mode 0700,
 files mode 0600). The location is fixed; there is no env-var override.
+
+---
+
+## Agent-tools pack
+
+cli-agent ships a curated 6-tool subset of the upstream
+[`BikS2013/agent-tools`](https://github.com/BikS2013/agent-tools) library as
+additional standard tools (`agt_*`). The pack is governed by an umbrella flag
+plus one boolean per wrapped tool. Detailed per-tool descriptions and the full
+opt-out matrix live in `docs/tools/cli-agent.md` (the `<agentToolsPack>`
+subsection of the `<cliAgent>` block); this section documents the
+configuration surface itself.
+
+### Configuration sources and precedence
+
+The agent-tools pack obeys cli-agent's standard four-tier resolution chain:
+
+```
+CLI flag > shell env var > ~/.tool-agents/cli-agent/.env > local ./.env > config.json > default
+```
+
+Defaults are applied AFTER all four tiers have been consulted. They are
+explicit starting values, NOT runtime fallbacks for missing required config —
+the project's "no fallback for required values" rule still holds; the pack
+simply has no required values.
+
+Conflicting CLI flags on the same tool (e.g. `--enable-agt-grep
+--disable-agt-grep`) raise a `UsageError` (exit 2). There is no silent winner.
+
+### Variables
+
+The pack introduces seven configuration variables: one umbrella plus six
+per-tool. Each can be set from CLI / env / config.json. The per-flag mapping
+table (CLI flag ↔ env var ↔ config.json key) is in
+`docs/tools/cli-agent.md` to avoid duplication; the per-variable description
+table below documents purpose, options, defaults, and recommended storage.
+
+#### `agentTools.enabled` (umbrella)
+
+| Aspect | Value |
+|---|---|
+| Purpose | Master switch for the entire agent-tools pack. When false, none of the six `agt_*` tools are registered, regardless of per-tool flags. |
+| How to obtain | n/a — boolean flag, no credentials required |
+| Type | boolean (CLI: `--agent-tools` / `--no-agent-tools`; env: `CLI_AGENT_DISABLE_AGENT_TOOLS=1` to disable; config.json: `agentTools.enabled`) |
+| Options | `true` (umbrella on; per-tool flags decide individual tools) / `false` (umbrella off; whole pack absent) |
+| Default | `true` |
+| Recommended storage | Shell env / CLI flag for one-off runs; `config.json` for a persistent default. Not appropriate for `.env` (it is a UX preference, not a secret). |
+| Expiration | n/a — booleans do not expire. |
+
+#### `agentTools.tools.glob` / `.grep` / `.multiedit` / `.patch` / `.todoRead` / `.todoWrite`
+
+| Aspect | Value |
+|---|---|
+| Purpose | Per-tool opt-in / opt-out. Lets the user remove a single wrapped tool from the LLM-visible catalog (and from the system-prompt block) while keeping the rest of the pack active. |
+| How to obtain | n/a — boolean flag, no credentials required |
+| Type | boolean (CLI: `--enable-agt-<tool>` / `--disable-agt-<tool>`; env: `CLI_AGENT_AGT_<TOOL>` tri-state `1`/`true` enable, `0`/`false` disable, missing → defer; config.json: `agentTools.tools.<tool>`) |
+| Options | `true` (registered, subject to umbrella + mutation-gating) / `false` (excluded entirely) |
+| Defaults | `glob`, `grep`, `multiedit`, `patch` → `true`; `todoRead`, `todoWrite` → `false` |
+| Recommended storage | CLI flag for per-invocation overrides; `config.json` for a persistent per-machine baseline. Use shell env for short-lived experiments. |
+| Expiration | n/a — booleans do not expire. |
+
+### Interaction with `--allow-mutations`
+
+`agt_multiedit` and `agt_patch` are mutation-gated: even when their per-tool
+flag is on AND the umbrella is on, they are excluded from the LLM-visible
+catalog when `--allow-mutations` is off. This mirrors FR-AGT-010 for
+`file_write` / `file_edit` / `file_append`. `agt_todo_write` mutates only
+in-memory session state and is therefore NOT mutation-gated.
+
+### Failure mode for unreadable / corrupt config
+
+If `agentTools` is present in `config.json` but is not a JSON object (or has
+non-boolean values where booleans are expected), `loadAgentConfig` raises a
+`ConfigurationError` (exit 3). There is no silent coercion — the user must
+fix the file or omit the section to fall back to defaults.
+
+### Opt-out matrix (consolidated)
+
+| Behavior                                     | CLI flag                                               | Env var                                              | `config.json`                                          |
+|----------------------------------------------|--------------------------------------------------------|------------------------------------------------------|--------------------------------------------------------|
+| Disable the whole pack                       | `--no-agent-tools`                                     | `CLI_AGENT_DISABLE_AGENT_TOOLS=1`                    | `agentTools.enabled: false`                            |
+| Re-enable the whole pack (defaults to on)    | `--agent-tools`                                        | `CLI_AGENT_DISABLE_AGENT_TOOLS=0` (or unset)         | `agentTools.enabled: true` (or omit)                   |
+| Disable a default-on tool (e.g. `agt_grep`)  | `--disable-agt-grep`                                   | `CLI_AGENT_AGT_GREP=0`                               | `agentTools.tools.grep: false`                         |
+| Re-enable a default-on tool                  | `--enable-agt-grep`                                    | `CLI_AGENT_AGT_GREP=1`                               | `agentTools.tools.grep: true` (or omit)                |
+| Enable the default-off todo pair             | `--enable-agt-todo-read --enable-agt-todo-write`       | `CLI_AGENT_AGT_TODO_READ=1`, `CLI_AGENT_AGT_TODO_WRITE=1` | `agentTools.tools.todoRead: true`, `agentTools.tools.todoWrite: true` |
+| Allow mutating wrappers (`agt_multiedit`, `agt_patch`) to register | `--allow-mutations` (in addition to per-tool flags) | `AGENT_ALLOW_MUTATIONS=true`                       | `allowMutations: true`                                 |
+
+For the canonical per-flag list (one row per tool, plus the umbrella), see
+`docs/tools/cli-agent.md` → `<agentToolsPack>` → "Opt-out flags (CLI)" and
+"Opt-out env vars".

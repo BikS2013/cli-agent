@@ -52,9 +52,11 @@
 
 - You must never create fallback solutions for configuration settings. In every case a configuration setting is not provided you must raise the appropriate exception. You must never substitute the missing config value with a default or a fallback value.
 - If I ask you to make an exception to the configuration setting rule, you must write this exception in the projects memory file, before you implement it.
+
+- Every time you are asked to solve an issue, you must resolve it AND thoroughly document both the issue and the solution.
+
 </structure-and-conventions>
 
 ## Tools
 
 - **cli-agent** — Generic LangGraph ReAct agent that wraps external CLI binaries, auto-introspects their `--help` trees to build capability documents, and exposes the full bash/file/web cross-cutting toolkit backed by all eight standard LLM providers. See `docs/tools/cli-agent.md`.
-

@@ -95,6 +95,23 @@ export interface AgentConfigFile {
   /** Selects the BASE system prompt file. Same resolution rules as the
    * `--system-prompt` CLI flag (absolute / bare filename / relative). */
   readonly systemPromptFile?: string;
+  /** Agent-tools pack (curated subset of BikS2013/agent-tools). The
+   * umbrella controls the whole pack; each per-tool boolean opts the
+   * specific wrapper in or out of the registered catalog. All fields are
+   * OPTIONAL on the file shape — defaults are applied during resolution
+   * (see `loadAgentConfig`). The defaults are explicit starting values,
+   * NOT runtime fallbacks for missing required config. */
+  readonly agentTools?: {
+    readonly enabled?: boolean;
+    readonly tools?: {
+      readonly glob?: boolean;
+      readonly grep?: boolean;
+      readonly multiedit?: boolean;
+      readonly patch?: boolean;
+      readonly todoRead?: boolean;
+      readonly todoWrite?: boolean;
+    };
+  };
 }
 
 /** Frozen provider env snapshot — factories read only from this. */
@@ -152,6 +169,21 @@ export interface AgentConfig {
   readonly systemAppendText: string | undefined;
   /** Optional file addendum (`--system-file <path>`). Read by callers. */
   readonly systemAppendFile: string | undefined;
+  /** Resolved view of the agent-tools pack settings. ALWAYS present on the
+   * resolved config — defaults are applied at the end of the four-tier
+   * precedence chain in `loadAgentConfig`. The defaults are explicit
+   * starting values, NOT runtime fallbacks for missing required config. */
+  readonly agentTools: {
+    readonly enabled: boolean;
+    readonly tools: {
+      readonly glob: boolean;
+      readonly grep: boolean;
+      readonly multiedit: boolean;
+      readonly patch: boolean;
+      readonly todoRead: boolean;
+      readonly todoWrite: boolean;
+    };
+  };
 }
 
 /** CLI flags. */
@@ -186,6 +218,23 @@ export interface AgentCliFlags {
    * Omitting the flag falls through to env / config.json / the seeded
    * default at `<capabilitiesDir>/system-prompt.md`. */
   readonly systemPromptFile?: string;
+  /** Agent-tools pack flag overrides (CLI tier — highest priority). Each
+   * field is tri-state: `true` enables, `false` disables, `undefined`
+   * defers to the next tier (env → config.json → default). Conflicting
+   * pairs (e.g. enable+disable on the same tool) MUST be detected by the
+   * CLI mapper and surfaced as a `UsageError` BEFORE reaching this
+   * shape — `mapAgentToolFlags` in `src/cli.ts` is the gatekeeper. */
+  readonly agentTools?: {
+    readonly enabled?: boolean;
+    readonly tools?: {
+      readonly glob?: boolean;
+      readonly grep?: boolean;
+      readonly multiedit?: boolean;
+      readonly patch?: boolean;
+      readonly todoRead?: boolean;
+      readonly todoWrite?: boolean;
+    };
+  };
 }
 
 /* ---------- Paths ---------- */
@@ -422,6 +471,18 @@ const OTHER_ENV_KEYS = [
   'WEB_SEARCH_URL', 'WEB_SEARCH_API_KEY',
   'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'BRAVE_API_KEY', 'WEB_SEARCH_MAX_REQUESTS',
   'CLI_AGENT_SYSTEM_PROMPT',
+  // --- Agent-tools pack ---
+  // Umbrella: when truthy (1/true/yes/on), disables the whole pack regardless
+  // of per-tool flags. Tri-state parsing via parseAgentToolsBoolEnvVar.
+  'CLI_AGENT_DISABLE_AGENT_TOOLS',
+  // Per-tool tri-state: 1/true/yes/on → enable; 0/false/no/off → disable;
+  // unset → defer to lower tier (config.json → default).
+  'CLI_AGENT_AGT_GLOB',
+  'CLI_AGENT_AGT_GREP',
+  'CLI_AGENT_AGT_MULTIEDIT',
+  'CLI_AGENT_AGT_PATCH',
+  'CLI_AGENT_AGT_TODO_READ',
+  'CLI_AGENT_AGT_TODO_WRITE',
 ] as const;
 
 const ALL_ENV_KEYS = [...PROVIDER_ENV_KEYS, ...OTHER_ENV_KEYS] as const;
@@ -678,6 +739,11 @@ export async function loadAgentConfig(
     systemPromptPath,
     systemAppendText: flags.system,
     systemAppendFile: flags.systemFile,
+    // Agent-tools pack — fully resolved through the four-tier chain. The
+    // resolver applies explicit defaults (NOT fallbacks for missing
+    // required config) at the end. Downstream code (registry / catalog
+    // builder) relies on this field always being present.
+    agentTools: resolveAgentTools(flags.agentTools, layered, configFile),
   };
 }
 
@@ -703,6 +769,112 @@ function parseBooleanEnvVar(raw: string, name: string): boolean {
   throw new ConfigurationError(name, [
     `env:${name} must be one of true|false|1|0|yes|no|on|off (got '${raw}')`,
   ]);
+}
+
+
+/**
+ * Tri-state env-var parser for the agent-tools per-tool flags.
+ *
+ * Returns:
+ *   - `true`     when the value parses as enabled (1/true/yes/on)
+ *   - `false`    when the value parses as disabled (0/false/no/off)
+ *   - `undefined` when the value is undefined (caller defers to next tier)
+ *
+ * Throws `ConfigurationError` when the value is set but unparseable —
+ * STRICT, no fallback. The variable name is included in the error so the
+ * user knows exactly which env var to fix.
+ */
+function parseAgentToolsBoolEnvVar(raw: string | undefined, name: string): boolean | undefined {
+  if (raw === undefined) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v.length === 0) return undefined;
+  if (v === 'true' || v === '1' || v === 'yes' || v === 'on') return true;
+  if (v === 'false' || v === '0' || v === 'no' || v === 'off') return false;
+  throw new ConfigurationError(name, [
+    `env:${name} must be one of true|false|1|0|yes|no|on|off (got '${raw}')`,
+  ]);
+}
+
+/**
+ * Resolve the agent-tools pack settings through the four-tier precedence
+ * chain (CLI flag > shell env > local .env / agent-dir .env > config.json),
+ * with explicit defaults applied as starting values at the end.
+ *
+ * NOTE on the "no fallback for missing required config" rule: none of the
+ * agent-tools flags are REQUIRED — they all have explicit defaults. The
+ * defaults are documented as starting values, NOT runtime fallbacks for
+ * missing required config. The strict rule still holds for env-var values
+ * that ARE present but unparseable: those throw `ConfigurationError`.
+ *
+ * `layered` already encodes the env-tier precedence (shell > agent-dir
+ * .env > local .env) per `loadAgentConfig`. CLI flags are passed
+ * separately and win unconditionally.
+ */
+function resolveAgentTools(
+  flags: AgentCliFlags['agentTools'] | undefined,
+  layered: Record<string, string | undefined>,
+  configFile: AgentConfigFile | null,
+): AgentConfig['agentTools'] {
+  const cfgPack = configFile?.agentTools;
+  const cfgTools = cfgPack?.tools;
+
+  // Umbrella: CLI flag > env (CLI_AGENT_DISABLE_AGENT_TOOLS) > config.json > default(true)
+  // Note the env semantics: CLI_AGENT_DISABLE_AGENT_TOOLS=truthy means
+  // umbrella=false. We invert when consulting that env var.
+  let enabled: boolean;
+  if (flags?.enabled !== undefined) {
+    enabled = flags.enabled;
+  } else {
+    const envDisable = parseAgentToolsBoolEnvVar(
+      layered['CLI_AGENT_DISABLE_AGENT_TOOLS'],
+      'CLI_AGENT_DISABLE_AGENT_TOOLS',
+    );
+    if (envDisable !== undefined) {
+      enabled = !envDisable;
+    } else if (cfgPack?.enabled !== undefined) {
+      enabled = cfgPack.enabled;
+    } else {
+      enabled = true; // default starting value
+    }
+  }
+
+  // Per-tool flags. Default starting values: glob/grep/multiedit/patch=true,
+  // todoRead/todoWrite=false. Mutation gating happens DOWNSTREAM in the
+  // catalog builder (U5) — this resolver only encodes the user's stated
+  // intent, not the runtime gate.
+  const resolveOne = (
+    flagVal: boolean | undefined,
+    envKey:
+      | 'CLI_AGENT_AGT_GLOB'
+      | 'CLI_AGENT_AGT_GREP'
+      | 'CLI_AGENT_AGT_MULTIEDIT'
+      | 'CLI_AGENT_AGT_PATCH'
+      | 'CLI_AGENT_AGT_TODO_READ'
+      | 'CLI_AGENT_AGT_TODO_WRITE',
+    cfgVal: boolean | undefined,
+    defaultVal: boolean,
+  ): boolean => {
+    if (flagVal !== undefined) return flagVal;
+    const envVal = parseAgentToolsBoolEnvVar(layered[envKey], envKey);
+    if (envVal !== undefined) return envVal;
+    if (cfgVal !== undefined) return cfgVal;
+    return defaultVal;
+  };
+
+  const flagTools = flags?.tools;
+  const tools = {
+    glob: resolveOne(flagTools?.glob, 'CLI_AGENT_AGT_GLOB', cfgTools?.glob, true),
+    grep: resolveOne(flagTools?.grep, 'CLI_AGENT_AGT_GREP', cfgTools?.grep, true),
+    multiedit: resolveOne(flagTools?.multiedit, 'CLI_AGENT_AGT_MULTIEDIT', cfgTools?.multiedit, true),
+    patch: resolveOne(flagTools?.patch, 'CLI_AGENT_AGT_PATCH', cfgTools?.patch, true),
+    todoRead: resolveOne(flagTools?.todoRead, 'CLI_AGENT_AGT_TODO_READ', cfgTools?.todoRead, false),
+    todoWrite: resolveOne(flagTools?.todoWrite, 'CLI_AGENT_AGT_TODO_WRITE', cfgTools?.todoWrite, false),
+  };
+
+  return Object.freeze({
+    enabled,
+    tools: Object.freeze(tools),
+  });
 }
 
 function defaultModelForProvider(provider: ProviderName): string | undefined {

@@ -23,16 +23,16 @@ const allowMutCmd: SlashCommand = {
     }
     const newCfg = { ...c.cfg, allowMutations: v === 'on' };
     const llm = createLLM(newCfg);
-    const tools = buildToolCatalog(newCfg, c.logger);
+    const { tools, agentToolsMeta } = buildToolCatalog(newCfg, c.logger);
     const capSection = await composeCapabilitiesSystemPrompt(
       newCfg.capabilitiesDir,
       newCfg.tools,
       newCfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection);
+    const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta);
     c.cfg = newCfg;
     c.sessionAllowMutations = newCfg.allowMutations;
-    c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps);
+    c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps, newCfg);
     ctx.printSystem(`mutations: ${v}.`);
   },
 };

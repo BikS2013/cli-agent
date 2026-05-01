@@ -51,14 +51,14 @@ const modelCmd: SlashCommand = {
     const newCfg = { ...c.cfg, model: newId };
     try {
       const llm = createLLM(newCfg);
-      const tools = buildToolCatalog(newCfg, c.logger);
+      const { tools, agentToolsMeta } = buildToolCatalog(newCfg, c.logger);
       const capSection = await composeCapabilitiesSystemPrompt(
         newCfg.capabilitiesDir,
         newCfg.tools,
         newCfg.capabilities.maxBytesPerTool,
       );
-      const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection);
-      const newGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps);
+      const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta);
+      const newGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps, newCfg);
       c.cfg = newCfg;
       c.agentGraph = newGraph;
       // Note: thread continues; only the graph is swapped.

@@ -18,14 +18,14 @@ const newCmd: SlashCommand = {
     await c.resetThread();
     // Rebuild the agent graph so the MemorySaver namespace is reset
     const llm = createLLM(c.cfg);
-    const tools = buildToolCatalog(c.cfg, c.logger);
+    const { tools, agentToolsMeta } = buildToolCatalog(c.cfg, c.logger);
     const capSection = await composeCapabilitiesSystemPrompt(
       c.cfg.capabilitiesDir,
       c.cfg.tools,
       c.cfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection);
-    c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, c.cfg.maxSteps);
+    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection, agentToolsMeta);
+    c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, c.cfg.maxSteps, c.cfg);
     ctx.printSystem(`new thread started: ${c.threadId.slice(0, 8)}…`);
   },
 };

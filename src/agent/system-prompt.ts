@@ -15,6 +15,9 @@
 
 import fsp from 'node:fs/promises';
 
+import { buildAgentToolsPromptBlock } from './tools/agent-tools/prompt-block.js';
+import type { AgentToolsCatalogMeta } from './tools/agent-tools/group-builder.js';
+
 export const BUILTIN_DEFAULT_SYSTEM_PROMPT = `You are cli-agent, a general-purpose assistant that helps the user accomplish tasks by
 invoking external CLI tools on their local machine. You do this through the bash_run tool,
 which executes only the specific binaries the user has allowed.
@@ -68,7 +71,13 @@ You also have three general-purpose tools that exist on every assistant in this 
  * Composition order:
  *   1. baseText       — full base prompt loaded from cfg.systemPromptPath
  *   2. capabilitiesSection (if non-empty) — appended after a blank line
- *   3. customSystemText (if provided)     — under "## User-provided instructions"
+ *   3. agent-tools block (if `agentToolsMeta` registers any tool) —
+ *      derived via `buildAgentToolsPromptBlock(agentToolsMeta)` and
+ *      appended verbatim. The block is self-framed (leading + trailing
+ *      `\n`), so concatenation does NOT add extra glue. When the block
+ *      is empty (umbrella off OR every per-tool flag off), the prompt
+ *      is BYTE-IDENTICAL to the pre-integration prompt.
+ *   4. customSystemText (if provided)     — under "## User-provided instructions"
  *
  * `customSystemText` is the optional addendum supplied by `--system` /
  * `--system-file`; it does not replace the base, only appends.
@@ -77,11 +86,22 @@ export async function buildSystemPrompt(
   baseText: string,
   capabilitiesSection: string,
   customSystemText?: string,
+  agentToolsMeta?: AgentToolsCatalogMeta,
 ): Promise<string> {
   let prompt = baseText;
 
   if (capabilitiesSection) {
     prompt += '\n\n' + capabilitiesSection;
+  }
+
+  if (agentToolsMeta) {
+    // `buildAgentToolsPromptBlock` returns '' when nothing is registered
+    // (preserving byte-stability with pre-integration prompts) or a
+    // self-framed block (leading + trailing '\n') otherwise.
+    const block = buildAgentToolsPromptBlock(agentToolsMeta);
+    if (block.length > 0) {
+      prompt += block;
+    }
   }
 
   if (customSystemText) {
@@ -101,7 +121,15 @@ export async function loadSystemPromptFile(filePath: string): Promise<string> {
  * loads the append-file (if any), concatenates with the inline append
  * text (if any), and returns the assembled prompt.
  *
- * Composition: <base on disk> + capabilitiesSection + (file append + "\n\n" + inline append).
+ * Composition: <base on disk> + capabilitiesSection + agent-tools block
+ * (derived from `agentToolsMeta` when provided) + (file append + "\n\n" +
+ * inline append).
+ *
+ * `agentToolsMeta` is optional for backward compatibility: callers that
+ * have not yet been updated can omit it and receive the pre-integration
+ * prompt verbatim. New entry points should always pass the meta returned
+ * by `buildToolCatalog` so the prompt and the registered toolset stay in
+ * lockstep.
  */
 export async function buildSystemPromptForCfg(
   cfg: {
@@ -110,6 +138,7 @@ export async function buildSystemPromptForCfg(
     readonly systemAppendFile: string | undefined;
   },
   capabilitiesSection: string,
+  agentToolsMeta?: AgentToolsCatalogMeta,
 ): Promise<string> {
   const baseText = await loadSystemPromptFile(cfg.systemPromptPath);
   let custom: string | undefined;
@@ -121,5 +150,5 @@ export async function buildSystemPromptForCfg(
   } else if (cfg.systemAppendText) {
     custom = cfg.systemAppendText;
   }
-  return buildSystemPrompt(baseText, capabilitiesSection, custom);
+  return buildSystemPrompt(baseText, capabilitiesSection, custom, agentToolsMeta);
 }

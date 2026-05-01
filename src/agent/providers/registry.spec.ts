@@ -26,6 +26,7 @@ function makeBaseConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH', 'HOME', 'LANG', 'TERM'], timeoutMs: 30000, maxOutputBytes: 1048576 },
     webSearch: { backend: 'tavily' },
     fileEdit: { root: '/tmp', allowPaths: [] },
+    agentTools: { enabled: true, tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: false, todoWrite: false } },
     perToolBudgetBytes: 8192,
     baseUrl: undefined,
     webSearchBackend: 'tavily',

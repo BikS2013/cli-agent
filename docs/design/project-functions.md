@@ -226,3 +226,148 @@ The streaming seam emits `llm_chunk` for every `on_chat_model_stream` event
 and `llm_final` on `on_chat_model_end`. Both carry `sessionId` + `turnId` so
 post-hoc analysis can group by turn. Closes the deferred logging item that
 `runOneShotAgent`'s non-streaming path could not satisfy.
+
+## Agent-tools Pack (FR-NEW-* / NFR-NEW-*)
+
+Source: `docs/design/refined-request-agent-tools-integration.md` §Requirements,
+locked by user decision (see `docs/design/plan-003-agent-tools-integration.md` §0)
+and grounded in `docs/reference/investigation-agent-tools-integration.md`.
+
+### FR-NEW-001 — Upstream inventory deliverable (Status: Accepted)
+
+A Markdown document at `docs/reference/agent-tools-inventory.md` lists, for
+each tool in `BikS2013/agent-tools`: tool name, one-line purpose, full
+description, runtime/language, package dependencies, transport/interface,
+input/output schema, mutating-vs-read-only classification, license, and a
+"bundle / skip / sidecar" recommendation with rationale.
+
+### FR-NEW-002 — Feasibility & rationality assessment (Status: Accepted)
+
+The feasibility verdict is captured in `docs/reference/investigation-agent-tools-integration.md`
+(rather than a separate `feasibility-*.md` file). It contains the summary
+verdict ("Bundling rational with curated subset; opt-out via per-tool
+config-flag gating, not describe-and-suppress"), evaluation of the proposed
+pattern, alternative patterns side-by-side, scoring matrix, recommendation
+with explicit opt-out surface, and acknowledgement of risks and rejected
+options.
+
+### FR-NEW-003 — Phase gate before planning (Status: Accepted)
+
+The user signed off on the investigation verdict before the plan was created.
+`docs/design/plan-003-agent-tools-integration.md` references the investigation
+and was created after that sign-off.
+
+### FR-NEW-004 — Standard-tool wrapping (Status: Accepted)
+
+Each accepted upstream tool is exposed to the LLM as a first-class LangChain
+tool registered through `src/agent/tools/registry.ts`, with: a stable
+snake_cased name following the `agt_<name>` pattern (`agt_glob`, `agt_grep`,
+`agt_multiedit`, `agt_patch`, `agt_todo_read`, `agt_todo_write`); a typed
+Zod input schema and a documented output shape; logging compliant with the
+existing JSONL schema (`tool_call`, `tool_result`); honoring the bash
+sandbox / file sandbox / web header rules wherever applicable.
+
+### FR-NEW-005 — System-prompt description block (Status: Accepted)
+
+The new tools' descriptions are assembled into the system prompt by
+`buildAgentToolsPromptBlock(meta)`, called inside `buildSystemPromptForCfg`
+in `src/agent/system-prompt.ts`. Composition order: `<base text>` +
+`<capabilities section>` + `<agent-tools block>` + `<--system-file contents>`
++ `<--system inline text>`. The block is byte-stable across runs unless
+the registered set changes (umbrella off OR per-tool flags toggled).
+
+### FR-NEW-006 — Runtime opt-out mechanism (Status: Accepted)
+
+The user can disable the new tools (and their description block) for a
+given run via:
+
+  - CLI flags: `--no-agent-tools` (umbrella) and `--enable-agt-<tool>` /
+    `--disable-agt-<tool>` per tool.
+  - Env vars: `CLI_AGENT_DISABLE_AGENT_TOOLS=1` (umbrella) and
+    `CLI_AGENT_AGT_<TOOL>=1|0` per tool.
+  - `config.json`: `agentTools.enabled: bool` (umbrella) and
+    `agentTools.tools.<tool>: bool` per tool.
+
+The four sources obey the project's standard four-tier precedence
+(FR-AGT-011: shell env wins among env tiers; CLI flag overrides all).
+Granularity is **per-tool with a pack-level umbrella**.
+
+### FR-NEW-007 — Mutation gating compliance (Status: Accepted)
+
+`agt_multiedit` and `agt_patch` perform writes and are excluded from the
+LLM-visible catalog when `--allow-mutations` is off, mirroring FR-AGT-010
+for `file_write`/`file_edit`/`file_append`. `agt_todo_write` mutates only
+in-memory session state and is therefore NOT mutation-gated.
+
+### FR-NEW-008 — No silent fallbacks (Status: Accepted)
+
+If a configuration value related to the new tools is required and missing,
+the agent raises a `ConfigurationError` (exit code 3). No defaults, no
+fallbacks (per project convention). Note: the agent-tools pack has no
+required config — all flags have explicit default values applied AFTER
+all four tiers have been consulted; defaults for optional config are
+documented as starting values, not fallbacks.
+
+### FR-NEW-009 — Documentation registration (Status: Accepted)
+
+The new tools and the opt-out mechanism are registered in
+`docs/design/project-functions.md` (this section), `docs/design/project-design.md`
+(Tool Catalog table + new §4a), `docs/design/configuration-guide.md` (full
+variable description per the configuration-guide template, including the
+opt-out matrix), and `docs/tools/cli-agent.md` (new `<agentToolsPack>`
+subsection).
+
+### NFR-NEW-001 — Prompt-token budget (Status: Accepted)
+
+The new description block's token contribution is measured with `js-tiktoken`
+`cl100k_base` encoding (already a transitive dependency via `@langchain/core`
+and `@langchain/openai` — no new direct dependency added). Per-tool fragment
+ceiling: **400 tokens**. Default-on pack (4 tools) ceiling: **2 000 tokens**.
+Full pack (6 tools) ceiling: **2 800 tokens**. Asserted by a Vitest spec
+(`src/agent/tools/agent-tools/agent-tools-block.spec.ts`).
+
+### NFR-NEW-002 — Startup latency (Status: Accepted)
+
+Adding the new tools must not increase cold-start time of `cli-agent --help`
+or a one-shot run by more than 100 ms. Verified by a smoke script that
+times invocation before and after the integration.
+
+### NFR-NEW-003 — Dependency footprint (Status: Accepted)
+
+New runtime dependencies introduced: `fast-glob` and `ignore` (used by the
+6 selected tools); `@vscode/ripgrep` as `optionalDependencies` (JS fallback
+covers absence). Explicitly NOT added: `@mozilla/readability`, `jsdom`,
+`turndown`, `dotenv` (those are for `webfetch`/`read` upstream tools that
+are NOT bundled). `js-tiktoken` is reused from existing transitive deps.
+
+### NFR-NEW-004 — Security posture (Status: Accepted)
+
+Each wrapped tool routes all security-sensitive operations through
+`cliAgentPermissionPolicy(cfg)` — the bridge factory in
+`src/agent/tools/agent-tools/permissions.ts` that delegates `checkBash` to
+cli-agent's bash allowlist, `checkFsRead`/`checkFsWrite` to cli-agent's
+sandbox + mutation gate, and `scrubEnv` to cli-agent's existing credential
+strip. The bridge is constructed once per session and shared across all
+bundled wrappers.
+
+## Acceptance Status — Agent-tools integration (refined-request acceptance criteria)
+
+Snapshot taken at the end of U1–U6 implementation; final re-verification is
+the integration verifier's responsibility (Phase 10). Each row maps an
+acceptance criterion from
+`docs/design/refined-request-agent-tools-integration.md` § Acceptance Criteria
+to its current status.
+
+| AC # | Criterion (abridged)                                                                                                                | Status |
+|------|-------------------------------------------------------------------------------------------------------------------------------------|--------|
+| 1    | `docs/reference/agent-tools-inventory.md` exists with all FR-NEW-001 fields                                                          | MET    |
+| 2    | Feasibility verdict captured (in `investigation-agent-tools-integration.md`; user-approved in plan §0)                                | MET    |
+| 3    | Plan file `docs/design/plan-003-agent-tools-integration.md` exists, references investigation, was created after sign-off              | MET    |
+| 4    | Each accepted tool has TS module + Zod schema + registry entry + unit test                                                           | MET (modules under `src/agent/tools/agent-tools/agt-*.ts`; specs under same dir; registry wires them via `group-builder.ts`) |
+| 5    | System-prompt block emits by default; absent under opt-out; both behaviors tested                                                    | MET (`agent-tools-block.spec.ts` + `system-prompt.spec.ts`) |
+| 6    | Opt-out reachable from CLI flag, env var, `config.json` (TUI slash command not required by chosen pattern); precedence per FR-AGT-011 | MET (TUI slash command intentionally omitted — D6 selected discrete CLI flags + env + config.json; matches refined-request "if required") |
+| 7    | Mutating tools (`agt_multiedit`, `agt_patch`) absent without `--allow-mutations`; verified by test                                   | MET (`group-builder.spec.ts`) |
+| 8    | `project-design.md`, `project-functions.md`, `configuration-guide.md`, `docs/tools/cli-agent.md` updated coherently                   | MET    |
+| 9    | `npm test` passes with new + existing specs                                                                                          | DEFERRED to Phase 10 verifier (build + test run is out-of-scope for U6 documentation unit) |
+| 10   | `Issues - Pending Items.md` updated with deferrals                                                                                   | MET    |
+| 11   | Token-budget assertion implemented as test, passing                                                                                  | MET (asserted in `agent-tools-block.spec.ts` per NFR-NEW-001 ceilings) |

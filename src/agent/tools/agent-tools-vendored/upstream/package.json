@@ -1,0 +1,92 @@
+{
+  "name": "@agent-platform/agent-tools",
+  "version": "0.0.1",
+  "private": true,
+  "license": "MIT",
+  "description": "TypeScript library of agent tools (read, write, edit, multiedit, patch, bash, glob, grep, list, webfetch, todoread, todowrite) ported from anomalyco/opencode and exposed as LangChain.js-compatible tools with co-located prompt fragments and a strict permission model.",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "main": "./dist/src/index.js",
+  "types": "./dist/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./adapters/langchain": {
+      "types": "./dist/src/adapters/langchain.d.ts",
+      "import": "./dist/src/adapters/langchain.js"
+    },
+    "./permissions": {
+      "types": "./dist/src/permissions.d.ts",
+      "import": "./dist/src/permissions.js"
+    },
+    "./prompts": {
+      "types": "./dist/src/prompts/index.d.ts",
+      "import": "./dist/src/prompts/index.js"
+    },
+    "./errors": {
+      "types": "./dist/src/errors.d.ts",
+      "import": "./dist/src/errors.js"
+    },
+    "./types": {
+      "types": "./dist/src/types.d.ts",
+      "import": "./dist/src/types.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && npm run copy:prompts",
+    "copy:prompts": "node -e \"const fs=require('node:fs'),path=require('node:path');function walk(d){for(const e of fs.readdirSync(d,{withFileTypes:true})){const p=path.join(d,e.name);if(e.isDirectory())walk(p);else if(e.name.endsWith('.prompt.md')){const out=p.replace(/^src/,'dist/src');fs.mkdirSync(path.dirname(out),{recursive:true});fs.copyFileSync(p,out);}}}walk('src');\"",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --check .",
+    "format:write": "prettier --write .",
+    "test:direct": "node --test --test-reporter spec \"dist/tests/direct/*.test.js\"",
+    "test:agent": "node --test --test-reporter spec \"dist/tests/agent/*.test.js\"",
+    "test": "npm run test:direct"
+  },
+  "dependencies": {
+    "@mozilla/readability": "^0.6",
+    "dotenv": "^16",
+    "fast-glob": "^3.3.3",
+    "ignore": "^7.0.5",
+    "jsdom": "^24",
+    "turndown": "^7",
+    "zod": "^3.25.67"
+  },
+  "peerDependencies": {
+    "@langchain/core": "^1.1.41"
+  },
+  "peerDependenciesMeta": {
+    "@langchain/core": {
+      "optional": true
+    }
+  },
+  "optionalDependencies": {
+    "@vscode/ripgrep": "^1.17.1"
+  },
+  "devDependencies": {
+    "@langchain/anthropic": "^1.3.27",
+    "@langchain/core": "^1.1.41",
+    "@langchain/google-genai": "^2.1.28",
+    "@langchain/langgraph": "^1.2.9",
+    "@langchain/openai": "^1.4.4",
+    "@types/jsdom": "^21",
+    "@types/node": "^20",
+    "@types/turndown": "^5",
+    "@typescript-eslint/eslint-plugin": "^8",
+    "@typescript-eslint/parser": "^8",
+    "eslint": "^9",
+    "langchain": "^1.3.4",
+    "prettier": "^3",
+    "typescript": "^5.6"
+  }
+}
