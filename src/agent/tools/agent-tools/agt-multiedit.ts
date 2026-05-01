@@ -26,21 +26,23 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  getParamDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. */
 export const AGT_MULTIEDIT_NAME = 'agt_multiedit' as const;
 
 /**
- * Trimmed from `multiedit.prompt.md` (~2.6 KiB upstream). The original
- * full prompt remains preserved upstream.
+ * Sourced from the canonical `BUILTIN_TOOL_PROMPTS` registry. Trimmed
+ * from `multiedit.prompt.md` (~2.6 KiB upstream). The original full
+ * prompt remains preserved upstream.
  */
 export const AGT_MULTIEDIT_DESCRIPTION =
-  'Apply an ordered list of exact string replacements to one file atomically. ' +
-  'All edits succeed or none are applied (the file on disk is left unchanged ' +
-  'on any failure). Each edit is `{oldString, newString, replaceAll?}`; later ' +
-  'edits operate on the result of earlier ones, so a rename can be followed ' +
-  'by updates to text it introduced. Use this instead of multiple single-edit ' +
-  'calls when the changes belong together; one diff, one permission check.';
+  BUILTIN_TOOL_PROMPTS[AGT_MULTIEDIT_NAME]!.description;
 
 const editEntrySchema = z.object({
   oldString: z
@@ -59,31 +61,34 @@ const editEntrySchema = z.object({
     ),
 });
 
-const agtMultieditSchema = z.object({
-  filePath: z
-    .string()
-    .min(1)
-    .describe(
-      'Path to the file to modify. Resolved against the working directory ' +
-        'when not absolute.',
-    ),
-  edits: z
-    .array(editEntrySchema)
-    .min(1)
-    .describe('Non-empty list of edits applied in order.'),
-});
-
 /** Dependency bag injected by U5. */
 export interface AgtMultieditDeps {
   permissions: PermissionPolicy;
+  overlays?: OverlayRegistry;
 }
 
 export function buildAgtMultieditTool(
   deps: AgtMultieditDeps,
 ): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_MULTIEDIT_NAME]!;
+  const reg = deps.overlays;
+  const agtMultieditSchema = z.object({
+    filePath: z
+      .string()
+      .min(1)
+      .describe(
+        getParamDescription(reg, AGT_MULTIEDIT_NAME, 'filePath', BUILTIN.parameters['filePath']!),
+      ),
+    edits: z
+      .array(editEntrySchema)
+      .min(1)
+      .describe(
+        getParamDescription(reg, AGT_MULTIEDIT_NAME, 'edits', BUILTIN.parameters['edits']!),
+      ),
+  });
   return new DynamicStructuredTool({
     name: AGT_MULTIEDIT_NAME,
-    description: AGT_MULTIEDIT_DESCRIPTION,
+    description: getToolDescription(reg, AGT_MULTIEDIT_NAME, BUILTIN.description),
     schema: agtMultieditSchema,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;

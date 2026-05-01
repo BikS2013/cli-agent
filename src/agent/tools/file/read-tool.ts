@@ -5,12 +5,11 @@ import { resolveSandboxPath, assertMaxBytes } from './sandbox.js';
 import { FileError } from '../../../errors.js';
 import { handleToolError } from '../types.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
 
-const schema = z.object({
-  path: z.string().min(1).describe('Path to the file to read (relative to file root or absolute).'),
-  max_bytes: z.number().int().positive().optional().describe('Maximum bytes to read (default 1 MiB).'),
-  binary: z.boolean().optional().describe('If true, return content as base64. Default: false (utf8).'),
-});
+const TOOL_NAME = 'file_read';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createFileReadTool(cfg: AgentConfig): DynamicStructuredTool {
   const sandboxCfg = {
@@ -18,10 +17,22 @@ export function createFileReadTool(cfg: AgentConfig): DynamicStructuredTool {
     allowPaths: [...cfg.fileEdit.allowPaths],
     maxBytes: cfg.perToolBudgetBytes,
   };
+  const reg = cfg.toolPromptOverlays;
+  const schema = z.object({
+    path: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'path', BUILTIN.parameters['path']!),
+    ),
+    max_bytes: z.number().int().positive().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'max_bytes', BUILTIN.parameters['max_bytes']!),
+    ),
+    binary: z.boolean().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'binary', BUILTIN.parameters['binary']!),
+    ),
+  });
 
   return new DynamicStructuredTool({
-    name: 'file_read',
-    description: 'Read the contents of a plain-text file on disk inside the allowed file root.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
     func: async (input) => {
       try {

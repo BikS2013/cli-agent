@@ -27,49 +27,56 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  getParamDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. Stable across U3 / U5 / checkpointer. */
 export const AGT_GLOB_NAME = 'agt_glob' as const;
 
 /**
  * Description handed both to LangChain (`DynamicStructuredTool.description`)
- * and to U5's prompt-block assembler. Trimmed from the upstream
- * `glob.prompt.md` (~545 chars) to keep the prompt-block under the per-tool
- * budget — the original full prompt remains preserved upstream at
+ * and to U5's prompt-block assembler. Sourced from the canonical
+ * `BUILTIN_TOOL_PROMPTS` registry so there is a SINGLE literal per tool.
+ * Trimmed from the upstream `glob.prompt.md` (~545 chars) to keep the
+ * prompt-block under the per-tool budget — the original full prompt
+ * remains preserved upstream at
  * `agent-tools-vendored/upstream/src/tools/glob/glob.prompt.md`.
  */
-export const AGT_GLOB_DESCRIPTION =
-  'Fast file-pattern matching across the working directory. ' +
-  'Supports glob patterns like "**/*.ts" or "src/**/*.{ts,tsx}". ' +
-  'Returns matching file paths sorted by modification time (newest first). ' +
-  'Use this when you need to find files by name patterns; prefer running ' +
-  'multiple searches in parallel when the queries are independent.';
-
-/** Schema mirrors the upstream `inputSchema` for `glob`. */
-const agtGlobSchema = z.object({
-  pattern: z
-    .string()
-    .min(1)
-    .describe('The glob pattern to match files against (e.g. "**/*.ts").'),
-  path: z
-    .string()
-    .optional()
-    .describe(
-      'Optional directory to search in. Defaults to the working directory; ' +
-        'resolved relative to it when not absolute.',
-    ),
-});
+export const AGT_GLOB_DESCRIPTION = BUILTIN_TOOL_PROMPTS[AGT_GLOB_NAME]!.description;
 
 /** Dependency bag injected by U5's catalog builder. */
 export interface AgtGlobDeps {
   permissions: PermissionPolicy;
+  /** Optional overlay registry; when present, user-edited descriptions
+   * take precedence over the canonical built-in. */
+  overlays?: OverlayRegistry;
 }
 
 /** Build the LangChain tool. */
 export function buildAgtGlobTool(deps: AgtGlobDeps): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_GLOB_NAME]!;
+  const reg = deps.overlays;
+  const agtGlobSchema = z.object({
+    pattern: z
+      .string()
+      .min(1)
+      .describe(
+        getParamDescription(reg, AGT_GLOB_NAME, 'pattern', BUILTIN.parameters['pattern']!),
+      ),
+    path: z
+      .string()
+      .optional()
+      .describe(
+        getParamDescription(reg, AGT_GLOB_NAME, 'path', BUILTIN.parameters['path']!),
+      ),
+  });
   return new DynamicStructuredTool({
     name: AGT_GLOB_NAME,
-    description: AGT_GLOB_DESCRIPTION,
+    description: getToolDescription(reg, AGT_GLOB_NAME, BUILTIN.description),
     schema: agtGlobSchema,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;

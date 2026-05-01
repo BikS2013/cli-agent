@@ -8,34 +8,59 @@ import type { AgentConfig } from '../../../config/agent-config.js';
 import { parseAllowlistEntries, buildAllowlistMatcher } from './allowlist.js';
 import type { Logger } from '../../logging.js';
 import { newTurnId } from '../../logging.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
 
-const schema = z.object({
-  command: z.string().min(1).describe('Binary name to execute (must be on the allowlist).'),
-  args: z.array(z.string()).optional().describe('Arguments to pass to the binary.'),
-  timeout_ms: z.number().int().positive().optional().describe('Per-call timeout in milliseconds (max 300000).'),
-  cwd: z.string().optional().describe('Working directory for the command.'),
-  stdin: z.string().optional().describe('Static stdin string passed to the process.'),
-  confirmed: z.boolean().describe('Must be true to execute the command.'),
-});
+const TOOL_NAME = 'bash_run';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createBashRunTool(cfg: AgentConfig, logger: Logger, allowMutations: boolean): DynamicStructuredTool {
   const entries = parseAllowlistEntries([...cfg.bash.allow]);
   const matcher = buildAllowlistMatcher(entries);
 
+  // bash_run has a dynamic description that swaps prefix on
+  // `allowMutations`. The overlay-or-default helper consults the overlay
+  // FIRST; only when no overlay is present do we compose the dynamic
+  // prefix from the built-in default (which uses the [MUTATING] form
+  // canonically and then we swap when needed). This keeps user overlays
+  // authoritative — they can author a single description that ignores
+  // the read-only/mutating distinction if they prefer.
   const descPrefix = allowMutations
     ? '[MUTATING]'
     : '[READ-ONLY-AGENT]';
-  const description = `${descPrefix} Execute an allow-listed local command and capture its stdout/stderr. ` +
+  const dynamicDefault = `${descPrefix} Execute an allow-listed local command and capture its stdout/stderr. ` +
     (allowMutations
       ? 'Requires confirmed: true. Only binaries on the allowlist may be called.'
       : 'Requires confirmed: true. The user has not enabled --allow-mutations; prefer read-only commands. Only allow-listed binaries may be called.');
+  const reg = cfg.toolPromptOverlays;
+  const description = getToolDescription(reg, TOOL_NAME, dynamicDefault);
+  const schema = z.object({
+    command: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'command', BUILTIN.parameters['command']!),
+    ),
+    args: z.array(z.string()).optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'args', BUILTIN.parameters['args']!),
+    ),
+    timeout_ms: z.number().int().positive().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'timeout_ms', BUILTIN.parameters['timeout_ms']!),
+    ),
+    cwd: z.string().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'cwd', BUILTIN.parameters['cwd']!),
+    ),
+    stdin: z.string().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'stdin', BUILTIN.parameters['stdin']!),
+    ),
+    confirmed: z.boolean().describe(
+      getParamDescription(reg, TOOL_NAME, 'confirmed', BUILTIN.parameters['confirmed']!),
+    ),
+  });
 
   const allowedRoots = cfg.bash.allowedRoots.length > 0
     ? cfg.bash.allowedRoots.map((r) => path.resolve(r))
     : [path.resolve(process.cwd())];
 
   return new DynamicStructuredTool({
-    name: 'bash_run',
+    name: TOOL_NAME,
     description,
     schema,
     func: async (input) => {

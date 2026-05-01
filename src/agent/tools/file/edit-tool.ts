@@ -5,25 +5,42 @@ import { resolveSandboxPath } from './sandbox.js';
 import { handleToolError } from '../types.js';
 import { FileError } from '../../../errors.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
 
-const schema = z.object({
-  path: z.string().min(1).describe('File path to edit.'),
-  find: z.string().min(1).describe('Exact substring or regex pattern to find.'),
-  replace: z.string().describe('Replacement string.'),
-  occurrence: z.enum(['first', 'all']).optional().describe('Which occurrence to replace: "first" (default) or "all".'),
-  use_regex: z.boolean().optional().describe('Treat find as a regular expression.'),
-  confirmed: z.boolean().describe('Must be true to proceed.'),
-});
+const TOOL_NAME = 'file_edit';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createFileEditTool(cfg: AgentConfig): DynamicStructuredTool {
   const sandboxCfg = {
     root: cfg.fileEdit.root,
     allowPaths: [...cfg.fileEdit.allowPaths],
   };
+  const reg = cfg.toolPromptOverlays;
+  const schema = z.object({
+    path: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'path', BUILTIN.parameters['path']!),
+    ),
+    find: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'find', BUILTIN.parameters['find']!),
+    ),
+    replace: z.string().describe(
+      getParamDescription(reg, TOOL_NAME, 'replace', BUILTIN.parameters['replace']!),
+    ),
+    occurrence: z.enum(['first', 'all']).optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'occurrence', BUILTIN.parameters['occurrence']!),
+    ),
+    use_regex: z.boolean().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'use_regex', BUILTIN.parameters['use_regex']!),
+    ),
+    confirmed: z.boolean().describe(
+      getParamDescription(reg, TOOL_NAME, 'confirmed', BUILTIN.parameters['confirmed']!),
+    ),
+  });
 
   return new DynamicStructuredTool({
-    name: 'file_edit',
-    description: '[MUTATING] Find and replace text in a file. Requires confirmed: true.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
     func: async (input) => {
       try {

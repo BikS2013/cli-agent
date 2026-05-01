@@ -371,3 +371,94 @@ to its current status.
 | 9    | `npm test` passes with new + existing specs                                                                                          | DEFERRED to Phase 10 verifier (build + test run is out-of-scope for U6 documentation unit) |
 | 10   | `Issues - Pending Items.md` updated with deferrals                                                                                   | MET    |
 | 11   | Token-budget assertion implemented as test, passing                                                                                  | MET (asserted in `agent-tools-block.spec.ts` per NFR-NEW-001 ceilings) |
+
+## Tool Prompt Overlays (FR-OVR-*)
+
+Plan reference: `docs/design/plan-004-tool-prompt-overlays.md`.
+Design: `docs/design/project-design.md` §11.
+
+### FR-OVR-001: Tool prompt overlay directory
+
+`bootstrapAgentDir` creates `~/.tool-agents/cli-agent/tool-prompts/` (mode
+`0700`) on first run if absent. The directory holds one user-editable
+markdown file per registered tool. **Status: Accepted.**
+
+### FR-OVR-002: Built-in tool prompt registry
+
+A single registry (`src/agent/tools/tool-prompts-builtin.ts`) exports
+`BUILTIN_TOOL_PROMPTS`, a frozen map from tool name to
+`{ description, parameters }`. This is the authoritative source for
+built-in defaults — every tool factory, the bootstrap seeder, the extract
+command, and the audit command read from it. **Status: Accepted.**
+
+### FR-OVR-003: Markdown overlay file format
+
+Each `<tool>.md` file under `tool-prompts/` uses a fixed markdown shape:
+H1 = canonical tool name; `## Description` body = tool description;
+`## Parameters` with `### <param>` subsections for each parameter
+description. No YAML frontmatter; no external parser dependency.
+**Status: Accepted.**
+
+### FR-OVR-004: Overlay loader
+
+`loadOverlayRegistry(cfg)` reads every `*.md` file under the overlay dir,
+validates structure (H1 matches filename; `## Description` non-empty;
+no duplicate parameter names), and returns an `OverlayRegistry`. On any
+parse / mismatch error: throws `ConfigurationError` naming the file. On
+missing directory: returns empty registry (no overlays). **Status: Accepted.**
+
+### FR-OVR-005: Tool factory integration
+
+Every tool factory consults the registry via `getToolDescription` and
+`getParamDescription` helpers; missing overlay = built-in default applies.
+This is NOT a fallback for missing required configuration — it is the
+explicit "no overlay" state and is the documented baseline. **Status: Accepted.**
+
+### FR-OVR-006: First-run bootstrap (additive)
+
+`bootstrapAgentDir` writes one overlay file per `BUILTIN_TOOL_PROMPTS`
+entry on first run. On subsequent runs the seed is **additive only** —
+existing files are never overwritten; only files for newly-added tools
+(introduced in later releases) are seeded. A one-line stderr message
+reports any newly-seeded files. **Status: Accepted.**
+
+### FR-OVR-007: extract-tool-prompts subcommand
+
+`cli-agent extract-tool-prompts [--force]` walks `BUILTIN_TOOL_PROMPTS`
+and writes one overlay file per tool. Idempotent: existing files are
+skipped unless `--force` is passed. Exits 0 on success; reports the
+list of files written and skipped. **Status: Accepted.**
+
+### FR-OVR-008: show-tool-prompt subcommand
+
+`cli-agent show-tool-prompt --tool <name>` loads the overlay registry,
+merges with built-in defaults, and prints the effective tool description
+plus per-parameter descriptions to stdout. Used to verify overlays are
+taking effect without launching the agent. Exits 1 if `<name>` is not
+in `BUILTIN_TOOL_PROMPTS`. **Status: Accepted.**
+
+### FR-OVR-009: audit-tool-prompts subcommand
+
+`cli-agent audit-tool-prompts [--strict]` cross-checks every overlay
+file against `BUILTIN_TOOL_PROMPTS`:
+- overlays for tools no longer in the registry → warning
+- parameters in overlay but not in built-in → warning
+- parameters in built-in but missing from overlay → warning
+
+Exits 0 unless `--strict` is set, in which case any warning yields
+exit 1 (CI-gate use case). **Status: Accepted.**
+
+### NFR-OVR-001: Subcommand --tool flag immune to parent shadowing
+
+All three new subcommands (`extract-tool-prompts`, `show-tool-prompt`,
+`audit-tool-prompts`) use the `cmd.optsWithGlobals()` + `pickFirstTool()`
+recovery pattern from `src/cli.ts` to avoid the Commander.js parent-program
+`--tool` shadowing bug fixed in 0.1.1. **Status: Accepted.**
+
+### NFR-OVR-002: Registry-completeness invariant
+
+A test asserts that every tool name returned by `buildToolCatalog(cfg)`
+under default config has a matching entry in `BUILTIN_TOOL_PROMPTS`. This
+catches the "added a new tool, forgot to register its prompt" regression
+at CI time. **Status: Accepted.**
+

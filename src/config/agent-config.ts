@@ -18,6 +18,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { ConfigurationError, ProviderNotSupportedError, UsageError } from '../errors.js';
 import { BUILTIN_DEFAULT_SYSTEM_PROMPT } from '../agent/system-prompt.js';
+import { BUILTIN_TOOL_PROMPTS } from '../agent/tools/tool-prompts-builtin.js';
+import {
+  loadOverlayRegistry,
+  serializeOverlay,
+  type OverlayRegistry,
+} from '../agent/tools/tool-prompt-overlay.js';
 
 export const AGENT_TOOL_NAME = 'cli-agent';
 
@@ -112,6 +118,12 @@ export interface AgentConfigFile {
       readonly todoWrite?: boolean;
     };
   };
+  /** Optional override for the tool-prompt overlay directory. When unset
+   * the resolver computes `<agentDir>/tool-prompts/`. Same path-resolution
+   * rules as the system prompt: absolute path → verbatim; bare folder
+   * name → joined onto `agentDir`; relative path with separators →
+   * resolved against `process.cwd()`. */
+  readonly toolPromptsDir?: string;
 }
 
 /** Frozen provider env snapshot — factories read only from this. */
@@ -184,6 +196,24 @@ export interface AgentConfig {
       readonly todoWrite: boolean;
     };
   };
+  /** Absolute path to the tool-prompt overlay directory. Always populated
+   * by `loadAgentConfig` — resolved from config.json override or
+   * `<agentDir>/tool-prompts/`. The directory is created during
+   * bootstrap and seeded with one `.md` file per built-in tool.
+   *
+   * Marked optional on the static type to keep older test fixtures
+   * type-compatible; production code reads this field via
+   * `loadAgentConfig`, which always populates it. */
+  readonly toolPromptsDir?: string;
+  /** Loaded overlay registry. Always populated by `loadAgentConfig`
+   * (frozen empty registry when no overlay files exist). Tool factories
+   * consult this via `getToolDescription` / `getParamDescription` to
+   * produce the effective LLM-visible description text.
+   *
+   * Marked optional on the static type to keep older test fixtures
+   * type-compatible. The runtime helpers tolerate `undefined` and
+   * fall through to the built-in default. */
+  readonly toolPromptOverlays?: OverlayRegistry;
 }
 
 /** CLI flags. */
@@ -267,11 +297,16 @@ export function agentLogsDir(): string {
 
 /* ---------- Bootstrap ---------- */
 
-export async function bootstrapAgentDir(dir?: string): Promise<void> {
+export async function bootstrapAgentDir(
+  dir?: string,
+  opts: { toolPromptsDir?: string; seedToolPrompts?: boolean } = {},
+): Promise<void> {
   const agentDir = dir ?? agentToolAgentsDir();
   const envPath = path.join(agentDir, '.env');
   const logsDir = path.join(agentDir, 'logs');
   const capabilitiesDir = path.join(agentDir, 'capabilities');
+  const toolPromptsDir = opts.toolPromptsDir ?? path.join(agentDir, 'tool-prompts');
+  const seedToolPrompts = opts.seedToolPrompts ?? true;
 
   await fsp.mkdir(agentDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(agentDir, 0o700); } catch { /* tolerated on Windows */ }
@@ -281,6 +316,10 @@ export async function bootstrapAgentDir(dir?: string): Promise<void> {
 
   await fsp.mkdir(capabilitiesDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(capabilitiesDir, 0o700); } catch { /* tolerated */ }
+
+  if (seedToolPrompts) {
+    await bootstrapToolPromptsDir(toolPromptsDir);
+  }
 
   // Seed .env only if absent
   let envExists = false;
@@ -380,6 +419,50 @@ export async function bootstrapAgentDir(dir?: string): Promise<void> {
     }
   }
   try { await fsp.chmod(envPath, 0o600); } catch { /* tolerated */ }
+}
+
+/**
+ * Create the tool-prompt overlay directory (mode 0700) if absent and
+ * additively seed any built-in overlays that don't yet exist on disk
+ * (mode 0600). Existing files are NEVER overwritten — that preserves
+ * user edits across upgrades.
+ *
+ * Reports the count + names of newly-seeded files to stderr in a single
+ * one-line summary so the user knows when a release introduced new
+ * overlays.
+ */
+export async function bootstrapToolPromptsDir(toolPromptsDir: string): Promise<string[]> {
+  await fsp.mkdir(toolPromptsDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(toolPromptsDir, 0o700); } catch { /* tolerated */ }
+
+  const seededNames: string[] = [];
+  for (const [toolName, builtin] of Object.entries(BUILTIN_TOOL_PROMPTS)) {
+    const filePath = path.join(toolPromptsDir, `${toolName}.md`);
+    let exists = false;
+    try {
+      await fsp.access(filePath, fs.constants.F_OK);
+      exists = true;
+    } catch { exists = false; }
+    if (exists) {
+      try { await fsp.chmod(filePath, 0o600); } catch { /* tolerated */ }
+      continue;
+    }
+    const body = serializeOverlay(toolName, builtin);
+    try {
+      await fsp.writeFile(filePath, body, { mode: 0o600, flag: 'wx' });
+      seededNames.push(toolName);
+    } catch (e) {
+      const code = (e as { code?: string }).code;
+      if (code !== 'EEXIST') throw e;
+    }
+    try { await fsp.chmod(filePath, 0o600); } catch { /* tolerated */ }
+  }
+  if (seededNames.length > 0) {
+    process.stderr.write(
+      `[cli-agent] seeded ${seededNames.length} new tool-prompt overlays: ${seededNames.join(', ')}\n`,
+    );
+  }
+  return seededNames;
 }
 
 /* ---------- Minimal .env parser (no external dep) ---------- */
@@ -563,10 +646,32 @@ export async function loadAgentConfig(
   opts: { shellEnv?: NodeJS.ProcessEnv; cwd?: string } = {},
 ): Promise<AgentConfig> {
   const agentDir = agentToolAgentsDir();
-  await bootstrapAgentDir(agentDir);
 
   const shellEnv = opts.shellEnv ?? process.env;
   const cwd = opts.cwd ?? process.cwd();
+
+  // Bootstrap the agent dir EARLY so the seeded `.env`, capabilities,
+  // and tool-prompts overlays are present even on the first invocation
+  // — and even when later resolution steps (e.g. `resolveProvider`) raise
+  // a `ConfigurationError`. We need the config.json override for
+  // `toolPromptsDir` first, so eager-load just config.json (cheap),
+  // then bootstrap with the resolved directory.
+  const earlyConfigFilePath = flags.configFile ?? path.join(agentDir, 'config.json');
+  const earlyConfigFile = await readConfigFile(earlyConfigFilePath);
+  const earlyToolPromptsRaw = earlyConfigFile?.toolPromptsDir;
+  let earlyToolPromptsDir: string;
+  if (earlyToolPromptsRaw && earlyToolPromptsRaw.length > 0) {
+    if (path.isAbsolute(earlyToolPromptsRaw)) {
+      earlyToolPromptsDir = earlyToolPromptsRaw;
+    } else if (!earlyToolPromptsRaw.includes('/') && !earlyToolPromptsRaw.includes('\\')) {
+      earlyToolPromptsDir = path.join(agentDir, earlyToolPromptsRaw);
+    } else {
+      earlyToolPromptsDir = path.resolve(cwd, earlyToolPromptsRaw);
+    }
+  } else {
+    earlyToolPromptsDir = path.join(agentDir, 'tool-prompts');
+  }
+  await bootstrapAgentDir(agentDir, { toolPromptsDir: earlyToolPromptsDir });
 
   // Layer 1: shell env (baseline — Policy A: shell wins)
   const layered: Record<string, string | undefined> = {};
@@ -594,8 +699,9 @@ export async function loadAgentConfig(
   }
 
   // Load config.json
-  const configFilePath = flags.configFile ?? path.join(agentDir, 'config.json');
-  const configFile = await readConfigFile(configFilePath);
+  // We already read config.json once during early-bootstrap; reuse the
+  // cached value (the path was computed identically).
+  const configFile = earlyConfigFile;
 
   // Layer 4: CLI flags override everything.
   const provider = resolveProvider(
@@ -712,6 +818,13 @@ export async function loadAgentConfig(
     }
   }
 
+  // Tool-prompt overlay directory was already resolved + seeded at the
+  // top of `loadAgentConfig` (the early-bootstrap path). Reuse the same
+  // resolution to load the registry now that we're definitively past
+  // any config.json override.
+  const toolPromptsDir = earlyToolPromptsDir;
+  const toolPromptOverlays = await loadOverlayRegistry(toolPromptsDir);
+
   return {
     provider,
     model,
@@ -739,6 +852,8 @@ export async function loadAgentConfig(
     systemPromptPath,
     systemAppendText: flags.system,
     systemAppendFile: flags.systemFile,
+    toolPromptsDir,
+    toolPromptOverlays,
     // Agent-tools pack — fully resolved through the four-tier chain. The
     // resolver applies explicit defaults (NOT fallbacks for missing
     // required config) at the end. Downstream code (registry / catalog

@@ -31,26 +31,25 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable, AgentToolsSession, TodoItem } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  getParamDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. */
 export const AGT_TODO_WRITE_NAME = 'agt_todo_write' as const;
 
 /**
- * Trimmed from `todowrite.prompt.md` (~8.8 KiB upstream — the upstream
- * embeds extensive examples). The full prompt remains preserved upstream.
- * The shorter description below preserves the upstream voice and the
- * critical "full-list-replace" + "one in_progress at a time" rules.
+ * Sourced from the canonical `BUILTIN_TOOL_PROMPTS` registry. Trimmed
+ * from `todowrite.prompt.md` (~8.8 KiB upstream — the upstream embeds
+ * extensive examples). The full prompt remains preserved upstream. The
+ * shorter description preserves the upstream voice and the critical
+ * "full-list-replace" + "one in_progress at a time" rules.
  */
 export const AGT_TODO_WRITE_DESCRIPTION =
-  'Replace the in-process todo list for the current session. ' +
-  'Full-list-replace semantics: the supplied `todos` array becomes the ' +
-  'new canonical list and the previous list is discarded entirely. ' +
-  'Use proactively for multi-step tasks (3+ steps), tasks the user gave ' +
-  'as a list, or after receiving new instructions. Each todo carries ' +
-  '`{id, content, status: pending|in_progress|completed, priority?: ' +
-  'high|medium|low}`. Keep at most ONE item `in_progress` at a time. ' +
-  'Skip the todo list for trivial single-step or purely conversational ' +
-  'requests.';
+  BUILTIN_TOOL_PROMPTS[AGT_TODO_WRITE_NAME]!.description;
 
 const todoItemSchema = z.object({
   id: z
@@ -72,18 +71,10 @@ const todoItemSchema = z.object({
     .describe('Optional relative priority hint.'),
 });
 
-const agtTodoWriteSchema = z.object({
-  todos: z
-    .array(todoItemSchema)
-    .describe(
-      'The complete updated todo list. Replaces any previously stored list ' +
-        'in full. Pass an empty array to clear all todos.',
-    ),
-});
-
 /** Dependency bag injected by U5. */
 export interface AgtTodoWriteDeps {
   permissions: PermissionPolicy;
+  overlays?: OverlayRegistry;
 }
 
 /** Build a transient upstream `SessionStore` from the wrapper-owned store. */
@@ -109,10 +100,21 @@ function syncSessionFromUpstream(
 export function buildAgtTodoWriteTool(
   deps: AgtTodoWriteDeps,
 ): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_TODO_WRITE_NAME]!;
+  const reg = deps.overlays;
+  // Override the top-level `todos` describe via overlay; nested item
+  // schema stays as the upstream-defined describe.
+  const agtTodoWriteSchemaWithOverlay = z.object({
+    todos: z
+      .array(todoItemSchema)
+      .describe(
+        getParamDescription(reg, AGT_TODO_WRITE_NAME, 'todos', BUILTIN.parameters['todos']!),
+      ),
+  });
   return new DynamicStructuredTool({
     name: AGT_TODO_WRITE_NAME,
-    description: AGT_TODO_WRITE_DESCRIPTION,
-    schema: agtTodoWriteSchema,
+    description: getToolDescription(reg, AGT_TODO_WRITE_NAME, BUILTIN.description),
+    schema: agtTodoWriteSchemaWithOverlay,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {

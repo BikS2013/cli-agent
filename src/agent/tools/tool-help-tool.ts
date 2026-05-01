@@ -5,17 +5,28 @@ import path from 'node:path';
 import { handleToolError } from './types.js';
 import { CapabilityError } from '../../errors.js';
 import type { AgentConfig } from '../../config/agent-config.js';
+import { BUILTIN_TOOL_PROMPTS } from './tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from './tool-prompt-overlay.js';
 
-const schema = z.object({
-  tool: z.string().min(1).describe('Name of the wrapped CLI tool to look up.'),
-  subcommand: z.string().optional().describe('Specific subcommand to retrieve help for.'),
-  section: z.enum(['full', 'frontmatter', 'synopsis']).optional().describe('Which part of the document to return: "full" (default), "frontmatter", or "synopsis".'),
-});
+const TOOL_NAME = 'tool_help';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createToolHelpTool(cfg: AgentConfig): DynamicStructuredTool {
+  const reg = cfg.toolPromptOverlays;
+  const schema = z.object({
+    tool: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'tool', BUILTIN.parameters['tool']!),
+    ),
+    subcommand: z.string().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'subcommand', BUILTIN.parameters['subcommand']!),
+    ),
+    section: z.enum(['full', 'frontmatter', 'synopsis']).optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'section', BUILTIN.parameters['section']!),
+    ),
+  });
   return new DynamicStructuredTool({
-    name: 'tool_help',
-    description: 'Look up the full help text of a wrapped CLI tool or one of its subcommands when the in-prompt summary is insufficient.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
     func: async (input) => {
       try {

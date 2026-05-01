@@ -17,6 +17,9 @@ import { Command } from 'commander';
 import { runAgentCommand } from './commands/agent.js';
 import { runShowCapabilities } from './commands/show-capabilities.js';
 import { runRefreshCapabilities } from './commands/refresh-capabilities.js';
+import { runExtractToolPrompts } from './commands/extract-tool-prompts.js';
+import { runShowToolPrompt } from './commands/show-tool-prompt.js';
+import { runAuditToolPrompts } from './commands/audit-tool-prompts.js';
 import { CliAgentError } from './errors.js';
 import { redactString } from './util/redact.js';
 import { mapAgentToolFlags } from './cli-agent-tools-flags.js';
@@ -32,7 +35,7 @@ const program = new Command();
 program
   .name('cli-agent')
   .description('Generic LangGraph ReAct agent that wraps external CLI binaries.')
-  .version('0.1.0');
+  .version('0.2.0');
 
 /* ---------- Default command: agent run ---------- */
 program
@@ -153,6 +156,66 @@ program
       await runRefreshCapabilities(toolName, {
         provider: opts['provider'] as string | undefined,
         model: opts['model'] as string | undefined,
+        configFile: opts['config'] as string | undefined,
+        envFile: opts['envFile'] as string | undefined,
+      });
+    });
+  });
+
+/* ---------- extract-tool-prompts subcommand ---------- */
+program
+  .command('extract-tool-prompts')
+  .description('Write/refresh per-tool overlay markdown files under <agentDir>/tool-prompts/.')
+  .option('--force', 'Overwrite existing overlay files (default: skip)', false)
+  .option('--config <path>', 'Path to config.json')
+  .option('--env-file <path>', 'Path to .env file')
+  .action(async function (this: Command, opts: Record<string, unknown>) {
+    await handleErrors(async () => {
+      // Recover from any parent-shadowing — parent program owns no
+      // overlapping flags, but we keep the pattern consistent so future
+      // additions don't regress.
+      const merged = this.optsWithGlobals();
+      void merged;
+      await runExtractToolPrompts({
+        force: opts['force'] as boolean | undefined,
+        configFile: opts['config'] as string | undefined,
+        envFile: opts['envFile'] as string | undefined,
+      });
+    });
+  });
+
+/* ---------- show-tool-prompt subcommand ---------- */
+program
+  .command('show-tool-prompt')
+  .description('Print the effective (overlay-merged) prompt block for a tool.')
+  .option('--tool <name>', 'Tool name to show')
+  .option('--config <path>', 'Path to config.json')
+  .option('--env-file <path>', 'Path to .env file')
+  .action(async function (this: Command, opts: Record<string, unknown>) {
+    await handleErrors(async () => {
+      // Parent program also defines `--tool` (repeatable aggregator).
+      // Recover from the merged globals when our local capture is undefined.
+      const merged = this.optsWithGlobals() as Record<string, unknown>;
+      const toolName =
+        (opts['tool'] as string | undefined) ?? pickFirstTool(merged['tool']);
+      await runShowToolPrompt(toolName, {
+        configFile: opts['config'] as string | undefined,
+        envFile: opts['envFile'] as string | undefined,
+      });
+    });
+  });
+
+/* ---------- audit-tool-prompts subcommand ---------- */
+program
+  .command('audit-tool-prompts')
+  .description('Cross-check overlay files against the current built-in registry.')
+  .option('--strict', 'Exit non-zero on any drift warning', false)
+  .option('--config <path>', 'Path to config.json')
+  .option('--env-file <path>', 'Path to .env file')
+  .action(async function (this: Command, opts: Record<string, unknown>) {
+    await handleErrors(async () => {
+      await runAuditToolPrompts({
+        strict: opts['strict'] as boolean | undefined,
         configFile: opts['config'] as string | undefined,
         envFile: opts['envFile'] as string | undefined,
       });

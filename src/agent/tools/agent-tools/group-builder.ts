@@ -52,6 +52,7 @@ import {
   buildAgtTodoWriteTool,
 } from './index.js';
 import type { PermissionPolicy } from '../agent-tools-vendored/upstream/src/types.js';
+import { getToolDescription } from '../tool-prompt-overlay.js';
 
 /**
  * Per-tool entry surfaced to the prompt-block assembler. The `description`
@@ -127,13 +128,25 @@ export function buildAgentToolsGroup(
   const registered: AgentToolsCatalogEntry[] = [];
   const flags = cfg.agentTools.tools;
 
+  // The overlay registry threads through the wrappers so the LangChain
+  // `description` and per-parameter `.describe(...)` strings reflect the
+  // user's on-disk overlay (or the canonical built-in default when no
+  // overlay is registered).
+  const overlays = cfg.toolPromptOverlays;
+
   if (flags.glob) {
-    tools.push(buildAgtGlobTool({ permissions: policy }));
-    registered.push({ name: AGT_GLOB_NAME, description: AGT_GLOB_DESCRIPTION });
+    tools.push(buildAgtGlobTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_GLOB_NAME,
+      description: getToolDescription(overlays, AGT_GLOB_NAME, AGT_GLOB_DESCRIPTION),
+    });
   }
   if (flags.grep) {
-    tools.push(buildAgtGrepTool({ permissions: policy }));
-    registered.push({ name: AGT_GREP_NAME, description: AGT_GREP_DESCRIPTION });
+    tools.push(buildAgtGrepTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_GREP_NAME,
+      description: getToolDescription(overlays, AGT_GREP_NAME, AGT_GREP_DESCRIPTION),
+    });
   }
   // Mutating wrappers: BOTH the per-tool flag AND cfg.allowMutations must
   // be true. If only the per-tool flag is set, the wrapper is silently
@@ -141,20 +154,32 @@ export function buildAgentToolsGroup(
   // gating in registry.ts). Users who enable `agt_multiedit` / `agt_patch`
   // also need `--allow-mutations` (or AGENT_ALLOW_MUTATIONS=true).
   if (flags.multiedit && cfg.allowMutations) {
-    tools.push(buildAgtMultieditTool({ permissions: policy }));
-    registered.push({ name: AGT_MULTIEDIT_NAME, description: AGT_MULTIEDIT_DESCRIPTION });
+    tools.push(buildAgtMultieditTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_MULTIEDIT_NAME,
+      description: getToolDescription(overlays, AGT_MULTIEDIT_NAME, AGT_MULTIEDIT_DESCRIPTION),
+    });
   }
   if (flags.patch && cfg.allowMutations) {
-    tools.push(buildAgtPatchTool({ permissions: policy }));
-    registered.push({ name: AGT_PATCH_NAME, description: AGT_PATCH_DESCRIPTION });
+    tools.push(buildAgtPatchTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_PATCH_NAME,
+      description: getToolDescription(overlays, AGT_PATCH_NAME, AGT_PATCH_DESCRIPTION),
+    });
   }
   if (flags.todoRead) {
-    tools.push(buildAgtTodoReadTool({ permissions: policy }));
-    registered.push({ name: AGT_TODO_READ_NAME, description: AGT_TODO_READ_DESCRIPTION });
+    tools.push(buildAgtTodoReadTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_TODO_READ_NAME,
+      description: getToolDescription(overlays, AGT_TODO_READ_NAME, AGT_TODO_READ_DESCRIPTION),
+    });
   }
   if (flags.todoWrite) {
-    tools.push(buildAgtTodoWriteTool({ permissions: policy }));
-    registered.push({ name: AGT_TODO_WRITE_NAME, description: AGT_TODO_WRITE_DESCRIPTION });
+    tools.push(buildAgtTodoWriteTool({ permissions: policy, overlays }));
+    registered.push({
+      name: AGT_TODO_WRITE_NAME,
+      description: getToolDescription(overlays, AGT_TODO_WRITE_NAME, AGT_TODO_WRITE_DESCRIPTION),
+    });
   }
 
   return {

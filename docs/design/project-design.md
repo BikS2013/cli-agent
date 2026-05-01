@@ -1309,3 +1309,136 @@ runs last.
 
 ---
 
+
+## §11. User-editable tool prompt overlays
+
+**Plan reference**: `docs/design/plan-004-tool-prompt-overlays.md`.
+**Functions**: FR-OVR-001 … FR-OVR-009 + NFR-OVR-001 / NFR-OVR-002 in
+`docs/design/project-functions.md`.
+
+### §11.A Architecture diagram (text)
+
+```
+                ┌──────────────────────────────────────┐
+                │ ~/.tool-agents/cli-agent/            │
+                │   tool-prompts/                      │
+                │     file_read.md                     │
+                │     file_list.md                     │
+                │     ...   (one MD file per tool)     │
+                └──────────────┬───────────────────────┘
+                               │  read on every cli-agent run
+                               ▼
+                    ┌──────────────────────┐
+                    │ loadOverlayRegistry  │     (parses + validates)
+                    └──────────┬───────────┘
+                               │ ParsedOverlay map
+                               ▼
+                    cfg.toolPromptOverlays  (carried on AgentConfig)
+                               │
+                ┌──────────────┴────────────────┐
+                ▼                               ▼
+   ┌────────────────────────┐      ┌──────────────────────────┐
+   │ BUILTIN_TOOL_PROMPTS   │      │ getToolDescription/      │
+   │ (in-binary defaults)   │      │ getParamDescription      │
+   └────────────────────────┘      │ (overlay-or-default)     │
+                ▲                  └──────────┬───────────────┘
+                │                             │
+                │                             ▼
+                │                ┌──────────────────────────┐
+                │                │ Each tool factory        │
+                │                │  (file_*, web_*, bash_*, │
+                │                │   tool_help, agt_*)      │
+                │                └──────────┬───────────────┘
+                │                           │
+                │                           ▼
+                │                ┌──────────────────────────┐
+                │                │ DynamicStructuredTool    │
+                │                │  .description / .schema  │
+                │                └──────────┬───────────────┘
+                │                           │
+                ▼                           ▼
+        ┌───────────────────────────────────────────┐
+        │ buildToolCatalog → bindTools to LLM       │
+        └───────────────────────────────────────────┘
+```
+
+### §11.B Module layout
+
+| File | Role |
+|---|---|
+| `src/agent/tools/tool-prompts-builtin.ts` | Single source of truth for built-in defaults: `BUILTIN_TOOL_PROMPTS` map keyed by tool name |
+| `src/agent/tools/tool-prompt-overlay.ts` | Parser + loader + helpers (`parseOverlayFile`, `loadOverlayRegistry`, `getToolDescription`, `getParamDescription`, `serializeOverlay`) |
+| `src/agent/tools/tool-prompt-overlay.spec.ts` | Parser + loader + helper tests |
+| `src/config/agent-config.ts` | Adds `AgentConfig.toolPromptOverlays` field; bootstrap auto-seed |
+| `src/commands/extract-tool-prompts.ts` | `extract-tool-prompts` subcommand |
+| `src/commands/show-tool-prompt.ts` | `show-tool-prompt` subcommand |
+| `src/commands/audit-tool-prompts.ts` | `audit-tool-prompts` subcommand |
+| `src/cli.ts` | 3 new subcommands wired through `optsWithGlobals` + `pickFirstTool` |
+| `src/agent/tools/<group>/<name>-tool.ts` | Each factory consults the overlay registry for its description + parameters |
+
+### §11.C Markdown overlay format
+
+```markdown
+# <tool name>
+
+## Description
+
+<free-form prose, multi-paragraph allowed>
+
+## Parameters
+
+### <param-name-1>
+
+<param description>
+
+### <param-name-2>
+
+<param description>
+```
+
+Validation rules:
+1. Exactly one H1 line at the top; its content (after `# `) MUST equal the
+   filename without the `.md` suffix. Mismatch → `ConfigurationError`.
+2. `## Description` section is mandatory; body must be non-empty.
+3. `## Parameters` section is optional. If present, contains zero or more
+   `### <param>` subsections. Duplicate parameter names → `ConfigurationError`.
+4. Body of each section is verbatim markdown (preserved on extract/show/audit).
+   Trailing whitespace is trimmed; internal whitespace is preserved.
+
+### §11.D Bootstrap behavior
+
+`bootstrapAgentDir` extension:
+
+```
+1. Ensure ~/.tool-agents/cli-agent/tool-prompts/ exists (mode 0700).
+2. For each (toolName, builtin) in BUILTIN_TOOL_PROMPTS:
+     filename = <toolName>.md
+     if not exists at <toolPromptsDir>/<filename>:
+       write serializeOverlay(toolName, builtin) (mode 0600)
+       record in seeded[]
+3. If seeded.length > 0: stderr "[cli-agent] seeded N new tool-prompt overlays: <names>"
+```
+
+Additive-only: existing files are never modified, never overwritten. The user
+remains in full control of their edits across upgrades.
+
+### §11.E Architectural decisions
+
+- **ADR-OVR-1**: Pure markdown format (no YAML frontmatter). Rejecting
+  `js-yaml` dependency keeps install size unchanged. The H1 → filename
+  cross-check provides the "tool: name" sanity check that frontmatter would
+  otherwise carry.
+- **ADR-OVR-2**: Single registry file (`BUILTIN_TOOL_PROMPTS`) instead of
+  one constants file per tool. Easier to scan, easier to audit, and the
+  type system catches missing-tool regressions at compile time.
+- **ADR-OVR-3**: Full overwrite, no templating (no `{{default}}` substitution
+  in v1). Keeps the format simple; users who want partial override can copy
+  the built-in description and edit. If demand emerges, templating can be
+  added later without breaking existing files.
+- **ADR-OVR-4**: Stale parameter overlays log a one-time warning at startup
+  but do not abort. Hard fail would lock the user out after a parameter
+  rename in a later release. Hard fail is reserved for malformed-format
+  errors (genuine corruption, not version drift).
+- **ADR-OVR-5**: Bootstrap is additive-only and runs on every cold start
+  (not just first run). Catches new tools introduced in later releases
+  without forcing the user to re-run `extract-tool-prompts`.

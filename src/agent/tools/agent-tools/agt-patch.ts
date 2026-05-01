@@ -24,43 +24,45 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  getParamDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. */
 export const AGT_PATCH_NAME = 'agt_patch' as const;
 
 /**
- * Trimmed from `patch.prompt.md` (~1.1 KiB upstream). The original full
- * prompt — which includes the worked example envelope — remains preserved
+ * Sourced from the canonical `BUILTIN_TOOL_PROMPTS` registry. Trimmed
+ * from `patch.prompt.md` (~1.1 KiB upstream). The original full prompt
+ * — which includes the worked example envelope — remains preserved
  * upstream at `agent-tools-vendored/upstream/src/tools/patch/patch.prompt.md`.
  */
 export const AGT_PATCH_DESCRIPTION =
-  'Apply a `*** Begin Patch ... *** End Patch` envelope describing ' +
-  'add/update/delete/move operations across one or more files. Each file ' +
-  'section starts with `*** Add File: <path>`, `*** Delete File: <path>`, ' +
-  'or `*** Update File: <path>` (optionally followed by `*** Move to: ' +
-  '<path>`). Add/Update line bodies are prefixed with `+`/`-`. Pre-flight ' +
-  'validates every hunk and every permission BEFORE any disk write, so ' +
-  'partial application is impossible.';
-
-const agtPatchSchema = z.object({
-  patchText: z
-    .string()
-    .min(1)
-    .describe(
-      'The full `*** Begin Patch ... *** End Patch` envelope describing ' +
-        'add/update/delete/move operations across one or more files.',
-    ),
-});
+  BUILTIN_TOOL_PROMPTS[AGT_PATCH_NAME]!.description;
 
 /** Dependency bag injected by U5. */
 export interface AgtPatchDeps {
   permissions: PermissionPolicy;
+  overlays?: OverlayRegistry;
 }
 
 export function buildAgtPatchTool(deps: AgtPatchDeps): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_PATCH_NAME]!;
+  const reg = deps.overlays;
+  const agtPatchSchema = z.object({
+    patchText: z
+      .string()
+      .min(1)
+      .describe(
+        getParamDescription(reg, AGT_PATCH_NAME, 'patchText', BUILTIN.parameters['patchText']!),
+      ),
+  });
   return new DynamicStructuredTool({
     name: AGT_PATCH_NAME,
-    description: AGT_PATCH_DESCRIPTION,
+    description: getToolDescription(reg, AGT_PATCH_NAME, BUILTIN.description),
     schema: agtPatchSchema,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;

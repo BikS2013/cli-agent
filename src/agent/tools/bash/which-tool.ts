@@ -4,15 +4,22 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { parseAllowlistEntries, buildAllowlistMatcher } from './allowlist.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
 
-const schema = z.object({
-  binary: z.string().min(1).describe('Binary name to look up on PATH.'),
-});
+const TOOL_NAME = 'bash_which';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createBashWhichTool(cfg: AgentConfig): DynamicStructuredTool {
+  const reg = cfg.toolPromptOverlays;
+  const schema = z.object({
+    binary: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'binary', BUILTIN.parameters['binary']!),
+    ),
+  });
   return new DynamicStructuredTool({
-    name: 'bash_which',
-    description: 'Resolve a binary name to its full path on PATH and check if it is on the allowlist.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
     func: async (input) => {
       const entries = parseAllowlistEntries([...cfg.bash.allow]);

@@ -2,15 +2,21 @@ import { z } from 'zod';
 import { DynamicStructuredTool } from '@langchain/core/tools';
 import { parseAllowlistEntries, buildAllowlistMatcher } from './allowlist.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription } from '../tool-prompt-overlay.js';
+
+const TOOL_NAME = 'bash_list_allowed';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 const schema = z.object({});
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export function createBashListAllowedTool(cfg: AgentConfig): DynamicStructuredTool<any> {
+  const reg = cfg.toolPromptOverlays;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return new DynamicStructuredTool<any>({
-    name: 'bash_list_allowed',
-    description: 'List all commands currently on the bash allowlist. Call this first before attempting bash_run to know what is permitted.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema: schema as any, // eslint-disable-line @typescript-eslint/no-explicit-any
     func: async () => {
       const entries = parseAllowlistEntries([...cfg.bash.allow]);

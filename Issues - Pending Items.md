@@ -83,6 +83,43 @@
 
 ## Completed
 
+### Done — User-editable tool prompt overlays (plan-004, v0.2.0)
+- **Goal**: let end users tune the LangChain `description` and per-parameter
+  `.describe(...)` strings every native tool exposes through `bindTools`,
+  WITHOUT forking the binary. See `docs/design/plan-004-tool-prompt-overlays.md`
+  and project-design §11 / FR-OVR-001..008.
+- **Implementation**:
+  - New canonical registry at `src/agent/tools/tool-prompts-builtin.ts`
+    holding the EXACT current strings for all 17 native tools. Used as the
+    single source of truth by the bootstrap, the three new commands, and
+    every tool factory.
+  - New loader/parser at `src/agent/tools/tool-prompt-overlay.ts`
+    (regex-based, no new npm dep). Parses `~/.tool-agents/cli-agent/tool-prompts/<name>.md`
+    files; raises `ConfigurationError` (with file path) on malformed input;
+    returns an empty registry when the dir is absent — the documented
+    "no overlay" state.
+  - `bootstrapAgentDir` (and a new `bootstrapToolPromptsDir`) seed all 17
+    overlay files (mode 0600 inside a 0700 dir) on first run; existing
+    files are NEVER overwritten. Newly seeded names are reported to stderr.
+  - Three new CLI subcommands wired into `src/cli.ts` with the
+    `optsWithGlobals` + `pickFirstTool` recovery pattern:
+    `extract-tool-prompts [--force]`, `show-tool-prompt --tool <name>`,
+    `audit-tool-prompts [--strict]`.
+  - All 17 tool factories now consult the overlay registry via
+    `getToolDescription` / `getParamDescription` helpers; the
+    `AGT_*_DESCRIPTION` constants are now thin aliases for
+    `BUILTIN_TOOL_PROMPTS[<name>].description` (single literal per tool).
+  - `AgentConfig` gains `toolPromptsDir` + `toolPromptOverlays`
+    (marked optional on the static type to keep older test fixtures
+    type-compatible; runtime always populates them).
+  - Version bump 0.1.4 → 0.2.0.
+- **Tests**: 21 new tests across two new spec files
+  (`tool-prompt-overlay.spec.ts`, `tool-prompts-builtin.spec.ts`).
+  Full suite 308 → 329 passing. `npm run build` clean. Smoke-tested on a
+  fresh temp HOME — all 17 overlay files seeded with non-empty content,
+  all three new subcommands return valid `--help` output and produce
+  expected output end-to-end.
+
 ### Done — TUI input "creep-up" on word-motion against a wrapped line
 - **Symptom (after 0.1.3)**: pressing word-left or word-right on a wrapped line caused the entire
   input block to visually shift up by one terminal row on each keystroke, without scrolling the

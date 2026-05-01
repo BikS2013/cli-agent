@@ -4,20 +4,33 @@ import { getWebBackend } from './backends/registry.js';
 import { handleToolError } from '../types.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
 import { WebError } from '../../../errors.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
 
-const schema = z.object({
-  query: z.string().min(1).describe('Search query string.'),
-  top_k: z.number().int().positive().optional().describe('Number of results to return (default 5).'),
-  site: z.string().optional().describe('Restrict search to this domain (e.g. "docs.python.org").'),
-  time_range: z.string().optional().describe('Time range filter, e.g. "day", "week", "month".'),
-});
+const TOOL_NAME = 'web_search';
+const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
 
 export function createWebSearchTool(cfg: AgentConfig, requestBudget: { remaining: number }): DynamicStructuredTool {
   const maxRequests = parseInt(process.env['WEB_SEARCH_MAX_REQUESTS'] ?? '50', 10);
+  const reg = cfg.toolPromptOverlays;
+  const schema = z.object({
+    query: z.string().min(1).describe(
+      getParamDescription(reg, TOOL_NAME, 'query', BUILTIN.parameters['query']!),
+    ),
+    top_k: z.number().int().positive().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'top_k', BUILTIN.parameters['top_k']!),
+    ),
+    site: z.string().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'site', BUILTIN.parameters['site']!),
+    ),
+    time_range: z.string().optional().describe(
+      getParamDescription(reg, TOOL_NAME, 'time_range', BUILTIN.parameters['time_range']!),
+    ),
+  });
 
   return new DynamicStructuredTool({
-    name: 'web_search',
-    description: 'Search the public internet and return a list of results with titles, URLs, and snippets. Never fabricate URLs — only use URLs returned by this tool.',
+    name: TOOL_NAME,
+    description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
     func: async (input) => {
       try {

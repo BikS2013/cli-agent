@@ -22,61 +22,61 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  getParamDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. */
 export const AGT_GREP_NAME = 'agt_grep' as const;
 
 /**
- * Trimmed from the upstream `grep.prompt.md` (~689 chars). The original
- * full prompt remains preserved upstream.
+ * Sourced from the canonical `BUILTIN_TOOL_PROMPTS` registry. Trimmed
+ * from the upstream `grep.prompt.md` (~689 chars). The original full
+ * prompt remains preserved upstream.
  */
-export const AGT_GREP_DESCRIPTION =
-  'Fast regex content search across the working directory. ' +
-  'Supports full regex syntax (e.g. "log.*Error", "function\\\\s+\\\\w+"). ' +
-  'Filter files by glob with the `include` parameter (e.g. "*.ts", "*.{ts,tsx}"). ' +
-  'Returns matching files (or lines, depending on `outputMode`) sorted by mtime ' +
-  'descending. Capped at 100 matches. Use when you need to find files containing ' +
-  'specific patterns; prefer this over a manual `bash rg` invocation.';
-
-/** Schema mirrors the upstream `grepInputSchema`. */
-const agtGrepSchema = z.object({
-  pattern: z
-    .string()
-    .min(1)
-    .describe('Regular expression to search for inside file contents.'),
-  path: z
-    .string()
-    .optional()
-    .describe(
-      'Optional file or directory to search. Defaults to the working ' +
-        'directory; resolved relative to it when not absolute.',
-    ),
-  include: z
-    .string()
-    .optional()
-    .describe(
-      'Optional include glob restricting which files are searched ' +
-        '(e.g. "*.ts", "*.{ts,tsx}").',
-    ),
-  outputMode: z
-    .enum(['content', 'files_with_matches', 'count'])
-    .optional()
-    .describe(
-      'Result shape: "files_with_matches" (default) lists paths only, ' +
-        '"count" reports per-file match counts, "content" emits ' +
-        'path:line:matched-text per match.',
-    ),
-});
+export const AGT_GREP_DESCRIPTION = BUILTIN_TOOL_PROMPTS[AGT_GREP_NAME]!.description;
 
 /** Dependency bag injected by U5. */
 export interface AgtGrepDeps {
   permissions: PermissionPolicy;
+  overlays?: OverlayRegistry;
 }
 
 export function buildAgtGrepTool(deps: AgtGrepDeps): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_GREP_NAME]!;
+  const reg = deps.overlays;
+  const agtGrepSchema = z.object({
+    pattern: z
+      .string()
+      .min(1)
+      .describe(
+        getParamDescription(reg, AGT_GREP_NAME, 'pattern', BUILTIN.parameters['pattern']!),
+      ),
+    path: z
+      .string()
+      .optional()
+      .describe(
+        getParamDescription(reg, AGT_GREP_NAME, 'path', BUILTIN.parameters['path']!),
+      ),
+    include: z
+      .string()
+      .optional()
+      .describe(
+        getParamDescription(reg, AGT_GREP_NAME, 'include', BUILTIN.parameters['include']!),
+      ),
+    outputMode: z
+      .enum(['content', 'files_with_matches', 'count'])
+      .optional()
+      .describe(
+        getParamDescription(reg, AGT_GREP_NAME, 'outputMode', BUILTIN.parameters['outputMode']!),
+      ),
+  });
   return new DynamicStructuredTool({
     name: AGT_GREP_NAME,
-    description: AGT_GREP_DESCRIPTION,
+    description: getToolDescription(reg, AGT_GREP_NAME, BUILTIN.description),
     schema: agtGrepSchema,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;

@@ -30,22 +30,22 @@ import type {
   ToolContext,
 } from '../agent-tools-vendored/upstream/src/types.js';
 import type { AgentToolsConfigurable, AgentToolsSession } from './types.js';
+import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
+import {
+  getToolDescription,
+  type OverlayRegistry,
+} from '../tool-prompt-overlay.js';
 
 /** LangChain-visible tool name. */
 export const AGT_TODO_READ_NAME = 'agt_todo_read' as const;
 
 /**
- * Trimmed from `todoread.prompt.md` (~1.2 KiB upstream). The original
- * full prompt remains preserved upstream.
+ * Sourced from the canonical `BUILTIN_TOOL_PROMPTS` registry. Trimmed
+ * from `todoread.prompt.md` (~1.2 KiB upstream). The original full
+ * prompt remains preserved upstream.
  */
 export const AGT_TODO_READ_DESCRIPTION =
-  "Read the agent's session todo list. Returns a human-readable checklist " +
-  '— `[x]` for completed, `[~]` for in-progress, `[ ]` for pending — one ' +
-  'item per line. Use this at the start of a multi-step task to recover ' +
-  'the plan from a previous turn, or after completing a subtask to confirm ' +
-  'what remains. The list is empty (returned as the literal string ' +
-  '"(no todos)") until `agt_todo_write` has been called at least once. ' +
-  'Inputs: none — call with `{}`.';
+  BUILTIN_TOOL_PROMPTS[AGT_TODO_READ_NAME]!.description;
 
 /** Empty input schema — matches upstream. */
 const agtTodoReadSchema = z.object({});
@@ -53,6 +53,7 @@ const agtTodoReadSchema = z.object({});
 /** Dependency bag injected by U5. */
 export interface AgtTodoReadDeps {
   permissions: PermissionPolicy;
+  overlays?: OverlayRegistry;
 }
 
 /**
@@ -69,9 +70,11 @@ function toUpstreamSession(session: AgentToolsSession): SessionStore {
 export function buildAgtTodoReadTool(
   deps: AgtTodoReadDeps,
 ): DynamicStructuredTool {
+  const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_TODO_READ_NAME]!;
+  const reg = deps.overlays;
   return new DynamicStructuredTool({
     name: AGT_TODO_READ_NAME,
-    description: AGT_TODO_READ_DESCRIPTION,
+    description: getToolDescription(reg, AGT_TODO_READ_NAME, BUILTIN.description),
     schema: agtTodoReadSchema,
     func: async (input, _runManager, config) => {
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
