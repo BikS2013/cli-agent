@@ -165,6 +165,14 @@ function getCols(out: NodeJS.WriteStream): number {
   return typeof c === 'number' && c > 0 ? c : 80;
 }
 
+/** Render-state pair returned by `redrawCurrentLine` and threaded through the input loop. */
+export interface RedrawState {
+  /** Total terminal rows the last render occupied. */
+  readonly termRows: number;
+  /** 0-indexed terminal row of the cursor at the end of the last render, measured from the top of the render. */
+  readonly cursorRowFromTop: number;
+}
+
 /**
  * Re-render the buffer from the prompt position.
  *
@@ -172,49 +180,50 @@ function getCols(out: NodeJS.WriteStream): number {
  * single logical line whose visual width plus prompt exceeds the terminal
  * column count wraps to two or more terminal rows; an earlier version of
  * this function conflated the two and left a trail of stale prompts behind
- * each keystroke once a line wrapped (visible bug: Greek/long input would
- * smear copies of `You> ...` across the screen).
+ * each keystroke once a line wrapped (the original wrap-smearing bug).
+ *
+ * It also tracks the **row offset of the cursor at the end of the previous
+ * render** (`cursorRowFromTop`). The cursor doesn't always end at the bottom
+ * row of the previous render — when the user presses Home, word-left, etc.,
+ * the previous redraw left the cursor at the *target* row, which can be the
+ * top of the render. If we naively did `cursorUp(prevTermRows - 1)` from
+ * there, we'd land *above* the input area and `\x1b[J` would wipe the
+ * unrelated row above plus shift content visually up by one row on each
+ * keystroke (the symptom: word-motion makes the line "creep up").
  *
  * Strategy:
- *   1. Move cursor up `prevTermRows - 1` rows to the top of the previous
- *      render, then `\r` to col 0.
- *   2. Erase from cursor to the end of the screen (`\x1b[J`). This single
- *      operation wipes whatever the previous render put on every row from
- *      here downward, regardless of how many rows there are or whether the
- *      caller's `prevTermRows` count is accurate. This is robust against:
- *        - soft-wrap row count drift (the terminal wrapping at a column we
- *          didn't predict, e.g. when a font uses non-monospace cell widths)
- *        - terminal scrolling between redraws
- *        - any stray output from another writer that landed below the input
- *      The previous line-by-line `CLEAR_LINE + \n` loop was correct in the
- *      common case but fragile against any of the above.
- *   3. Redraw all logical lines — the terminal handles the soft-wrap.
- *   4. Position the cursor by computing the target terminal row/column from
- *      the active logical line + col + prompt width + terminal cols.
- *   5. Return the new terminal row count so the next call can move up by it.
+ *   1. Move cursor up by exactly `prev.cursorRowFromTop` rows to reach the
+ *      top of the previous render, then `\r` to col 0.
+ *   2. Erase from cursor to end of screen (`\x1b[J`). One terminal-native
+ *      op that handles any number of rows correctly, even if our row count
+ *      is stale.
+ *   3. Redraw all logical lines — the terminal handles soft-wrap.
+ *   4. Position the cursor by computing the target terminal row/column.
+ *   5. Return the new render state so the next call knows where the cursor
+ *      now sits.
  *
  * Caveat: still does not react to mid-edit terminal resizes (SIGWINCH).
- * If `process.stdout.columns` changes between calls the cursor target math
- * will be off; pressing Enter and resyncing is the workaround.
  */
 export function redrawCurrentLine(
   state: EditorState,
   prompt: string,
   continuationPrompt: string,
   out: NodeJS.WriteStream,
-  prevTermRows: number,
-): number {
+  prev: RedrawState,
+): RedrawState {
   const cols = getCols(out);
 
-  // Move to the top-left of the previous render.
-  if (prevTermRows > 1) {
-    out.write(cursorUp(prevTermRows - 1));
+  // Move to the top-left of the previous render. Use cursorRowFromTop —
+  // NOT prevTermRows-1 — because the cursor may have been positioned
+  // anywhere in the prior render (e.g. on the top row after word-left to
+  // start of line). cursorUp(prevTermRows-1) from anywhere except the
+  // bottom row would overshoot above the input area.
+  if (prev.cursorRowFromTop > 0) {
+    out.write(cursorUp(prev.cursorRowFromTop));
   }
   out.write('\r');
   // Clear from here to end of screen — a single ANSI op that handles any
-  // number of rows correctly, including when our `prevTermRows` count is
-  // stale (the original line-by-line clear loop is the documented cause
-  // of the wrap-redraw smearing bug).
+  // number of rows correctly, including when our row count is stale.
   out.write('\x1b[J');
 
   // Draw all logical lines — terminal handles soft-wrap.
@@ -245,18 +254,11 @@ export function redrawCurrentLine(
   const targetCol = cursorVisualOffset % cols;
   targetRowAbs += subRow;
 
-  // After drawing, terminal cursor is at the END of the LAST logical line.
-  // That position is (totalTermRows - 1) at column ((promptWLast + lastW) % cols),
-  // unless the last line wraps exactly at `cols` (in which case the cursor is
-  // on the same row, at the phantom column — same row index for our purposes).
-  const lastIdx = state.lines.length - 1;
-  const lastPW = lastIdx === 0 ? promptWFirst : promptWCont;
-  const lastVisual = lastPW + state.lines[lastIdx]!.length;
-  const lastWraps = cols > 0 && lastVisual > 0 && lastVisual % cols === 0;
+  // After the draw, terminal cursor is at the end of the last logical line
+  // (i.e. row totalTermRows - 1).
   const currentRowAbs = totalTermRows - 1;
-  const currentCol = lastWraps ? cols : lastVisual % cols;
 
-  // Move vertically.
+  // Move vertically to target row.
   const rowDelta = currentRowAbs - targetRowAbs;
   if (rowDelta > 0) {
     out.write(cursorUp(rowDelta));
@@ -269,8 +271,11 @@ export function redrawCurrentLine(
     out.write(cursorRight(targetCol));
   }
 
-  return totalTermRows;
+  return { termRows: totalTermRows, cursorRowFromTop: targetRowAbs };
 }
+
+/** Initial RedrawState for the very first redraw call (just-printed prompt, cursor on prompt row). */
+export const INITIAL_REDRAW_STATE: RedrawState = { termRows: 1, cursorRowFromTop: 0 };
 
 /** ANSI-aware visual width — strips CSI/SS3 sequences. */
 export function visualWidth(s: string): number {
@@ -468,7 +473,7 @@ export function readInput(opts: ReadInputOptions): Promise<string> {
     const decoder: Utf8Decoder = createUtf8Decoder();
     const framer = newFramerState();
     let inEscape = false;
-    let prevLines = 1;
+    let prevLines: RedrawState = INITIAL_REDRAW_STATE;
 
     if (typeof stdin.setRawMode === 'function') {
       try { stdin.setRawMode(true); } catch { /* tolerated for non-TTY tests */ }

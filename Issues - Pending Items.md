@@ -83,6 +83,25 @@
 
 ## Completed
 
+### Done — TUI input "creep-up" on word-motion against a wrapped line
+- **Symptom (after 0.1.3)**: pressing word-left or word-right on a wrapped line caused the entire
+  input block to visually shift up by one terminal row on each keystroke, without scrolling the
+  rest of the screen. Repeated motions made the input climb out of view.
+- **Root cause**: `redrawCurrentLine` started each redraw with `cursorUp(prevTermRows - 1)`,
+  assuming the cursor was at the *bottom* of the previous render. But the previous redraw had
+  positioned the cursor at the *target* row, which after Home/word-left was the top (row 0)
+  of the input. From row 0 of input, `cursorUp(prevTermRows - 1)` overshoots above the input
+  area; `\x1b[J` then wipes one extra row above input, and the new content fills from there
+  downward — visually one row higher than before.
+- **Fix**: changed the redraw API to pass and return a `RedrawState` carrying both the row count
+  AND the cursor's row offset from the top of the previous render. The clear-step now does
+  `cursorUp(prev.cursorRowFromTop)` — exactly the right distance regardless of where the cursor
+  was left previously.
+- **Regression coverage**: `src/tui/input/line-editor-wrap.spec.ts` extended with 5 new tests:
+  cursor-row tracking, "no cursorUp emitted when prev cursor was at top", full Home → Right →
+  Right scenario, word-right staying on row 0, word-left dropping cursor row by row. 15 wrap
+  tests total.
+
 ### Done — TUI smearing on Home-then-Right (and other state changes after wrap)
 - **Symptom (after 0.1.2)**: even with the terminal-row tracking fix, typing a long line then pressing
   Home and pressing Right (or any cursor motion) still produced duplicated tail content below the

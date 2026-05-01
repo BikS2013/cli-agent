@@ -1,22 +1,36 @@
 /**
- * Regression tests for the TUI wrap-redraw bug.
+ * Regression tests for the TUI wrap-redraw bugs.
  *
- * Bug: when a single logical input line was longer than the terminal column
- * count, `redrawCurrentLine` cleared only the rows it thought it had used
- * (counting logical lines) but not the extra terminal rows produced by soft-
- * wrap. Each subsequent keystroke emitted another `prompt + content` write
- * starting one row below the previous, smearing copies of the input across
- * the screen.
+ * Bug history:
  *
- * The fix: track terminal rows (ceil((promptW + lineW) / cols) per logical
- * line) and use that count for both the clear loop and the cursor math.
+ * 1. The original "smearing" bug — when a single logical line was longer
+ *    than the terminal column count, redrawCurrentLine cleared only the
+ *    rows it thought it had used (counting logical lines) but not the
+ *    extra terminal rows produced by soft-wrap. Each subsequent keystroke
+ *    emitted another `prompt + content` write starting one row below the
+ *    previous, smearing copies of the input across the screen.
+ *    Fix (0.1.2): track terminal rows = sum of `ceil((promptW + lineW) / cols)`
+ *    and use that for the clear loop and cursor math.
  *
- * These tests exercise `redrawCurrentLine` directly with a stub stdout that
- * has a fixed `columns` value, recording every write so we can assert the
- * exact sequence of escape codes.
+ * 2. The "creep up" bug — even with terminal-row tracking, repeated cursor
+ *    motions on a wrapped line (Home, word-left, etc.) caused the input
+ *    block to visually shift up by one row each keystroke. Cause: the
+ *    cursor was assumed to be at the bottom of the previous render, but
+ *    the previous redraw had positioned it at the *target* row (which
+ *    could be the top). cursorUp(prevTermRows-1) from anywhere except the
+ *    bottom overshot above the input area; \x1b[J then wiped one extra
+ *    row and the redraw shifted up.
+ *    Fix (0.1.3): track the cursor's row offset from the top of the
+ *    previous render (RedrawState.cursorRowFromTop) and use that exact
+ *    value to move back to the top.
  */
 import { describe, it, expect } from 'vitest';
-import { redrawCurrentLine, type EditorState } from './line-editor.js';
+import {
+  redrawCurrentLine,
+  INITIAL_REDRAW_STATE,
+  type RedrawState,
+  type EditorState,
+} from './line-editor.js';
 
 interface StubStdout {
   columns: number;
@@ -40,143 +54,92 @@ function makeState(lines: string[], row = 0, col = 0): EditorState {
   return { lines, row, col, histIdx: -1, draft: [...lines] };
 }
 
-const PROMPT = '>';     // visualWidth = 1
-const CONT = '.';       // visualWidth = 1
+const PROMPT = '>';   // visualWidth = 1
+const CONT = '.';     // visualWidth = 1
 
-describe('redrawCurrentLine — wrap-aware row tracking', () => {
+describe('redrawCurrentLine — wrap-aware row tracking (0.1.2 regression)', () => {
   it('returns terminal-row count, not logical-line count, when content wraps', () => {
     // 1 logical line, 30 chars, cols=10, prompt width=1 → 31 visual cells → 4 rows (ceil(31/10))
     const stdout = makeStubStdout(10);
     const state = makeState(['x'.repeat(30)]);
     state.col = 30;
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(4);
+    expect(result.termRows).toBe(4);
   });
 
   it('emits a clear-to-end-of-screen on the SECOND redraw (regression: was a fragile per-row clear loop)', () => {
-    // First redraw: long line wraps to 4 rows.
     const stdout = makeStubStdout(10);
     const state = makeState(['x'.repeat(30)]);
     state.col = 30;
-    const firstRows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const first = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(firstRows).toBe(4);
+    expect(first.termRows).toBe(4);
 
-    // Second redraw — verify we emit exactly one `\x1b[J` (clear-to-end-of-
-    // screen) instead of the previous fragile per-row CLEAR_LINE loop.
-    // \x1b[J is robust against `prevTermRows` drift (e.g. when the terminal
-    // wrapped at a different column than predicted).
     const writesBefore = stdout.writes.length;
     redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      firstRows,
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, first,
     );
     const newWrites = stdout.writes.slice(writesBefore).join('');
     const clearScreenCount = (newWrites.match(/\x1b\[J/g) ?? []).length;
     expect(clearScreenCount).toBe(1);
-    // And no per-row CLEAR_LINE leftovers.
     expect(newWrites).not.toMatch(/\x1b\[2K/);
   });
 
   it('multi-line buffer with one wrapped line returns total terminal rows', () => {
-    // line 0: 5 chars + prompt 1 = 6 cells → 1 row
-    // line 1: 25 chars + cont prompt 1 = 26 cells → 3 rows (cols=10)
-    // line 2: 0 chars + cont prompt 1 = 1 cell → 1 row
-    // total: 5 rows
     const stdout = makeStubStdout(10);
     const state = makeState(['hello', 'x'.repeat(25), ''], 2, 0);
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(5);
+    expect(result.termRows).toBe(5);
   });
 
   it('non-wrapping input still returns 1 row (no regression for short input)', () => {
     const stdout = makeStubStdout(80);
     const state = makeState(['hi']);
     state.col = 2;
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(1);
+    expect(result.termRows).toBe(1);
   });
 
   it('empty buffer renders as 1 terminal row', () => {
     const stdout = makeStubStdout(80);
     const state = makeState(['']);
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(1);
+    expect(result.termRows).toBe(1);
   });
 
   it('Greek (BMP, single-cell) text also wraps deterministically', () => {
-    // 30 Greek chars, each .length=1 (BMP), prompt 1 = 31 cells, cols=10 → 4 rows
     const stdout = makeStubStdout(10);
-    const greek = 'Υπάρχειτρόποςναέκανε'; // 20 Greek chars
-    const long = greek + greek.slice(0, 10); // 30 chars
+    const greek = 'Υπάρχειτρόποςναέκανε';
+    const long = greek + greek.slice(0, 10);
     const state = makeState([long]);
     state.col = long.length;
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(4);
+    expect(result.termRows).toBe(4);
   });
 
   it('positions cursor with cursorRight to target column on wrapped line', () => {
-    // cols=10, prompt 1, line of 25 chars, cursor at col 12 (logical).
-    // Target visual cell = 1 + 12 = 13.
-    // Sub-row: floor(13/10) = 1; col within row: 13 % 10 = 3.
-    // After draw, cursor sits at end (visual offset 1+25=26, sub-row 2, col 6).
-    // Need: cursorUp(1), \r, cursorRight(3).
     const stdout = makeStubStdout(10);
     const state = makeState(['x'.repeat(25)]);
     state.col = 12;
     redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
     const all = stdout.writes.join('');
-    // Verify the cursor-positioning suffix: cursorUp(1) + \r + cursorRight(3).
     expect(all).toContain('\x1b[1A\r\x1b[3C');
   });
 
   it('handles non-TTY stdout (no `columns`) using a sane default of 80', () => {
-    // Without a `columns` field, getCols falls back to 80. 30-char content
-    // with prompt 1 = 31 cells, well under 80, so 1 row.
     const writes: string[] = [];
     const stdout = {
       write(chunk: string) {
@@ -186,68 +149,157 @@ describe('redrawCurrentLine — wrap-aware row tracking', () => {
     } as unknown as NodeJS.WriteStream;
     const state = makeState(['x'.repeat(30)]);
     state.col = 30;
-    const rows = redrawCurrentLine(state, PROMPT, CONT, stdout, 1);
-    expect(rows).toBe(1);
+    const result = redrawCurrentLine(state, PROMPT, CONT, stdout, INITIAL_REDRAW_STATE);
+    expect(result.termRows).toBe(1);
   });
 
-  it('Home then Right on a wrapped line emits clear-to-end-of-screen each time (no smearing)', () => {
-    // User scenario: long line wrapped, press Home (col -> 0), then press
-    // Right (col -> 1). Each redraw must emit exactly one `\x1b[J` so any
-    // soft-wrap row count drift cannot leave stale content visible.
+  it('cursor at exactly cols boundary (phantom column) does not double-count rows', () => {
+    const stdout = makeStubStdout(10);
+    const state = makeState(['x'.repeat(9)]);
+    state.col = 9;
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
+    );
+    expect(result.termRows).toBe(1);
+  });
+});
+
+describe('redrawCurrentLine — RedrawState.cursorRowFromTop tracking (0.1.3 regression: word-motion creep-up)', () => {
+  it('returns cursorRowFromTop=0 when cursor lands on the first sub-row', () => {
+    const stdout = makeStubStdout(10);
+    const state = makeState(['x'.repeat(25)]);
+    state.col = 5; // visual cell 6, sub-row 0
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
+    );
+    expect(result.cursorRowFromTop).toBe(0);
+  });
+
+  it('returns cursorRowFromTop equal to the wrap sub-row of the cursor', () => {
+    const stdout = makeStubStdout(10);
+    const state = makeState(['x'.repeat(25)]);
+    state.col = 12; // visual cell 13, sub-row 1
+    const result = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
+    );
+    expect(result.cursorRowFromTop).toBe(1);
+  });
+
+  it('uses cursorRowFromTop (not termRows-1) to navigate to top on next redraw', () => {
+    // After a Home/word-left, cursor is at row 0 of the input. The NEXT
+    // redraw must move up by 0 rows (the cursor is already at the top),
+    // not by termRows-1 (which would land above the input area and trigger
+    // the creep-up bug).
+    const stdout = makeStubStdout(10);
+    const state = makeState(['x'.repeat(25)]);
+    state.col = 0; // top of input after Home
+    const first = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
+    );
+    expect(first.cursorRowFromTop).toBe(0);
+    expect(first.termRows).toBeGreaterThan(1); // sanity: line did wrap
+
+    // Second redraw with cursor still at col 0. Capture writes.
+    const mark = stdout.writes.length;
+    redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, first,
+    );
+    const chunk = stdout.writes.slice(mark).join('');
+    // The first byte sequence emitted should NOT be cursorUp — cursor is
+    // already at the top of the previous render. The original bug emitted
+    // cursorUp(termRows-1) here, overshooting above the input area.
+    expect(chunk.startsWith('\r')).toBe(true);
+    // Specifically: no cursorUp at all on this redraw.
+    expect(chunk).not.toMatch(/^\x1b\[\d+A/);
+  });
+
+  it('Home then Right then Right does not creep up (full scenario regression)', () => {
     const stdout = makeStubStdout(40);
     const greek = 'Μπορείς να κρατάς το τελευταίο μήνυμα που έχεις διαβάσει από το Telegram';
     const state = makeState([greek]);
     state.col = greek.length;
-    let rows = redrawCurrentLine(
-      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, 1,
+    let rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    // 73 + 1 = 74 cells / 40 cols = 2 rows
-    expect(rows).toBe(2);
+    expect(rs.termRows).toBe(2);
 
-    // Press Home
+    // Press Home — cursor goes to col 0 → row 0.
     let mark = stdout.writes.length;
     state.col = 0;
-    rows = redrawCurrentLine(
-      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
     );
     let chunk = stdout.writes.slice(mark).join('');
+    expect(rs.cursorRowFromTop).toBe(0);
     expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
-    expect(chunk).not.toMatch(/\x1b\[2K/);
 
-    // Press Right
+    // Press Right (col 0→1) — cursor still on row 0. The redraw must NOT
+    // emit any cursorUp before the \r + \x1b[J, otherwise we creep above
+    // the input area.
     mark = stdout.writes.length;
     state.col = 1;
-    rows = redrawCurrentLine(
-      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
     );
     chunk = stdout.writes.slice(mark).join('');
-    expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
-    expect(chunk).not.toMatch(/\x1b\[2K/);
+    expect(chunk.startsWith('\r')).toBe(true); // immediate \r, no cursorUp
+    expect(rs.cursorRowFromTop).toBe(0);
 
-    // Press Right again
+    // Press Right again — same.
     mark = stdout.writes.length;
     state.col = 2;
-    rows = redrawCurrentLine(
-      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
     );
     chunk = stdout.writes.slice(mark).join('');
-    expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
-    expect(chunk).not.toMatch(/\x1b\[2K/);
+    expect(chunk.startsWith('\r')).toBe(true);
+    expect(rs.cursorRowFromTop).toBe(0);
   });
 
-  it('cursor at exactly cols boundary (phantom column) does not double-count rows', () => {
-    // cols=10, prompt 1, line of 9 chars → 1 + 9 = 10 cells = exactly 1 row.
-    // ceil(10/10) = 1, so totalTermRows = 1.
+  it('word-right from col 0 to col 8 stays on row 0; subsequent redraw uses up=0', () => {
     const stdout = makeStubStdout(10);
-    const state = makeState(['x'.repeat(9)]);
-    state.col = 9;
-    const rows = redrawCurrentLine(
-      state,
-      PROMPT,
-      CONT,
-      stdout as unknown as NodeJS.WriteStream,
-      1,
+    const greek = 'word1 word2 word3 word4 word5'; // 29 chars; with prompt → wraps 10-col
+    const state = makeState([greek]);
+    state.col = 0;
+    let rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
     );
-    expect(rows).toBe(1);
+    expect(rs.cursorRowFromTop).toBe(0);
+
+    // word-right: cursor moves from 0 to "word1 ".length = 6 (visual cell 7, sub-row 0).
+    state.col = 6;
+    const mark = stdout.writes.length;
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
+    );
+    const chunk = stdout.writes.slice(mark).join('');
+    // Cursor was at row 0; should not move up before clearing.
+    expect(chunk.startsWith('\r')).toBe(true);
+    expect(rs.cursorRowFromTop).toBe(0);
+  });
+
+  it('word-left from end of wrapped line drops the cursor to row 0 in one shot', () => {
+    const stdout = makeStubStdout(10);
+    const text = 'word1 word2 word3'; // 17 chars
+    const state = makeState([text]);
+    state.col = text.length; // at end → with prompt, cell 18, row 1
+    let rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, INITIAL_REDRAW_STATE,
+    );
+    expect(rs.cursorRowFromTop).toBe(1);
+
+    // word-left jumps to col 12 ("word3" start); visual cell 13; sub-row 1.
+    state.col = 12;
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
+    );
+    expect(rs.cursorRowFromTop).toBe(1);
+
+    // word-left again to col 6; visual cell 7; sub-row 0.
+    state.col = 6;
+    rs = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rs,
+    );
+    expect(rs.cursorRowFromTop).toBe(0);
   });
 });
