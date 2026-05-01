@@ -59,7 +59,7 @@ describe('redrawCurrentLine — wrap-aware row tracking', () => {
     expect(rows).toBe(4);
   });
 
-  it('clears every wrapped row on the SECOND redraw (regression: only 1 was cleared)', () => {
+  it('emits a clear-to-end-of-screen on the SECOND redraw (regression: was a fragile per-row clear loop)', () => {
     // First redraw: long line wraps to 4 rows.
     const stdout = makeStubStdout(10);
     const state = makeState(['x'.repeat(30)]);
@@ -73,8 +73,10 @@ describe('redrawCurrentLine — wrap-aware row tracking', () => {
     );
     expect(firstRows).toBe(4);
 
-    // Second redraw — count CLEAR_LINE escapes emitted to confirm we cleared
-    // ALL 4 previously-occupied rows, not just 1.
+    // Second redraw — verify we emit exactly one `\x1b[J` (clear-to-end-of-
+    // screen) instead of the previous fragile per-row CLEAR_LINE loop.
+    // \x1b[J is robust against `prevTermRows` drift (e.g. when the terminal
+    // wrapped at a different column than predicted).
     const writesBefore = stdout.writes.length;
     redrawCurrentLine(
       state,
@@ -84,8 +86,10 @@ describe('redrawCurrentLine — wrap-aware row tracking', () => {
       firstRows,
     );
     const newWrites = stdout.writes.slice(writesBefore).join('');
-    const clearCount = (newWrites.match(/\x1b\[2K/g) ?? []).length;
-    expect(clearCount).toBe(4);
+    const clearScreenCount = (newWrites.match(/\x1b\[J/g) ?? []).length;
+    expect(clearScreenCount).toBe(1);
+    // And no per-row CLEAR_LINE leftovers.
+    expect(newWrites).not.toMatch(/\x1b\[2K/);
   });
 
   it('multi-line buffer with one wrapped line returns total terminal rows', () => {
@@ -184,6 +188,51 @@ describe('redrawCurrentLine — wrap-aware row tracking', () => {
     state.col = 30;
     const rows = redrawCurrentLine(state, PROMPT, CONT, stdout, 1);
     expect(rows).toBe(1);
+  });
+
+  it('Home then Right on a wrapped line emits clear-to-end-of-screen each time (no smearing)', () => {
+    // User scenario: long line wrapped, press Home (col -> 0), then press
+    // Right (col -> 1). Each redraw must emit exactly one `\x1b[J` so any
+    // soft-wrap row count drift cannot leave stale content visible.
+    const stdout = makeStubStdout(40);
+    const greek = 'Μπορείς να κρατάς το τελευταίο μήνυμα που έχεις διαβάσει από το Telegram';
+    const state = makeState([greek]);
+    state.col = greek.length;
+    let rows = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, 1,
+    );
+    // 73 + 1 = 74 cells / 40 cols = 2 rows
+    expect(rows).toBe(2);
+
+    // Press Home
+    let mark = stdout.writes.length;
+    state.col = 0;
+    rows = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    );
+    let chunk = stdout.writes.slice(mark).join('');
+    expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
+    expect(chunk).not.toMatch(/\x1b\[2K/);
+
+    // Press Right
+    mark = stdout.writes.length;
+    state.col = 1;
+    rows = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    );
+    chunk = stdout.writes.slice(mark).join('');
+    expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
+    expect(chunk).not.toMatch(/\x1b\[2K/);
+
+    // Press Right again
+    mark = stdout.writes.length;
+    state.col = 2;
+    rows = redrawCurrentLine(
+      state, PROMPT, CONT, stdout as unknown as NodeJS.WriteStream, rows,
+    );
+    chunk = stdout.writes.slice(mark).join('');
+    expect((chunk.match(/\x1b\[J/g) ?? []).length).toBe(1);
+    expect(chunk).not.toMatch(/\x1b\[2K/);
   });
 
   it('cursor at exactly cols boundary (phantom column) does not double-count rows', () => {

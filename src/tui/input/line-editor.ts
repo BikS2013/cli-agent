@@ -21,7 +21,7 @@
  * are extracted so the line-editor regression tests can drive them directly.
  */
 
-import { GREEN, RESET, CLEAR_LINE, cursorUp, cursorDown, cursorRight } from '../ansi.js';
+import { GREEN, RESET, cursorUp, cursorDown, cursorRight } from '../ansi.js';
 import { createUtf8Decoder, type Utf8Decoder } from '../utf8.js';
 
 export interface ReadInputOptions {
@@ -170,24 +170,32 @@ function getCols(out: NodeJS.WriteStream): number {
  *
  * IMPORTANT: this routine tracks **terminal rows**, not logical lines. A
  * single logical line whose visual width plus prompt exceeds the terminal
- * column count wraps to two or more terminal rows; the previous version of
+ * column count wraps to two or more terminal rows; an earlier version of
  * this function conflated the two and left a trail of stale prompts behind
  * each keystroke once a line wrapped (visible bug: Greek/long input would
  * smear copies of `You> ...` across the screen).
  *
  * Strategy:
- *   1. Move cursor to the top-left of the previous render (using
- *      `prevTermRows`, the row count returned by the previous call).
- *   2. Clear every terminal row we previously occupied.
- *   3. Move back to the top.
- *   4. Redraw all logical lines as before — the terminal handles the wrap.
- *   5. Position the cursor by computing the target terminal row/column
- *      from the active logical line + col + prompt width + terminal cols.
- *   6. Return the new terminal row count for the next call.
+ *   1. Move cursor up `prevTermRows - 1` rows to the top of the previous
+ *      render, then `\r` to col 0.
+ *   2. Erase from cursor to the end of the screen (`\x1b[J`). This single
+ *      operation wipes whatever the previous render put on every row from
+ *      here downward, regardless of how many rows there are or whether the
+ *      caller's `prevTermRows` count is accurate. This is robust against:
+ *        - soft-wrap row count drift (the terminal wrapping at a column we
+ *          didn't predict, e.g. when a font uses non-monospace cell widths)
+ *        - terminal scrolling between redraws
+ *        - any stray output from another writer that landed below the input
+ *      The previous line-by-line `CLEAR_LINE + \n` loop was correct in the
+ *      common case but fragile against any of the above.
+ *   3. Redraw all logical lines — the terminal handles the soft-wrap.
+ *   4. Position the cursor by computing the target terminal row/column from
+ *      the active logical line + col + prompt width + terminal cols.
+ *   5. Return the new terminal row count so the next call can move up by it.
  *
- * Caveat: this still does not react to mid-edit terminal resizes (SIGWINCH).
- * If `process.stdout.columns` changes between calls, the clear math will be
- * wrong. A SIGWINCH-driven full clear is a separate enhancement.
+ * Caveat: still does not react to mid-edit terminal resizes (SIGWINCH).
+ * If `process.stdout.columns` changes between calls the cursor target math
+ * will be off; pressing Enter and resyncing is the workaround.
  */
 export function redrawCurrentLine(
   state: EditorState,
@@ -198,19 +206,16 @@ export function redrawCurrentLine(
 ): number {
   const cols = getCols(out);
 
-  // Move to top of previous render and clear every row we occupied.
+  // Move to the top-left of the previous render.
   if (prevTermRows > 1) {
     out.write(cursorUp(prevTermRows - 1));
   }
   out.write('\r');
-  for (let i = 0; i < prevTermRows; i++) {
-    out.write(CLEAR_LINE);
-    if (i < prevTermRows - 1) out.write('\n');
-  }
-  if (prevTermRows > 1) {
-    out.write(cursorUp(prevTermRows - 1));
-  }
-  out.write('\r');
+  // Clear from here to end of screen — a single ANSI op that handles any
+  // number of rows correctly, including when our `prevTermRows` count is
+  // stale (the original line-by-line clear loop is the documented cause
+  // of the wrap-redraw smearing bug).
+  out.write('\x1b[J');
 
   // Draw all logical lines — terminal handles soft-wrap.
   const promptWFirst = visualWidth(prompt);

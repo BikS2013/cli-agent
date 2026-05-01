@@ -83,6 +83,27 @@
 
 ## Completed
 
+### Done — TUI smearing on Home-then-Right (and other state changes after wrap)
+- **Symptom (after 0.1.2)**: even with the terminal-row tracking fix, typing a long line then pressing
+  Home and pressing Right (or any cursor motion) still produced duplicated tail content below the
+  active line. The original tail kept reappearing under each keystroke.
+- **Root cause**: the per-row `CLEAR_LINE + \n` clear loop in `redrawCurrentLine` was sound when
+  `prevTermRows` exactly matched the actual terminal-row count of the previous render — but it had
+  no recovery path if the count drifted by even one. Drift can happen when:
+  - the terminal soft-wraps at a different column than `process.stdout.columns` reports (Greek
+    fonts in some terminals render slightly wider than 1 cell each)
+  - the terminal scrolled between the previous render and the current one
+  - any unrelated writer wrote to stdout during the input loop
+  The original line-by-line loop trusted the count completely; one drift sufficed to leave stale
+  rows visible, which the next render then "patched over" instead of clearing.
+- **Fix**: replaced the per-row clear loop with a single `\x1b[J` (erase from cursor to end of
+  screen) after moving up to the top of the previous render. This is a terminal-native operation
+  that wipes every row from the cursor downward in one shot, regardless of row count or any
+  scroll/drift. The cursor-positioning math from 0.1.2 is preserved.
+- **Regression coverage**: extended `src/tui/input/line-editor-wrap.spec.ts` with a Home → Right →
+  Right scenario asserting that each redraw emits exactly one `\x1b[J` and zero leftover
+  `CLEAR_LINE` (`\x1b[2K`) escapes. 10 wrap tests total now.
+
 ### Done — TUI input renderer smeared `You> ...` lines when input wrapped past terminal width
 - **Symptom**: typing a long line (e.g. Greek prose past ~80 chars) produced a cascade of duplicate
   `You> ...` lines, one per keystroke, growing across the screen.

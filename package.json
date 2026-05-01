@@ -1,6 +1,6 @@
 {
   "name": "@biks2013/cli-agent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Generic LangGraph ReAct agent that wraps external CLI binaries, auto-introspects their --help trees, and exposes the full bash/file/web cross-cutting toolkit backed by all eight standard LLM providers.",
   "type": "module",
   "author": "Giorgos Marinos <giorgos.marinos@gmail.com>",
