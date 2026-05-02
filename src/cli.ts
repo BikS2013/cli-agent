@@ -20,6 +20,12 @@ import { runRefreshCapabilities } from './commands/refresh-capabilities.js';
 import { runExtractToolPrompts } from './commands/extract-tool-prompts.js';
 import { runShowToolPrompt } from './commands/show-tool-prompt.js';
 import { runAuditToolPrompts } from './commands/audit-tool-prompts.js';
+import { runProfileList } from './commands/profile/list.js';
+import { runProfileShow } from './commands/profile/show.js';
+import { runProfileCreate } from './commands/profile/create.js';
+import { runProfileEdit } from './commands/profile/edit.js';
+import { runProfileDelete } from './commands/profile/delete.js';
+import { runProfileDryRun } from './commands/profile/dry-run.js';
 import { CliAgentError } from './errors.js';
 import { redactString } from './util/redact.js';
 import { mapAgentToolFlags } from './cli-agent-tools-flags.js';
@@ -81,6 +87,8 @@ program
   .option('--disable-agt-todo-read', 'Disable agt_todo_read')
   .option('--enable-agt-todo-write', 'Enable agt_todo_write (default-off)')
   .option('--disable-agt-todo-write', 'Disable agt_todo_write')
+  // ---- Configuration profiles (plan-005) ----
+  .option('--profile <name>', 'Activate a named configuration profile (env: CLI_AGENT_PROFILE)')
   .action(async (prompt: string | undefined, opts: Record<string, unknown>) => {
     await handleErrors(async () => {
       const tools = (opts['tool'] as string[]) ?? [];
@@ -117,6 +125,7 @@ program
         systemFile: opts['systemFile'] as string | undefined,
         systemPromptFile: opts['systemPrompt'] as string | undefined,
         agentTools,
+        profile: opts['profile'] as string | undefined,
       });
     });
   });
@@ -218,6 +227,91 @@ program
         strict: opts['strict'] as boolean | undefined,
         configFile: opts['config'] as string | undefined,
         envFile: opts['envFile'] as string | undefined,
+      });
+    });
+  });
+
+/* ---------- Configuration profile subcommands (plan-005 P5 stubs) ----------
+ *
+ * These stub registrations make `cli-agent --help` advertise the surface
+ * and reserve the wiring; the U-CLI parallel coder fills the handlers in
+ * P6. Each stub throws a "not implemented" error so a user who tries them
+ * before P6 is complete sees a clear message.
+ */
+program
+  .command('profile-list')
+  .alias('profiles')
+  .description('List configuration profiles (FR-PROF-008).')
+  .option('--json', 'Emit machine-readable JSON output', false)
+  .action(async (opts: Record<string, unknown>) => {
+    await handleErrors(async () => {
+      await runProfileList({ json: opts['json'] as boolean | undefined });
+    });
+  });
+
+program
+  .command('profile-show <name>')
+  .description('Print a configuration profile (raw + parsed) (FR-PROF-009).')
+  .option('--json', 'Emit machine-readable JSON output', false)
+  .action(async (name: string, opts: Record<string, unknown>) => {
+    await handleErrors(async () => {
+      await runProfileShow(name, { json: opts['json'] as boolean | undefined });
+    });
+  });
+
+program
+  .command('profile-create <name>')
+  .description('Scaffold a new configuration profile (FR-PROF-010).')
+  .option('--from-current', 'Capture the current resolved config', false)
+  .option('--description <text>', 'Description for the new profile')
+  .option('--force', 'Overwrite an existing profile', false)
+  .action(async (name: string, opts: Record<string, unknown>) => {
+    await handleErrors(async () => {
+      await runProfileCreate(name, {
+        fromCurrent: opts['fromCurrent'] as boolean | undefined,
+        description: opts['description'] as string | undefined,
+        force: opts['force'] as boolean | undefined,
+      });
+    });
+  });
+
+program
+  .command('profile-edit <name>')
+  .description('Open a configuration profile in $EDITOR (FR-PROF-011).')
+  .action(async (name: string) => {
+    await handleErrors(async () => {
+      await runProfileEdit(name);
+    });
+  });
+
+program
+  .command('profile-delete <name>')
+  .alias('profile-rm')
+  .description('Delete a configuration profile (FR-PROF-012).')
+  .option('--yes', 'Skip the confirmation prompt', false)
+  .action(async (name: string, opts: Record<string, unknown>) => {
+    await handleErrors(async () => {
+      await runProfileDelete(name, { yes: opts['yes'] as boolean | undefined });
+    });
+  });
+
+program
+  .command('profile-dry-run')
+  .description('Resolve config + tool scoping; print effective state without launching the LLM (FR-PROF-013).')
+  .option('--profile <name>', 'Activate a named configuration profile')
+  .option('--json', 'Emit machine-readable JSON output', false)
+  .action(async function (this: Command, opts: Record<string, unknown>) {
+    await handleErrors(async () => {
+      // Parent program also registers `--profile <name>` (for the default
+      // agent command); recover the subcommand value by checking globals
+      // when the local capture is undefined.
+      const merged = this.optsWithGlobals() as Record<string, unknown>;
+      const profile =
+        (opts['profile'] as string | undefined) ??
+        (merged['profile'] as string | undefined);
+      await runProfileDryRun({
+        profile,
+        json: opts['json'] as boolean | undefined,
       });
     });
   });

@@ -33,6 +33,15 @@ export interface AgentGraph {
    * list survives across turns within the same conversation.
    */
   readonly agentToolsSession: AgentToolsSession;
+  /**
+   * Profile-supplied tool-args bag (plan-005, U-ARGS). Outer key = tool name,
+   * inner record = preset arg key/value pairs overlayed onto runtime input by
+   * `mergeProfileToolArgs` at the top of every tool's `.func`. Threaded into
+   * the LangChain `RunnableConfig.configurable` bag at every `runOneShot` /
+   * `streamOneShot` call so the per-tool helper can consult it without a
+   * back-reference into `cfg`. Empty object `{}` when no profile is active.
+   */
+  readonly profileToolArgs: Record<string, Record<string, unknown>>;
 }
 
 /**
@@ -71,8 +80,13 @@ export function buildAgentGraph(
   // `RunnableConfig.configurable.agentToolsSession`.
   const workingDirectory = path.resolve(cfg.fileEdit.root);
   const agentToolsSession: AgentToolsSession = { todos: null };
+  // Profile tool-args bag (plan-005, U-ARGS). Frozen to defend against
+  // accidental mutation by any tool factory; consumed via
+  // `mergeProfileToolArgs(input, runConfig?.configurable, TOOL_NAME)`.
+  const profileToolArgs: Record<string, Record<string, unknown>> =
+    cfg.activeProfileData?.toolArgs ?? {};
 
-  return { graph, checkpointer, workingDirectory, agentToolsSession };
+  return { graph, checkpointer, workingDirectory, agentToolsSession, profileToolArgs };
 }
 
 export async function runOneShot(
@@ -91,6 +105,9 @@ export async function runOneShot(
       // Per-graph store; shared by reference so todo state survives
       // across turns within the same conversation.
       agentToolsSession: agentGraph.agentToolsSession,
+      // Profile-supplied tool-args presets (plan-005, U-ARGS). Empty `{}`
+      // when no profile is active.
+      profileToolArgs: agentGraph.profileToolArgs,
     },
     recursionLimit: maxSteps * 2,
   };
@@ -166,6 +183,9 @@ export async function* streamOneShot(
       // streaming options below.
       workingDirectory: agentGraph.workingDirectory,
       agentToolsSession: agentGraph.agentToolsSession,
+      // Profile-supplied tool-args presets (plan-005, U-ARGS). Empty `{}`
+      // when no profile is active.
+      profileToolArgs: agentGraph.profileToolArgs,
       ...(opts.abortSignal ? { signal: opts.abortSignal } : {}),
     },
     version: 'v2',

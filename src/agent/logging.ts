@@ -20,6 +20,7 @@ import { redactString } from '../util/redact.js';
 export type LogEvent =
   | { kind: 'session_start'; ts: string; sessionId: string; threadId: string; provider: string; model: string; allowMutations: boolean; cliVersion: string }
   | { kind: 'session_end'; ts: string; sessionId: string; reason: 'quit' | 'crash' | 'sigint' }
+  | { kind: 'profile_active'; ts: string; sessionId: string; profileName: string; profilePath: string; schemaVersion: number; digest: string }
   | { kind: 'user_prompt'; ts: string; sessionId: string; turnId: string; prompt: string }
   | { kind: 'llm_chunk'; ts: string; sessionId: string; turnId: string; messageType: string; content: string; toolCalls?: ReadonlyArray<{ id?: string; name: string; args: unknown }> }
   | { kind: 'llm_final'; ts: string; sessionId: string; turnId: string; finalText: string; toolCallsObserved: ReadonlyArray<{ name: string; args: unknown }> }

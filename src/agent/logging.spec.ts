@@ -62,6 +62,31 @@ describe('createLogger', () => {
     expect(line).not.toContain('sk-abcdefghijklmnopqrstuvwxyz123456');
   });
 
+  it('logs profile_active event with profile metadata (plan-005 AC-19)', () => {
+    const logger = createLogger({ toolDir: '/tmp/.tool-agents/cli-agent', enabled: true });
+    // Path crafted to stay under the 32-contiguous-base64-char redaction
+    // window: dots, slashes, and short segments interspersed.
+    const profilePath = '/tmp/p/review.yaml';
+    const event: LogEvent = {
+      kind: 'profile_active',
+      ts: new Date().toISOString(),
+      sessionId: 'test-session',
+      profileName: 'review',
+      profilePath,
+      schemaVersion: 1,
+      digest: 'a1b2c3d4',
+    };
+    logger.log(event);
+    const line = writtenLines[writtenLines.length - 1];
+    const parsed = JSON.parse(line ?? '{}') as Record<string, unknown>;
+    expect(parsed['kind']).toBe('profile_active');
+    expect(parsed['profileName']).toBe('review');
+    expect(parsed['profilePath']).toBe(profilePath);
+    expect(parsed['schemaVersion']).toBe(1);
+    expect(parsed['digest']).toBe('a1b2c3d4');
+    expect(parsed['sessionId']).toBe('test-session');
+  });
+
   it('null logger is a no-op', async () => {
     const logger = createLogger({ toolDir: '/tmp', enabled: false });
     const countBefore = writtenLines.length;

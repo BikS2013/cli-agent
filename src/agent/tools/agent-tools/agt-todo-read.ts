@@ -35,6 +35,7 @@ import {
   getToolDescription,
   type OverlayRegistry,
 } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 /** LangChain-visible tool name. */
 export const AGT_TODO_READ_NAME = 'agt_todo_read' as const;
@@ -76,7 +77,12 @@ export function buildAgtTodoReadTool(
     name: AGT_TODO_READ_NAME,
     description: getToolDescription(reg, AGT_TODO_READ_NAME, BUILTIN.description),
     schema: agtTodoReadSchema,
-    func: async (input, _runManager, config) => {
+    func: async (rawInput, _runManager, config) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        config?.configurable as ProfileToolArgsConfigurable | undefined,
+        AGT_TODO_READ_NAME,
+      );
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {
         throw new Error(

@@ -577,6 +577,79 @@ describe('buildToolCatalog — integration: cliAgentPermissionPolicy side-effect
   });
 });
 
+describe('buildToolCatalog — integration: profile toolArgs dead-reference warning (plan-005 E9)', () => {
+  /**
+   * E9: when an active profile's `toolArgs` keys reference a tool name that
+   * does not survive scoping (excluded by allow/deny, or simply not part of
+   * the standard catalog), `buildToolCatalog` must emit a single non-fatal
+   * stderr warning per dead reference. Surviving keys produce no warning.
+   */
+  it('toolArgs key referencing an excluded tool emits stderr warning', () => {
+    const cfg = makeCfg({ allowMutations: false, agentToolsEnabled: false });
+    // Inject activeProfileData with a deny that drops file_read AND a
+    // toolArgs entry that references the now-dropped name.
+    (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
+      tools: { deny: ['file_read'] },
+      toolArgs: { file_read: { maxBytes: 1024 } },
+    };
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let calls: string[] = [];
+    try {
+      buildToolCatalog(cfg, nullLogger);
+      calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const warning = calls.find((s) =>
+      s.includes("profile toolArgs references tool 'file_read'"),
+    );
+    expect(warning).toBeDefined();
+    expect(warning).toContain('not in the active catalog');
+  });
+
+  it('toolArgs key referencing an unknown tool emits stderr warning', () => {
+    const cfg = makeCfg({ allowMutations: false, agentToolsEnabled: false });
+    (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
+      toolArgs: { not_a_real_tool: { foo: 'bar' } },
+    };
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let calls: string[] = [];
+    try {
+      buildToolCatalog(cfg, nullLogger);
+      calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const warning = calls.find((s) =>
+      s.includes("profile toolArgs references tool 'not_a_real_tool'"),
+    );
+    expect(warning).toBeDefined();
+  });
+
+  it('toolArgs key matching a surviving tool produces no warning', () => {
+    const cfg = makeCfg({ allowMutations: false, agentToolsEnabled: false });
+    (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
+      toolArgs: { file_read: { maxBytes: 1024 } },
+    };
+
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    let calls: string[] = [];
+    try {
+      buildToolCatalog(cfg, nullLogger);
+      calls = stderrSpy.mock.calls.map((c) => String(c[0]));
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    const warning = calls.find((s) => s.includes('profile toolArgs references tool'));
+    expect(warning).toBeUndefined();
+  });
+});
+
 describe('buildToolCatalog — error_path: malformed cfg to cliAgentPermissionPolicy', () => {
   /**
    * `cliAgentPermissionPolicy` (called inside `buildToolCatalog`) throws

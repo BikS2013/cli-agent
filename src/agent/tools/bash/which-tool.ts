@@ -6,6 +6,7 @@ import { parseAllowlistEntries, buildAllowlistMatcher } from './allowlist.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
 import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
 import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 const TOOL_NAME = 'bash_which';
 const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
@@ -21,7 +22,12 @@ export function createBashWhichTool(cfg: AgentConfig): DynamicStructuredTool {
     name: TOOL_NAME,
     description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
-    func: async (input) => {
+    func: async (rawInput, _runManager, runConfig) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        runConfig?.configurable as ProfileToolArgsConfigurable | undefined,
+        TOOL_NAME,
+      );
       const entries = parseAllowlistEntries([...cfg.bash.allow]);
       const matcher = buildAllowlistMatcher(entries);
 

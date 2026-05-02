@@ -33,6 +33,7 @@ import {
   getParamDescription,
   type OverlayRegistry,
 } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 /** LangChain-visible tool name. Stable across U3 / U5 / checkpointer. */
 export const AGT_GLOB_NAME = 'agt_glob' as const;
@@ -78,7 +79,12 @@ export function buildAgtGlobTool(deps: AgtGlobDeps): DynamicStructuredTool {
     name: AGT_GLOB_NAME,
     description: getToolDescription(reg, AGT_GLOB_NAME, BUILTIN.description),
     schema: agtGlobSchema,
-    func: async (input, _runManager, config) => {
+    func: async (rawInput, _runManager, config) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        config?.configurable as ProfileToolArgsConfigurable | undefined,
+        AGT_GLOB_NAME,
+      );
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {
         throw new Error(

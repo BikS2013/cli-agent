@@ -22,20 +22,31 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   // loadAgentConfig (for system-prompt.md) would fail even though the
   // bootstrap routine "seeded" it.
   const writtenPaths = new Set<string>();
+  // Plan-005: profile integration tests can register concrete file
+  // contents here so loadProfile can read them. Bytes-keyed map; presence
+  // also flips access() / accessSync() to "exists".
+  const fileContents = new Map<string, Buffer>();
   const mocks = {
     mkdir: vi.fn().mockResolvedValue(undefined),
     chmod: vi.fn().mockResolvedValue(undefined),
     access: vi.fn().mockImplementation((p: string) => {
       if (writtenPaths.has(String(p))) return Promise.resolve(undefined);
+      if (fileContents.has(String(p))) return Promise.resolve(undefined);
       return enoent();
     }),
     writeFile: vi.fn().mockImplementation((p: string) => {
       writtenPaths.add(String(p));
       return Promise.resolve(undefined);
     }),
-    readFile: vi.fn().mockImplementation((p: string) => {
-      if (String(p).endsWith('.env')) return Promise.resolve('');
-      if (String(p).endsWith('config.json')) return enoent();
+    readFile: vi.fn().mockImplementation((p: string, enc?: string) => {
+      const key = String(p);
+      const buf = fileContents.get(key);
+      if (buf !== undefined) {
+        if (enc === 'utf8') return Promise.resolve(buf.toString('utf8'));
+        return Promise.resolve(buf);
+      }
+      if (key.endsWith('.env')) return Promise.resolve('');
+      if (key.endsWith('config.json')) return enoent();
       return enoent();
     }),
     // loadOverlayRegistry calls readdir on <agentDir>/tool-prompts/. Without
@@ -43,14 +54,68 @@ vi.mock('node:fs/promises', async (importOriginal) => {
     // that has used cli-agent, the dir has 17 real overlay files; readdir
     // returns them, then the mocked readFile rejects each with ENOENT and
     // loadOverlayRegistry throws. Returning [] keeps the test hermetic.
-    readdir: vi.fn().mockResolvedValue([]),
+    readdir: vi.fn().mockImplementation(async (p: string) => {
+      // Profile loader's listProfiles asks for <agentDir>/profiles/.
+      // Synthesize the directory listing from `fileContents` so the
+      // E1-diagnostic codepath works.
+      const dir = String(p).replace(/\/+$/, '') + '/';
+      const out: string[] = [];
+      for (const key of fileContents.keys()) {
+        if (key.startsWith(dir)) {
+          const rest = key.slice(dir.length);
+          if (!rest.includes('/')) out.push(rest);
+        }
+      }
+      return out;
+    }),
+    stat: vi.fn().mockImplementation(async (p: string) => {
+      const buf = fileContents.get(String(p));
+      if (!buf) {
+        const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+        throw err;
+      }
+      return { size: buf.length, mtime: new Date('2026-01-01T00:00:00Z') };
+    }),
   };
   return {
     ...actual,
     ...mocks,
     default: { ...actual, ...mocks },
+    // Test-only handle so individual tests can register profile bytes.
+    __testHelpers: { fileContents, writtenPaths },
   };
 });
+
+// Profile codec uses fs.accessSync (sync) for ambiguity detection. Mock
+// node:fs in lockstep with node:fs/promises so the same registered files
+// appear present to both surfaces.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  // Re-import the promises mock to share its file map.
+  const promisesMod = (await import('node:fs/promises')) as unknown as {
+    __testHelpers: { fileContents: Map<string, Buffer> };
+  };
+  const fileContents = promisesMod.__testHelpers.fileContents;
+  const accessSync = vi.fn().mockImplementation((p: string) => {
+    if (fileContents.has(String(p))) return undefined;
+    const err = Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    throw err;
+  });
+  const constants = { F_OK: 0, R_OK: 4 };
+  return {
+    ...actual,
+    accessSync,
+    constants,
+    default: { ...actual, accessSync, constants },
+  };
+});
+
+async function getTestFiles(): Promise<Map<string, Buffer>> {
+  const mod = (await import('node:fs/promises')) as unknown as {
+    __testHelpers: { fileContents: Map<string, Buffer> };
+  };
+  return mod.__testHelpers.fileContents;
+}
 
 describe('loadAgentConfig', () => {
   it('throws ConfigurationError when provider is missing', async () => {
@@ -453,5 +518,276 @@ describe('mapAgentToolFlags — CLI conflict detection', () => {
       expect((e as { code?: string }).code).toBe('E_USAGE');
       expect((e as { exitCode?: number }).exitCode).toBe(2);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Configuration profiles (plan-005) — tier-5 integration tests.
+// ---------------------------------------------------------------------------
+
+const AGENT_DIR_FOR_TESTS = path.join(os.homedir(), '.tool-agents', AGENT_TOOL_NAME);
+
+async function placeProfileFile(filename: string, body: string): Promise<string> {
+  const abs = path.join(AGENT_DIR_FOR_TESTS, 'profiles', filename);
+  const files = await getTestFiles();
+  files.set(abs, Buffer.from(body, 'utf8'));
+  return abs;
+}
+
+async function clearProfiles(): Promise<void> {
+  const files = await getTestFiles();
+  for (const k of [...files.keys()]) {
+    if (k.includes('/profiles/')) files.delete(k);
+  }
+}
+
+describe('loadAgentConfig — profile activation (plan-005)', () => {
+  beforeEach(async () => {
+    await clearProfiles();
+  });
+
+  it('AC-21 invariant: no profile activation when neither flag nor env set', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.activeProfile).toBeUndefined();
+    expect(cfg.activeProfileData).toBeUndefined();
+  });
+
+  it('AC-2: --profile <name> activates and threads cliParams.temperature into tier 5', async () => {
+    await placeProfileFile(
+      'review.yaml',
+      [
+        'name: review',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  temperature: 0.42',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'review' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.activeProfile?.name).toBe('review');
+    expect(cfg.activeProfile?.digest).toMatch(/^[0-9a-f]{16}$/);
+    expect(cfg.temperature).toBe(0.42);
+  });
+
+  it('AC-3: CLI_AGENT_PROFILE env var activates the same way as --profile', async () => {
+    await placeProfileFile(
+      'envprof.yaml',
+      [
+        'name: envprof',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  temperature: 0.21',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_PROFILE: 'envprof' }, cwd: '/tmp' },
+    );
+    expect(cfg.activeProfile?.name).toBe('envprof');
+    expect(cfg.temperature).toBe(0.21);
+  });
+
+  it('AC-4: explicit CLI flag wins over profile cliParams (temperature)', async () => {
+    await placeProfileFile(
+      'p.yaml',
+      [
+        'name: p',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  temperature: 0.7',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p', temperature: 0.05 },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.temperature).toBe(0.05);
+  });
+
+  it('AC-4: explicit CLI flag wins over profile (provider)', async () => {
+    await placeProfileFile(
+      'p.yaml',
+      [
+        'name: p',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  provider: anthropic',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.provider).toBe('openai');
+  });
+
+  it('AC-5: shell env beats profile cliParams.provider (AGENT_PROVIDER wins)', async () => {
+    await placeProfileFile(
+      'p.yaml',
+      [
+        'name: p',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  provider: anthropic',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { profile: 'p' },
+      { shellEnv: { AGENT_PROVIDER: 'gemini' }, cwd: '/tmp' },
+    );
+    expect(cfg.provider).toBe('gemini');
+  });
+
+  it('AC-6: profile beats config.json — provider falls through layered to profile', async () => {
+    // No layered['AGENT_PROVIDER'], no flag — only the profile sets the
+    // value; this confirms tier-5 is consulted before configFile would have
+    // been (no config.json present in this hermetic test).
+    await placeProfileFile(
+      'p.yaml',
+      [
+        'name: p',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  provider: anthropic',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.provider).toBe('anthropic');
+  });
+
+  it('E12: --profile beats CLI_AGENT_PROFILE when both are set', async () => {
+    await placeProfileFile(
+      'cli-wins.yaml',
+      [
+        'name: cli-wins',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  temperature: 0.11',
+        '',
+      ].join('\n'),
+    );
+    await placeProfileFile(
+      'env-loses.yaml',
+      [
+        'name: env-loses',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  temperature: 0.99',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'cli-wins' },
+      { shellEnv: { CLI_AGENT_PROFILE: 'env-loses' }, cwd: '/tmp' },
+    );
+    expect(cfg.activeProfile?.name).toBe('cli-wins');
+    expect(cfg.temperature).toBe(0.11);
+  });
+
+  it('E19: profile sets allowMutations: true with no flag → profile applies', async () => {
+    await placeProfileFile(
+      'mut.yaml',
+      [
+        'name: mut',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  allowMutations: true',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'mut' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.allowMutations).toBe(true);
+  });
+
+  it('AC-2 (model): profile cliParams.model threads into tier 5', async () => {
+    await placeProfileFile(
+      'mp.yaml',
+      [
+        'name: mp',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  model: gpt-5-pro',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'mp' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.model).toBe('gpt-5-pro');
+  });
+
+  it('webSearchBackend: profile cliParams threads into tier 5', async () => {
+    await placeProfileFile(
+      'wsb.yaml',
+      [
+        'name: wsb',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  webSearchBackend: brave',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'wsb' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.webSearchBackend).toBe('brave');
+  });
+
+  it('maxIterations (maxSteps) profile cliParams threads into tier 5', async () => {
+    await placeProfileFile(
+      'mi.yaml',
+      [
+        'name: mi',
+        'schemaVersion: 1',
+        'cliParams:',
+        '  maxIterations: 7',
+        '',
+      ].join('\n'),
+    );
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'mi' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.maxSteps).toBe(7);
+  });
+
+  it('E1: --profile <missing> raises UsageError exit 2', async () => {
+    await expect(
+      loadAgentConfig(
+        { provider: 'openai', profile: 'definitely-missing' },
+        { shellEnv: {}, cwd: '/tmp' },
+      ),
+    ).rejects.toMatchObject({ code: 'E_USAGE', exitCode: 2 });
+  });
+
+  it('activeProfile carries name + path + digest + schemaVersion', async () => {
+    const abs = await placeProfileFile('rich.yaml', 'name: rich\nschemaVersion: 1\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'rich' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.activeProfile?.name).toBe('rich');
+    expect(cfg.activeProfile?.path).toBe(abs);
+    expect(cfg.activeProfile?.schemaVersion).toBe(1);
+    expect(cfg.activeProfile?.digest).toMatch(/^[0-9a-f]{16}$/);
   });
 });

@@ -28,6 +28,7 @@ import {
   buildAgentToolsGroup,
   type AgentToolsCatalogMeta,
 } from './agent-tools/group-builder.js';
+import { applyProfileToolScoping } from './profile-scoping.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
@@ -80,8 +81,57 @@ export function buildToolCatalog(
   const policy = cliAgentPermissionPolicy(cfg);
   const agentToolsGroup = buildAgentToolsGroup(cfg, policy);
 
+  const assembled: AnyTool[] = [
+    ...readOnly,
+    ...mutatingFile,
+    ...bashRunTools,
+    ...agentToolsGroup.tools,
+  ];
+
+  // Profile tool scoping (plan-005 U-SCOPE). Runs AFTER the catalog is
+  // fully built so allow/deny/order operate on the same names that the
+  // LLM would otherwise see (registry.ts line ~84 invariant). When the
+  // active profile carries no `tools` sub-tree (or no profile is active)
+  // this is a no-op identity pass.
+  const { tools: scopedTools, warnings } = applyProfileToolScoping(
+    assembled,
+    cfg.activeProfileData?.tools,
+  );
+  for (const w of warnings) {
+    process.stderr.write(`[cli-agent] warning: ${w}\n`);
+  }
+
+  // E9 (plan-005): warn when `profile.toolArgs` references a tool that is
+  // not present in the post-scoping catalog (excluded by allow/deny or
+  // unknown name). Non-fatal — the dead reference is silently dropped at
+  // runtime by `mergeProfileToolArgs`. Emitting a stderr warning gives the
+  // user a hint that their preset will never apply.
+  const profileToolArgs = cfg.activeProfileData?.toolArgs;
+  if (profileToolArgs) {
+    const survivorNames = new Set<string>(scopedTools.map((t: AnyTool) => t.name));
+    for (const toolName of Object.keys(profileToolArgs)) {
+      if (!survivorNames.has(toolName)) {
+        process.stderr.write(
+          `[cli-agent] warning: profile toolArgs references tool '${toolName}' that is not in the active catalog (excluded by allow/deny or unknown)\n`,
+        );
+      }
+    }
+  }
+
+  // Re-derive agentToolsMeta in lockstep with the post-scoping tool list
+  // (codebase-scan IP-3 invariant: `tools[i]` ↔ `meta.registered[i]` for
+  // the agt_* subset). Filter the meta entries to those whose `name`
+  // survived scoping; the umbrella flag is preserved as-is.
+  const survivingNames = new Set<string>(scopedTools.map((t: AnyTool) => t.name));
+  const agentToolsMeta: AgentToolsCatalogMeta = {
+    umbrellaEnabled: agentToolsGroup.meta.umbrellaEnabled,
+    registered: agentToolsGroup.meta.registered.filter((entry) =>
+      survivingNames.has(entry.name),
+    ),
+  };
+
   return {
-    tools: [...readOnly, ...mutatingFile, ...bashRunTools, ...agentToolsGroup.tools],
-    agentToolsMeta: agentToolsGroup.meta,
+    tools: scopedTools,
+    agentToolsMeta,
   };
 }

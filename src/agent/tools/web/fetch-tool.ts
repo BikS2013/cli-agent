@@ -6,6 +6,7 @@ import type { AgentConfig } from '../../../config/agent-config.js';
 import { WebError } from '../../../errors.js';
 import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
 import { getToolDescription, getParamDescription } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 const TOOL_NAME = 'web_fetch';
 const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
@@ -26,7 +27,12 @@ export function createWebFetchTool(cfg: AgentConfig, requestBudget: { remaining:
     name: TOOL_NAME,
     description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema,
-    func: async (input) => {
+    func: async (rawInput, _runManager, runConfig) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        runConfig?.configurable as ProfileToolArgsConfigurable | undefined,
+        TOOL_NAME,
+      );
       try {
         if (requestBudget.remaining <= 0) {
           throw new WebError('E_SEARCH_BUDGET_EXCEEDED', `Web request session budget of ${maxRequests} requests exceeded.`);

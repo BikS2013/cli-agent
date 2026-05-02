@@ -1442,3 +1442,714 @@ remains in full control of their edits across upgrades.
 - **ADR-OVR-5**: Bootstrap is additive-only and runs on every cold start
   (not just first run). Catches new tools introduced in later releases
   without forcing the user to re-run `extract-tool-prompts`.
+
+## §12. Configuration Profiles (plan-005)
+
+**Plan reference**: `docs/design/plan-005-config-profiles.md`.
+**Spec reference**: `docs/design/refined-request-config-profiles.md`
+(FR-PROF-001 … FR-PROF-016 + NFR-PROF-001 … NFR-PROF-004 in
+`docs/design/project-functions.md`).
+**Coexists with**: §11 (tool-prompt overlays). The two subsystems are
+orthogonal — overlays change a tool's *prompt text*, profiles change *which
+tools are exposed* and *what default arguments they carry*. See §12.K.
+
+A configuration profile is a named, persistent harness preset stored under
+`~/.tool-agents/cli-agent/profiles/<name>.{yaml|yml|json}` that bundles three
+independently-optional sections — `cliParams`, `tools`, `toolArgs` —
+activated via `--profile <name>` or `CLI_AGENT_PROFILE=<name>`. Profile
+`cliParams` slot into the existing four-tier resolution chain at a new
+**tier 5**, between local `./.env` (tier 4) and `config.json` (tier 6),
+preserving the user-facing invariant that explicit CLI flags always win.
+
+### §12.A Architecture diagram (text)
+
+```
+                  ┌──────────────────────────────────────────────┐
+                  │ ~/.tool-agents/cli-agent/                    │
+                  │   profiles/                                  │
+                  │     review.yaml                              │
+                  │     scratch.yaml                             │
+                  │     docs.json   (tolerated on read)          │
+                  └──────────────────────┬───────────────────────┘
+                                         │  read on every run
+                                         │  IFF --profile or
+                                         │       CLI_AGENT_PROFILE set
+                                         ▼
+                       ┌────────────────────────────────┐
+                       │ profile-codec.ts               │
+                       │  parseProfile / stringifyProfile│
+                       │  createProfileStub             │
+                       │  detectAmbiguity (E18)         │
+                       │  rejectAliases (ADR-PROF-8)    │
+                       └────────────────┬───────────────┘
+                                        │ unknown → Zod
+                                        ▼
+                       ┌────────────────────────────────┐
+                       │ profile-schema.ts              │
+                       │  ProfileSchema (.strict() top, │
+                       │   .passthrough() on cliParams) │
+                       │  CREDENTIAL_KEY_PATTERN (E11)  │
+                       │  validateNoSecrets             │
+                       │  validateToolArgsAgainstTool   │
+                       │  KNOWN_CLI_PARAMS              │
+                       └────────────────┬───────────────┘
+                                        │ Profile (typed)
+                                        ▼
+                       ┌────────────────────────────────┐
+                       │ profile-loader.ts              │
+                       │  loadProfile(name, agentDir)   │
+                       │  resolveProfilePath (E16/E18)  │
+                       │  listProfiles                  │
+                       │  + name/stem cross-check (E4)  │
+                       │  + SHA-256 digest (first 16)   │
+                       └────────────────┬───────────────┘
+                                        │ ResolvedProfile
+       ┌────────────────────────────────┼──────────────────────────┐
+       ▼                                ▼                          ▼
+┌──────────────────┐    ┌────────────────────────┐    ┌─────────────────────────┐
+│ agent-config.ts  │    │ tools/profile-scoping  │    │ tools/profile-tool-args │
+│ tier-5 insertion │    │ allow → deny → order   │    │ shallow merge per .func │
+│ at each knob:    │    │ strict 3-pass; hard    │    │ helper invoked from     │
+│ flags.X          │    │ errors on intersection │    │ runConfig.configurable  │
+│  ?? layered.X    │    │ duplicate-order, empty │    │                         │
+│  ?? PROFILE.X    │    └──────────────┬─────────┘    └─────────────┬───────────┘
+│  ?? configFile.X │                   │                            │
+└──────────────────┘                   │                            │
+       │                                │                            │
+       ▼                                ▼                            ▼
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ AgentConfig                                                                   │
+│   + activeProfile?:     { name; path; schemaVersion; digest }                 │
+│   + activeProfileData?: { cliParams?; tools?; toolArgs? }                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+       │
+       ▼
+┌──────────────────────────┐    ┌──────────────────────────┐    ┌─────────────────────────┐
+│ buildToolCatalog         │ →  │ runOneShot/streamOneShot │ →  │ logger.log(             │
+│  applies scoping at      │    │ buildTuiAgentRuntime     │    │   kind:'profile_active')│
+│  registry.ts:84          │    │ inject profileToolArgs   │    │   after session_start   │
+│  (re-derives agent-tools │    │ into configurable bag    │    │   before user_prompt    │
+│   meta after scoping)    │    └──────────────────────────┘    └─────────────────────────┘
+└──────────────────────────┘
+
+Six new top-level subcommands (profile-list / profile-show / profile-create /
+profile-edit / profile-delete / profile-dry-run) consume the same loader +
+codec + schema. profile-dry-run additionally calls a "trace mode" of
+loadAgentConfig that records per-knob source attribution.
+```
+
+The architecture preserves the §2 bootstrap pipeline; the profile subsystem
+is **additive** and gated by activation. When neither `--profile` nor
+`CLI_AGENT_PROFILE` is set, every code path short-circuits before any
+filesystem access (NFR-PROF-001 / cold-start budget).
+
+### §12.B Module layout
+
+| File | Role | Status |
+|---|---|---|
+| `src/config/profile-codec.ts` | Encapsulates ALL `yaml`-package interaction. Exports `parseProfile`, `stringifyProfile`, `createProfileStub`, `detectAmbiguity`. | NEW |
+| `src/config/profile-codec.spec.ts` | Codec tests (E2 line/col, E18 ambiguity, alias rejection). | NEW |
+| `src/config/profile-schema.ts` | Zod schema, `KNOWN_CLI_PARAMS`, `CREDENTIAL_KEY_PATTERN`, `validateNoSecrets`, `validateToolArgsAgainstTool`. | NEW |
+| `src/config/profile-schema.spec.ts` | Schema tests (E3 strict, E6 empty allow, E10 toolArgs, E11 secrets, E20 forward-compat). | NEW |
+| `src/config/profile-loader.ts` | `loadProfile`, `resolveProfilePath`, `listProfiles`, digest, name/stem check. | NEW |
+| `src/config/profile-loader.spec.ts` | Loader tests (E1 missing, E4 stem mismatch, E5 empty, E16 illegal chars, E17 unreadable, E18 ambiguity). | NEW |
+| `src/agent/tools/profile-scoping.ts` | `applyProfileToolScoping(tools, scoping)` strict 3-pass. | NEW |
+| `src/agent/tools/profile-scoping.spec.ts` | Scoping tests (AC-7..10, E6, E7, E8, E21, E22, E23). | NEW |
+| `src/agent/tools/profile-tool-args.ts` | `mergeProfileToolArgs(input, configurable, toolName)` shallow per-key merge. | NEW |
+| `src/agent/tools/profile-tool-args.spec.ts` | Merge tests (AC-11, AC-12, E9). | NEW |
+| `src/commands/profile/list.ts` | `profile-list` handler (FR-PROF-008 / AC-13). | NEW |
+| `src/commands/profile/show.ts` | `profile-show <name>` handler (FR-PROF-009 / AC-14). | NEW |
+| `src/commands/profile/create.ts` | `profile-create <name>` handler (FR-PROF-010 / AC-15). | NEW |
+| `src/commands/profile/edit.ts` | `profile-edit <name>` handler (FR-PROF-011). | NEW |
+| `src/commands/profile/delete.ts` | `profile-delete <name>` handler (FR-PROF-012). | NEW |
+| `src/commands/profile/dry-run.ts` | `profile-dry-run` handler (FR-PROF-013 / AC-16). | NEW |
+| `src/commands/profile/shared.ts` | Shared helpers: `formatTable`, `resolveProfilePathOrThrow`, `printProfileSummary`. | NEW |
+| `src/commands/profile/*.spec.ts` | Per-handler co-located specs. | NEW |
+| `src/config/agent-config.ts` | Tier-5 insertion at each knob; `activeProfile` / `activeProfileData` fields; `bootstrapProfilesDir`; `'CLI_AGENT_PROFILE'` in `OTHER_ENV_KEYS`; optional trace-mode. | EXTEND |
+| `src/cli.ts` | `--profile <name>` flag + 6 subcommand registrations. | EXTEND |
+| `src/agent/tools/registry.ts` | Apply scoping at line 84; re-derive `agentToolsMeta` after scoping. | EXTEND |
+| `src/agent/graph.ts` | Inject `profileToolArgs` into `configurable` (lines 86-95, 160-174). | EXTEND |
+| `src/agent/run.ts` | `buildTuiAgentRuntime` mirror; emit `profile_active` log after `session_start`. | EXTEND |
+| `src/agent/logging.ts` | Extend `LogEvent` union with `profile_active`. | EXTEND |
+| 17 tool factories (`bash/*`, `file/*`, `web/*`, `tool-help-tool.ts`, `agent-tools/agt-*.ts`) | One-line `mergeProfileToolArgs` call at top of each `.func`. | EXTEND |
+
+`package.json` gains a single new dependency: `"yaml": "^2.6.0"` (eemeli/yaml,
+zero-dep, first-party TS types). No other dependencies are added; Zod is
+already present.
+
+### §12.C Profile YAML format (canonical write form)
+
+```yaml
+# ~/.tool-agents/cli-agent/profiles/<name>.yaml
+name: <string>             # MUST equal the filename stem (E4).
+description: <string>      # Free-form, used by profile-list / profile-show.
+schemaVersion: 1           # Reserved for future migrations. Default: 1.
+
+cliParams:                 # Section 1: CLI parameter presets (passthrough).
+  provider: <string>
+  model: <string>
+  temperature: <number>
+  maxIterations: <integer>
+  workingDir: <string>
+  logLevel: <string>
+  webSearchBackend: <string>
+  allowMutations: <boolean>
+  # ... any cli-agent CLI/config knob the user wishes to pin.
+  # Unknown keys are forward-compat (ADR-PROF-6 + E20).
+
+tools:                     # Section 2: Broad-scope tool list scoping.
+  allow: [<toolName>, ...]   # Optional. Empty array → ConfigurationError (E6).
+  deny:  [<toolName>, ...]   # Optional. Applied AFTER allow.
+  order: [<toolName>, ...]   # Optional. Survivors not in `order` keep
+                             #   original registration order, appended.
+
+toolArgs:                  # Section 3: Per-tool argument presets.
+  <toolName>:              # e.g. "bash_run", "web_search", "agt_grep"
+    <argName>: <value>     # Default values for that tool's flags/arguments.
+```
+
+`name`, `description`, `schemaVersion`, and all three top-level sections are
+independently optional. An empty profile (just `name:`) is legal but inert
+(E5 prints a stderr notice). JSON files using the same schema are tolerated
+on read; the canonical write format is YAML (ADR-PROF-1).
+
+### §12.D Data models
+
+#### Zod schema
+
+```ts
+// src/config/profile-schema.ts
+import { z } from 'zod'
+
+export const KNOWN_CLI_PARAMS = new Set([
+  'provider', 'model', 'temperature', 'maxIterations', 'workingDir',
+  'logLevel', 'webSearchBackend', 'allowMutations',
+  // ... plus every other pinnable knob in agent-config.ts
+] as const)
+
+export const CREDENTIAL_KEY_PATTERN = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$/i
+
+export const ProfileCliParamsSchema = z.object({
+  provider:         z.string().optional(),
+  model:            z.string().optional(),
+  temperature:      z.number().optional(),
+  maxIterations:    z.number().int().positive().optional(),
+  workingDir:       z.string().optional(),
+  logLevel:         z.string().optional(),
+  webSearchBackend: z.string().optional(),
+  allowMutations:   z.boolean().optional(),
+}).passthrough()  // E20: forward-compat for unknown cliParams keys.
+
+export const ProfileToolsSchema = z.object({
+  allow: z.array(z.string()).min(1).optional(),  // E6: empty array rejected.
+  deny:  z.array(z.string()).optional(),
+  order: z.array(z.string()).optional(),
+}).strict()
+
+export const ProfileToolArgsSchema = z.record(
+  z.string(),                              // tool name
+  z.record(z.string(), z.unknown()),       // arg key → value
+)
+
+export const ProfileSchema = z.object({
+  name:          z.string().optional(),
+  description:   z.string().optional(),
+  schemaVersion: z.literal(1).default(1),
+  cliParams:     ProfileCliParamsSchema.optional(),
+  tools:         ProfileToolsSchema.optional(),
+  toolArgs:      ProfileToolArgsSchema.optional(),
+}).strict()  // E3: unknown top-level keys rejected.
+
+export type Profile           = z.infer<typeof ProfileSchema>
+export type ProfileCliParams  = z.infer<typeof ProfileCliParamsSchema>
+export type ProfileTools      = z.infer<typeof ProfileToolsSchema>
+export type ProfileToolArgs   = z.infer<typeof ProfileToolArgsSchema>
+```
+
+#### Runtime types
+
+```ts
+// Returned by loadProfile(); cached on AgentConfig for the duration of a run.
+export interface ResolvedProfile {
+  readonly name: string                  // canonical (filename stem)
+  readonly path: string                  // absolute path of the loaded file
+  readonly schemaVersion: 1
+  readonly digest: string                // SHA-256 hex first 16 chars over RAW bytes
+  readonly cliParams?: ProfileCliParams
+  readonly tools?:     ProfileTools
+  readonly toolArgs?:  ProfileToolArgs
+  readonly warnings:   readonly string[] // E8/E9/E20/E21 deferred warnings
+}
+
+// Carried on AgentConfig for downstream consumers.
+export interface AgentConfigProfileFields {
+  readonly activeProfile?: {
+    readonly name: string
+    readonly path: string
+    readonly schemaVersion: number
+    readonly digest: string
+  }
+  readonly activeProfileData?: {
+    readonly cliParams?: ProfileCliParams
+    readonly tools?:     ProfileTools
+    readonly toolArgs?:  ProfileToolArgs
+  }
+}
+```
+
+#### Public API of `mergeProfileToolArgs`
+
+```ts
+// src/agent/tools/profile-tool-args.ts
+export function mergeProfileToolArgs<I extends Record<string, unknown>>(
+  input: I,
+  configurable: { profileToolArgs?: Record<string, Record<string, unknown>> } | undefined,
+  toolName: string,
+): I {
+  const presets = configurable?.profileToolArgs?.[toolName]
+  if (!presets) return input
+  return { ...presets, ...input } as I  // runtime input wins per-key (FR-PROF-006).
+}
+```
+
+### §12.E Subcommand surface (flat hyphenated — ADR-PROF-5 / OQ-3)
+
+| Subcommand | Alias | Effect | Default exit codes |
+|---|---|---|---|
+| `profile-list` | `profiles` | Tabular: name, description (first line), size, mtime. Empty dir → hint message. | 0 (success or empty), 6 (IO error) |
+| `profile-show <name>` | — | Print raw + parsed/normalized + summary (with current-catalog evaluation). `--json` opt-in. | 0 / 2 (missing) / 3 (malformed) |
+| `profile-create <name> [--from-current] [--description "..."] [--force]` | — | Scaffold YAML stub at mode `0600`; `--from-current` captures resolved config. | 0 / 2 (exists w/o `--force`) |
+| `profile-edit <name>` | — | Open in `$EDITOR` ($VISUAL fallback, then vi/notepad). Re-validate after exit; file left as-is on failure. | 0 / 2 (missing) / 3 (validation fail) |
+| `profile-delete <name> [--yes]` | `profile-rm` | Confirm prompt (skipped with `--yes`); delete file. | 0 / 2 (missing) |
+| `profile-dry-run [--profile <name>] [other flags] [--json]` | — | Resolve full config + tool scoping; print effective state with per-knob source attribution. Does NOT instantiate LLM, run capability discovery, or execute tools. | 0 / 2 / 3 |
+
+Top-level activation flag (added to the default command and all six profile
+subcommands that accept `--profile`):
+
+```
+--profile <name>    Activate a named configuration profile.
+                    Equivalent env var: CLI_AGENT_PROFILE.
+                    CLI flag wins over env (E12).
+```
+
+Output formats: human-readable by default (kubectl/aws-style), `--json` opt-in
+for `profile-list` / `profile-show` / `profile-dry-run`. The `--json` schema
+is documented in `docs/design/configuration-guide.md` and is the same shape
+used by the investigation §"Q7 Recommendation".
+
+### §12.F Filesystem layout
+
+```
+~/.tool-agents/cli-agent/
+  profiles/                       (dir, mode 0700 — created by bootstrapAgentDir)
+    review.yaml                   (file, mode 0600)
+    scratch.yaml                  (file, mode 0600)
+    docs.json                     (file, mode 0600 — tolerated on read)
+```
+
+Constraints:
+
+- Filename stem MUST equal the in-file `name:` field if present (E4).
+- Filenames MUST NOT contain `/`, `\`, `:`, `*`, `?`, `"`, `<`, `>`, `|`,
+  control characters, or a leading `.` (E16). Validated by both the loader
+  and `profile-create`.
+- Both `<name>.yaml` and `<name>.json` for the same stem is a hard error
+  (E18) — the codec rejects ambiguity rather than silently preferring one
+  extension.
+- `profile-create` writes YAML by default (ADR-PROF-1); the file is created
+  with mode `0600` (NFR-PROF-002).
+- The `profiles/` directory is **NOT** seeded with any sample/default file
+  (contrast with §11 overlays, which auto-seed). Profiles are user-authored.
+
+### §12.G Precedence integration (tier-5 insertion)
+
+The existing per-knob expressions in `src/config/agent-config.ts` (lines
+706-862) follow the pattern:
+
+```
+flags.X ?? layered['AGENT_X'] ?? configFile?.X
+```
+
+Each such expression is mechanically extended to:
+
+```
+flags.X ?? layered['AGENT_X'] ?? activeProfileData?.cliParams?.X ?? configFile?.X
+```
+
+The composed resolution chain becomes (highest priority first):
+
+```
+1. Explicit CLI flag                                     ← always wins
+2. Shell environment variable
+3. ~/.tool-agents/cli-agent/.env                  ┐
+4. Local ./.env                                   │ flattened into "layered"
+                                                  │ snapshot (fill-gaps)
+5. PROFILE cliParams (if active)                  ← NEW (tier 5)
+6. ~/.tool-agents/cli-agent/config.json
+7. Built-in defaults (where applicable; otherwise ConfigurationError)
+```
+
+Profile activation itself is decided ONCE at the top of `loadAgentConfig`,
+after the layered env snapshot is built and before any per-knob resolution:
+
+```
+const profileName = flags.profile ?? layered['CLI_AGENT_PROFILE']
+if (profileName) {
+  const resolved = await loadProfile(profileName, agentDir)
+  // resolved.cliParams flows into activeProfileData.cliParams
+  // resolved.tools / toolArgs flow through unchanged
+}
+```
+
+This guarantees:
+
+- E12 (both flag and env set) — the `??` chain naturally lets `flags.profile`
+  win over `layered['CLI_AGENT_PROFILE']`.
+- AC-4 (CLI flag beats profile) — the per-knob `flags.X ?? ...` ensures any
+  explicit CLI flag short-circuits before profile values are consulted.
+- AC-5 (shell env beats profile) — `layered['AGENT_X']` is consulted before
+  `activeProfileData?.cliParams?.X`.
+- AC-6 (profile beats `config.json`) — `activeProfileData?.cliParams?.X`
+  precedes `configFile?.X`.
+- AC-21 (no regression) — when `profileName` is undefined,
+  `activeProfileData` is undefined and every `?? activeProfileData?.cliParams?.X`
+  clause short-circuits to `?? configFile?.X` exactly as before.
+
+The audit guarantee for R-2 (silent precedence bug): a grep over
+`agent-config.ts` for `\?\? configFile\?\.` MUST find every match preceded
+on the same expression by `\?\? activeProfileData\?\.cliParams\?\.`. A
+unit test per pinnable knob asserts the chain.
+
+### §12.H Tool-scoping algorithm
+
+```
+function applyProfileToolScoping(
+  tools: AnyTool[],
+  scoping: { allow?: string[]; deny?: string[]; order?: string[] } | undefined,
+): { tools: AnyTool[]; warnings: string[] } {
+
+  if (!scoping) return { tools, warnings: [] }
+  const { allow, deny, order } = scoping
+  const warnings: string[] = []
+  const registered = new Set(tools.map(t => t.name))
+
+  // Hard-error guards run FIRST so messages can quote user input verbatim.
+  if (allow && deny) {
+    const intersection = allow.filter(n => deny.includes(n))
+    if (intersection.length > 0) {
+      throw new ConfigurationError(                                  // E23
+        `profile.tools: allow ∩ deny is non-empty: ${intersection.join(', ')}.` +
+        ` Each tool must appear in at most one of allow/deny.`)
+    }
+  }
+  if (order) {
+    const seen = new Set<string>()
+    const dups = order.filter(n => (seen.has(n) ? true : (seen.add(n), false)))
+    if (dups.length > 0) {
+      throw new ConfigurationError(                                  // E22
+        `profile.tools.order has duplicate entries: ${dups.join(', ')}.`)
+    }
+  }
+
+  // Pass 1: allow (intersect with registered).
+  let survivors: AnyTool[]
+  if (allow) {
+    for (const name of allow) {
+      if (!registered.has(name)) {
+        warnings.push(                                               // E8
+          `profile.tools.allow lists '${name}' which is not registered ` +
+          `(forward-compat; ignoring)`)
+      }
+    }
+    survivors = tools.filter(t => allow.includes(t.name))
+  } else {
+    survivors = tools.slice()
+  }
+
+  // Pass 2: deny.
+  if (deny) {
+    const survivorSet = new Set(survivors.map(t => t.name))
+    for (const name of deny) {
+      if (!survivorSet.has(name)) {
+        warnings.push(                                               // E8
+          `profile.tools.deny lists '${name}' which is not in the survivor set ` +
+          `(forward-compat; ignoring)`)
+      }
+    }
+    survivors = survivors.filter(t => !deny.includes(t.name))
+  }
+
+  // Hard-error guard: empty post-scoping catalog.
+  if (survivors.length === 0) {
+    throw new ConfigurationError(                                    // E7
+      `profile.tools scoping disables every registered tool. ` +
+      `Remove an entry from allow/deny to keep at least one tool visible.`)
+  }
+
+  // Pass 3: order (stable; non-listed survivors appended in original order).
+  if (order) {
+    const survivorByName = new Map(survivors.map(t => [t.name, t]))
+    const ordered: AnyTool[] = []
+    for (const name of order) {
+      const t = survivorByName.get(name)
+      if (t) {
+        ordered.push(t)
+        survivorByName.delete(name)
+      } else {
+        warnings.push(                                               // E21
+          `profile.tools.order lists '${name}' which is not in the survivor set ` +
+          `(after allow/deny); ignoring`)
+      }
+    }
+    // Append remaining survivors in their original registration order.
+    for (const t of survivors) {
+      if (survivorByName.has(t.name)) ordered.push(t)
+    }
+    survivors = ordered
+  }
+
+  return { tools: survivors, warnings }
+}
+```
+
+After scoping, `buildToolCatalog` re-derives `agentToolsMeta` (the per-pack
+metadata produced by `buildAgentToolsGroup`) from the surviving tools so the
+catalog-level invariant at `group-builder.ts:186` holds.
+
+### §12.I Error handling strategy (E1–E23)
+
+Every edge case maps to one of three typed errors with hard-wired exit
+codes (per `src/errors.ts`):
+
+| Edge case | Error class | Exit | Owning module |
+|---|---|---|---|
+| E1  profile not found | `UsageError` | 2 | profile-loader (`resolveProfilePath`) |
+| E2  malformed YAML/JSON | `ConfigurationError` | 3 | profile-codec (line/col via `parseDocument().errors`) |
+| E3  unknown top-level key | `ConfigurationError` | 3 | profile-schema (`.strict()`) |
+| E4  `name:` ≠ stem | `ConfigurationError` | 3 | profile-loader |
+| E5  empty profile | (none — stderr notice) | 0 | profile-loader |
+| E6  `tools.allow: []` | `ConfigurationError` | 3 | profile-schema (`.min(1)`) |
+| E7  empty post-scoping catalog | `ConfigurationError` | 3 | profile-scoping |
+| E8  unknown name in allow/deny/order | (warning) | — | profile-scoping |
+| E9  toolArgs references excluded tool | (warning) | — | profile-loader / profile-tool-args (load-time check) |
+| E10 toolArgs arg fails Zod | `ConfigurationError` (known schema) / warning (dynamic schema) | 3 / — | profile-schema (`validateToolArgsAgainstTool`) |
+| E11 credential-shape key in cliParams | `ConfigurationError` | 3 | profile-schema (`validateNoSecrets`) |
+| E12 both `--profile` and env set | (CLI wins, no error) | — | agent-config |
+| E13 `--profile` repeated | (last wins, no error) | — | Commander default |
+| E14 `--profile` with no argument | Commander usage error | 2 | Commander default |
+| E15 excluded tool has overlay | (overlay silently unused) | — | runtime sequencing |
+| E16 illegal filename chars | `UsageError` | 2 | profile-loader / profile-create |
+| E17 profiles/ unreadable | `IOError` | 6 | profile-loader |
+| E18 both yaml + json for same stem | `ConfigurationError` | 3 | profile-codec (`detectAmbiguity`) |
+| E19 profile sets `allowMutations: true` | (intentional; profile applies) | — | agent-config |
+| E20 unknown cliParams key | (per-key warning) | — | profile-schema (`.passthrough()` + warn-pass) |
+| E21 `order` lists non-survivor | (warning) | — | profile-scoping |
+| E22 duplicate `order` entry | `ConfigurationError` | 3 | profile-scoping |
+| E23 allow ∩ deny non-empty | `ConfigurationError` | 3 | profile-scoping |
+
+Per the project's no-fallback rule (FR-PROF-015): missing required
+configuration values remain `ConfigurationError` (exit 3). Profiles never
+substitute a missing required value with a silent default; they are an
+additional source of explicit values, not a fallback mechanism. Schema
+validation surfaces ALL Zod issues at once in a single `ConfigurationError`
+message (ADR-PROF-11 Q3).
+
+### §12.J Logging schema additions
+
+The `LogEvent` union in `src/agent/logging.ts` gains five new event kinds
+that integrate cleanly with §6 (which already enumerates eight mandatory
+session events):
+
+| Event kind | Emission point | Payload |
+|---|---|---|
+| `profile_loaded` | After `loadProfile` resolves | `{ ts, sessionId, profileName, profilePath, schemaVersion, digest, durationMs }` |
+| `profile_active` | After `session_start`, before `user_prompt` (FR-PROF-007 / AC-19) | `{ ts, sessionId, profileName, profilePath, schemaVersion, digest }` |
+| `profile_validation_error` | When schema validation fails (E2/E3/E4/E6/E10/E11/E18/E22/E23) | `{ ts, sessionId, profileName, profilePath, code, message, issues? }` |
+| `tool_scoping_applied` | After `applyProfileToolScoping` returns | `{ ts, sessionId, allowApplied, denyApplied, orderApplied, registeredCount, finalCount, excludedByAllow, excludedByDeny, warnings }` |
+| `tool_args_merged` | At each tool dispatch, only when profile presets exist for that tool | `{ ts, sessionId, toolName, profileKeys, runtimeKeys, mergedKeys }` |
+
+The `digest` field is SHA-256 hex first 16 chars computed over **raw file
+bytes** (ADR-PROF-9), guaranteeing byte-level reproducibility audit; raw
+contents are never logged. The credential-scrubbing helper (`redactString`)
+applies to all payload fields per §7.
+
+### §12.K Coexistence with §11 tool-prompt overlays
+
+The two subsystems are orthogonal by construction:
+
+| Concern | §11 overlays | §12 profiles |
+|---|---|---|
+| File location | `~/.tool-agents/cli-agent/tool-prompts/<tool>.md` | `~/.tool-agents/cli-agent/profiles/<name>.{yaml\|json}` |
+| Affects | Tool description text + parameter docstrings | Which tools are exposed; their default args; CLI param presets |
+| Loaded by | `loadOverlayRegistry` → `cfg.toolPromptOverlays` | `loadProfile` → `cfg.activeProfile{,Data}` |
+| Consumed by | Each tool factory at construction time (description / `.describe`) | `buildToolCatalog` (scoping); per-tool `.func` (arg merge); per-knob expressions (cliParams) |
+| Bootstrap | Additive seed of all 17 overlays on each cold start | Directory created at `0700`; **NO file seeding** |
+| Activation | Always active when overlay file exists | Opt-in via `--profile` or `CLI_AGENT_PROFILE` |
+| Sequencing | Loaded BEFORE catalog assembly | Applied AFTER catalog assembly (scoping); tier-5 cliParams inserted at each knob |
+
+**One-paragraph orthogonality statement**: A tool first survives profile
+scoping (`applyProfileToolScoping` filters the assembled catalog at
+`registry.ts:84`); only then does its overlay-driven description / parameter
+text apply (because the factory for an excluded tool is never called, its
+overlay file on disk is read but never consulted at runtime). Profile
+`toolArgs` references for excluded tools are dead-code (E9 warning, dropped
+from the runtime configurable bag). This means **overlays apply to a tool
+*after* it has survived scoping**, and the two subsystems can be developed,
+tested, and reasoned about independently.
+
+### §12.L Test strategy
+
+Vitest categories follow the existing `*.spec.ts` co-location convention
+(IP-7 in the codebase scan):
+
+| Category | Files | Focus |
+|---|---|---|
+| Codec unit | `src/config/profile-codec.spec.ts` | E2 (line/col), E18 (ambiguity), alias rejection (ADR-PROF-8), round-trip stability |
+| Schema unit | `src/config/profile-schema.spec.ts` | E3 (strict), E6 (`.min(1)`), E10 (`.partial()` validation), E11 (credential regex), E20 (passthrough + warn-pass) |
+| Loader unit | `src/config/profile-loader.spec.ts` | E1, E4, E5, E16, E17, digest stability, list-profiles, bootstrap mode 0700 |
+| Scoping unit | `src/agent/tools/profile-scoping.spec.ts` | AC-7, AC-8, AC-9, AC-10, E7, E8, E21, E22, E23 |
+| Args-merge unit | `src/agent/tools/profile-tool-args.spec.ts` | AC-11, AC-12, no-presets short-circuit, undefined-configurable safety |
+| Config integration | `src/config/agent-config.spec.ts` (extended) | AC-2, AC-3, AC-4 (3 knobs), AC-5, AC-6, AC-21 (no-regression), E12, E13, E14, E19 |
+| Registry integration | `src/agent/tools/registry.spec.ts` (extended) | Catalog scoping at line 84, agent-tools meta re-derivation |
+| Subcommand integration | `src/commands/profile/*.spec.ts` | AC-13 (list), AC-14 (show), AC-15 (create), AC-16 (dry-run), edit/delete happy + error paths |
+| Logging integration | `src/agent/logging.spec.ts` (extended) | AC-19 (`profile_active` event); five new kinds present |
+| Overlay coexistence (E2E) | `src/agent/tools/registry.spec.ts` (new test) | AC-18 — profile excludes tool that has overlay; overlay file untouched |
+| Cold-start smoke | `test_scripts/smoke-profile-cold-start.ts` | NFR-PROF-001 / AC-22 (≤ 50 ms baseline regression) |
+| Regression | full suite | AC-21 byte-identical no-profile path |
+
+Hermetic fs mocking follows the existing `vi.mock('node:fs/promises', ...)`
+pattern with both `default` and named exports mocked; the `writtenPaths` set
+fixture pattern (used in `agent-config.spec.ts:16-53`) is reused for the
+loader spec.
+
+### §12.M Phase 6 parallel implementation units
+
+Five units can be built independently against the interface contracts
+defined in §12.B / §12.D. Foundation modules (codec, schema, loader,
+config wiring, CLI flag + subcommand stubs) land in the sequential
+phases P3–P5 ahead of P6 fan-out.
+
+| Unit | Scope | Imports from foundation | Exports to other units |
+|---|---|---|---|
+| **U-SCOPE** | `profile-scoping.ts` + integration at `registry.ts:84` | `ProfileTools` (schema), `ConfigurationError` (errors) | `applyProfileToolScoping(tools, scoping): { tools, warnings }` (consumed by U-AGENTCFG via `buildToolCatalog`) |
+| **U-ARGS** | `profile-tool-args.ts` + 17 tool-factory `.func` updates + `graph.ts` configurable injection + `run.ts:217` mirror | `ProfileToolArgs` (schema) | `mergeProfileToolArgs(input, configurable, toolName): I` (consumed by every tool factory); `configurable.profileToolArgs` shape (consumed by U-AGENTCFG) |
+| **U-CLI** | Six `src/commands/profile/*.ts` handlers + `shared.ts` + `cli.ts` registrations | `ResolvedProfile` (loader), `ProfileSchema` (schema), `parseProfile`/`stringifyProfile`/`createProfileStub` (codec), `loadProfile`/`listProfiles` (loader), `loadAgentConfig` trace mode (P7) | (no exports to other P6 units) |
+| **U-AGENTCFG** | Tier-5 polish in `agent-config.ts` + `AgentCommandOptions` propagation + acceptance specs for AC-2..6 / E12 / E13 / E14 / E19 | `loadProfile` (loader), `applyProfileToolScoping` (U-SCOPE), `KNOWN_CLI_PARAMS` (schema) | `cfg.activeProfile` and `cfg.activeProfileData` (consumed by every downstream user); `KNOWN_CLI_PARAMS` re-exported for U-CLI's `profile-create --from-current` |
+| **U-FOUNDATION-FOLLOWUP** | Reserved for any P3 follow-up surfaced during integration (e.g., `validateProfileToolArgs.ts` extracted across multiple call sites) | — | May be subsumed by U-AGENTCFG if no slippage occurs |
+
+**Interface contracts** (the load-bearing signatures):
+
+```ts
+// EXPORTED by profile-loader.ts; CONSUMED by U-CLI, U-AGENTCFG.
+export async function loadProfile(name: string, agentDir: string): Promise<ResolvedProfile>
+export async function listProfiles(agentDir: string): Promise<ProfileFileEntry[]>
+export function resolveProfilePath(name: string, agentDir: string): { yaml?: string; json?: string }
+
+// EXPORTED by profile-scoping.ts (U-SCOPE); CONSUMED by U-AGENTCFG via registry.ts.
+export function applyProfileToolScoping(
+  tools: AnyTool[],
+  scoping: ProfileTools | undefined,
+): { tools: AnyTool[]; warnings: string[] }
+
+// EXPORTED by profile-tool-args.ts (U-ARGS); CONSUMED by every tool factory.
+export function mergeProfileToolArgs<I extends Record<string, unknown>>(
+  input: I,
+  configurable: { profileToolArgs?: Record<string, Record<string, unknown>> } | undefined,
+  toolName: string,
+): I
+
+// EXPORTED by profile-schema.ts; CONSUMED by U-CLI, U-AGENTCFG, profile-loader.
+export const ProfileSchema: z.ZodObject<...>
+export const KNOWN_CLI_PARAMS: ReadonlySet<string>
+export const CREDENTIAL_KEY_PATTERN: RegExp
+export function validateNoSecrets(cliParams: object): void
+export function validateToolArgsAgainstTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  schema?: z.ZodObject<any>,
+): { ok: true } | { ok: false; issues: z.ZodIssue[] }
+
+// EXPORTED by profile-codec.ts; CONSUMED by profile-loader and U-CLI.
+export function parseProfile(text: string, filePath: string): Profile
+export function stringifyProfile(profile: Profile): string
+export function createProfileStub(name: string): string
+export function detectAmbiguity(agentDir: string, name: string): { yaml?: string; json?: string }
+
+// EXTENDED on AgentConfig (agent-config.ts); CONSUMED by all downstream code.
+interface AgentConfig {
+  // ... existing fields ...
+  readonly activeProfile?: { name; path; schemaVersion; digest }
+  readonly activeProfileData?: { cliParams?; tools?; toolArgs? }
+}
+```
+
+Merge-conflict mitigation (R-11 from plan-005): P5 lands ALL flag/env/
+subcommand-stub registrations BEFORE P6 fans out. P6 unit U-CLI fills the
+stubs in `src/commands/profile/*.ts`; P6 unit U-ARGS edits `configurable`
+literals in `graph.ts` / `run.ts` and the 17 `.func` bodies. No two units
+edit the same line.
+
+### §12.N Architectural decisions (ADRs)
+
+The eleven decisions locked in plan-005 §6 are restated here for
+completeness; three additional decisions emerged during this design phase.
+
+- **ADR-PROF-1**: File format — YAML default (`yaml` ^2.6.0), JSON tolerated
+  on read. Rationale: refined-spec Assumption 1 + investigation Recommendation #1.
+- **ADR-PROF-2**: Precedence tier 5, between local `./.env` (tier 4) and
+  `config.json` (tier 6). Rationale: refined-spec §FR-PROF-004 + investigation Recommendation #2.
+- **ADR-PROF-3**: Strict three-pass `allow → deny → order` with hard errors
+  on `allow ∩ deny`, duplicate `order`, empty post-scoping catalog, and
+  explicitly empty `allow`. Rationale: investigation Recommendation #3.
+- **ADR-PROF-4**: `toolArgs` shallow per-key merge at tool input level via
+  shared `mergeProfileToolArgs` helper. Rationale: investigation Recommendation #4.
+- **ADR-PROF-5**: CLI surface is flat hyphenated (`profile-list`, …).
+  Rationale: investigation Recommendation #5; matches existing 5 flat
+  subcommands. **Deviation** from refined-spec Assumption 5 — confirmed
+  via OQ-3.
+- **ADR-PROF-6**: Zod schema with `.strict()` top + `.passthrough()` on
+  `cliParams`. Rationale: NFR-PROF-003.
+- **ADR-PROF-7**: `profile-show` / `profile-dry-run` output — aws-style
+  human table with per-knob source attribution by default; `--json` opt-in.
+  Rationale: investigation Recommendation #7.
+- **ADR-PROF-8**: YAML alias policy — reject all aliases. Rationale:
+  research §6 Position A.
+- **ADR-PROF-9**: Digest is SHA-256 hex first 16 chars over raw file bytes.
+  Rationale: byte-level reproducibility audit (FR-PROF-007); contents never
+  leak.
+- **ADR-PROF-10**: `profile-edit` re-validates only; never re-writes after
+  `$EDITOR` exit. Rationale: research Pitfall 4 — re-stringifying would
+  silently normalize formatting.
+- **ADR-PROF-11**: Resolution of yaml-research clarifying questions — Q1
+  (no comment preservation on `--from-current`), Q2 (re-validate only),
+  Q3 (surface all Zod issues at once), Q4 (per-key warnings, capped at 10
+  with "(N more suppressed)" footer).
+
+New ADRs introduced during this design phase:
+
+- **ADR-PROF-12**: `ResolvedProfile` is built ONCE per cli-agent invocation,
+  during `loadAgentConfig`, and cached on `AgentConfig` as
+  `activeProfileData` (typed sub-trees) plus `activeProfile` (metadata).
+  No re-loading mid-run; the TUI (which can rebuild the agent graph via
+  `/new` / `/model` / `/provider` / `/tools` / `/allow-mutations`) reuses
+  the same `ResolvedProfile` from the original `cfg`. Rationale:
+  reproducibility (digest stays stable for the run), simplicity (no
+  invalidation logic), and v1 scope (no mid-session profile switching per
+  OQ-4 deferred).
+- **ADR-PROF-13**: Profile activation short-circuit. When neither
+  `flags.profile` nor `layered['CLI_AGENT_PROFILE']` is set, `loadProfile`
+  is never called — no filesystem access, no codec instantiation, no
+  digest computation. This is the load-bearing optimization for
+  NFR-PROF-001 (≤ 50 ms cold-start budget when feature is OFF) and the
+  AC-21 byte-identical-no-profile-path invariant. Rationale: implemented
+  as a single `if (profileName)` guard at the top of the activation block
+  in `loadAgentConfig`.
+- **ADR-PROF-14**: Five new `LogEvent` kinds (vs. one in the original spec
+  FR-PROF-007). The spec mandates `profile_active`; this design adds
+  `profile_loaded`, `profile_validation_error`, `tool_scoping_applied`,
+  `tool_args_merged` for parity with the existing 8-kind §6 schema and to
+  support `profile-dry-run`'s "trace mode" attribution (§12.J). Rationale:
+  consistent observability surface; the new kinds are emitted at well-defined
+  seams already required by the implementation. This is an additive
+  extension; the FR-PROF-007 contract on `profile_active` is unchanged.
+

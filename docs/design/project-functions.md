@@ -462,3 +462,197 @@ under default config has a matching entry in `BUILTIN_TOOL_PROMPTS`. This
 catches the "added a new tool, forgot to register its prompt" regression
 at CI time. **Status: Accepted.**
 
+## Configuration Profiles (FR-PROF-*)
+
+Plan reference: `docs/design/plan-005-config-profiles.md`.
+Refined request (canonical authoritative source for the full 16 functional
+requirements, 22 acceptance criteria, and 23 enumerated edge cases):
+`docs/design/refined-request-config-profiles.md`.
+Investigation: `docs/reference/investigation-config-profiles.md`.
+Design: `docs/design/project-design.md` §12 (added in plan-005 P2).
+
+A "configuration profile" is a named, persistent harness preset stored under
+`~/.tool-agents/cli-agent/profiles/<name>.{yaml|yml|json}` (directory mode
+`0700`, files mode `0600`) that bundles three orthogonal optional sections —
+`cliParams`, `tools`, `toolArgs` — into one launch-time preset, activated via
+`--profile <name>` or `CLI_AGENT_PROFILE=<name>`. Profiles slot into the
+existing four-tier configuration resolution chain at a new tier 5, between
+local `./.env` and `~/.tool-agents/cli-agent/config.json`. Explicit CLI flags
+ALWAYS win (the central user-facing invariant). Profiles coexist with the
+plan-004 tool-prompt overlay system orthogonally — overlays change tool
+*prompt text*, profiles change *which tools are exposed* and *what default
+arguments they carry*.
+
+The entries below summarise the high-level functional capabilities; the
+refined request file remains the canonical authoritative version.
+
+### FR-PROF-001: Profile storage layout
+
+`bootstrapAgentDir` ensures `~/.tool-agents/cli-agent/profiles/` exists at
+mode `0700` on first run. Each profile file is created at mode `0600`. Both
+YAML (`.yaml`/`.yml`) and JSON (`.json`) extensions are supported on read;
+`profile-create` writes YAML by default. **Status: Accepted (Plan 005).**
+
+### FR-PROF-002: Profile schema (v1)
+
+A profile is a structured document with three independent, all-optional
+top-level sections: `cliParams` (preset values for any pinnable cli-agent
+knob), `tools` (broad-scope tool list scoping with sub-keys `allow`, `deny`,
+`order`), and `toolArgs` (per-tool argument presets). Top-level keys are
+validated by a Zod schema (`.strict()` at the top, `.passthrough()` on
+`cliParams`); unknown top-level keys are hard errors, unknown `cliParams`
+keys produce stderr warnings (forward-compat across cli-agent versions).
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-003: Activation surface
+
+Profiles are activated via the `--profile <name>` CLI flag (highest
+priority) or the `CLI_AGENT_PROFILE` environment variable (used only when
+the flag is absent). When neither is set, no profile is active and behavior
+is identical to the pre-feature baseline. A missing named profile produces
+a `UsageError` exit 2 with a diagnostic message listing existing profiles.
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-004: Precedence (the central invariant)
+
+Profile `cliParams` participate in the resolution chain at tier 5, between
+local `./.env` (tier 4) and `~/.tool-agents/cli-agent/config.json` (tier 6).
+The composed order from highest to lowest priority is:
+1. CLI flag, 2. shell env, 3. agent-dir `.env`, 4. local `./.env`,
+5. **profile cliParams (NEW)**, 6. config.json, 7. built-in defaults.
+**Explicit CLI flags supplied at invocation ALWAYS win over profile values.**
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-005: Tool list scoping semantics
+
+The registered tool catalog (post-mutation-gating, post-agent-tools-flags)
+is filtered by the profile's `tools` section in strict order:
+**`allow` → `deny` → `order`**. Each sub-key is independently optional. An
+`allow ∩ deny ≠ ∅` is a hard error, as is a duplicate name in `order`, as
+is an empty post-scoping catalog. Unknown names in `allow`/`deny`/`order`
+produce stderr warnings and are silently dropped (forward-compat).
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-006: Per-tool argument merge
+
+For every tool invocation, the effective argument object is computed as
+`{ ...profile.toolArgs[toolName], ...runtimeArgs }` — a shallow per-key
+merge where runtime arguments win on a per-key basis. Profile-set
+arguments for keys NOT supplied at runtime continue to apply. Validation
+uses each tool's input Zod schema in `.partial()` form at profile-load time
+for tools with known schemas; tools with dynamic schemas defer validation
+to runtime. **Status: Accepted (Plan 005).**
+
+### FR-PROF-007: Activation telemetry
+
+When a profile is active, the structured JSONL session log includes a
+`profile_active` event near `session_start` carrying: profile name,
+resolved file path, schema version, and a SHA-256 hex prefix (first 16
+chars) digest of the raw file contents. Hash-only — raw contents are never
+logged. **Status: Accepted (Plan 005).**
+
+### FR-PROF-008: profile-list subcommand
+
+`cli-agent profile-list` enumerates all profiles in
+`~/.tool-agents/cli-agent/profiles/` with columns: name, description, file
+size, mtime. Exits 0 even when the directory is empty. Exits 6 (IO error)
+on filesystem failure. **Status: Accepted (Plan 005).**
+
+### FR-PROF-009: profile-show subcommand
+
+`cli-agent profile-show <name>` parses the named profile, validates it,
+and prints the raw file contents, the parsed/normalized form, and a
+summary block (pinned cliParams, resulting tool catalog, per-tool args).
+Exits 0 / 2 / 3 per standard config validation contract. **Status: Accepted (Plan 005).**
+
+### FR-PROF-010: profile-create subcommand
+
+`cli-agent profile-create <name> [--from-current] [--description "..."] [--force]`
+scaffolds a new profile YAML stub at mode `0600`. With `--from-current`,
+captures the currently resolved configuration into `cliParams`. Exits 2 if
+`<name>` exists without `--force`. **Status: Accepted (Plan 005).**
+
+### FR-PROF-011: profile-edit subcommand
+
+`cli-agent profile-edit <name>` opens the profile file in `$EDITOR`
+(falling back to `$VISUAL`, then platform default). After the editor
+exits, the file is re-validated; on validation failure the file is left
+as-is and an exit-2 diagnostic is printed. The codec re-validates only;
+it does not re-write the file (preserves user formatting and comments).
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-012: profile-delete subcommand
+
+`cli-agent profile-delete <name> [--yes]` deletes the profile file after
+a confirmation prompt (skipped with `--yes`). Exits 2 if `<name>` does not
+exist. **Status: Accepted (Plan 005).**
+
+### FR-PROF-013: profile-dry-run subcommand
+
+`cli-agent profile-dry-run [--profile <name>] [other flags] [--json]`
+performs the full configuration resolution (env + .env + profile +
+config.json + CLI flags) and the full tool-scoping pass against the
+registered catalog, then prints a human-readable report (default) or JSON
+(with `--json`) of the effective configuration that would be used to
+launch the agent. It does NOT instantiate the LLM, run capability
+discovery, or execute any tools. Per-knob source attribution
+(`cli-flag` / `env:VAR` / `local-.env` / `profile:<name>` / `config.json` /
+built-in default) accompanies each pinned value. **Status: Accepted (Plan 005).**
+
+### FR-PROF-014: Documentation registration
+
+The feature is registered in `docs/design/project-functions.md` (this
+section), `docs/design/project-design.md` §12 (added in plan-005 P2),
+`docs/design/configuration-guide.md` (new "Configuration Profiles"
+section), and `docs/tools/cli-agent.md` (`<configurationProfiles>`
+subsection). **Status: Accepted (Plan 005).**
+
+### FR-PROF-015: No silent fallbacks
+
+A missing required configuration value remains a `ConfigurationError`
+(exit 3). Profiles never substitute a missing required value with a
+default silently — they are an additional source of explicit values, not a
+fallback mechanism. Per project rule: "no fallback for required values."
+**Status: Accepted (Plan 005).**
+
+### FR-PROF-016: Coexistence with tool-prompt overlays
+
+Profiles and overlays are orthogonal: overlays
+(`~/.tool-agents/cli-agent/tool-prompts/<tool>.md`) change a tool's
+*prompt text*; profiles change *which tools are exposed* and *what default
+arguments they carry*. When a profile excludes a tool from the catalog,
+the corresponding overlay file remains on disk untouched and is simply
+unused for that run. When a profile's `toolArgs` references a tool
+excluded by `tools.allow`/`deny`, the reference is dead-code and produces
+a stderr warning at load time (non-fatal).
+**Status: Accepted (Plan 005).**
+
+### NFR-PROF-001: Startup latency
+
+Profile loading and validation must add no more than 50 ms to cold-start
+time in the no-profile case (short-circuit when `--profile` and
+`CLI_AGENT_PROFILE` are both unset) and no more than 100 ms in the
+with-profile case for a typical profile (≤ 32 KB). A smoke script in
+`test_scripts/` enforces the regression budget. **Status: Accepted (Plan 005).**
+
+### NFR-PROF-002: File mode invariants
+
+Profile files are always created at mode `0600`; the `profiles/` directory
+is always at mode `0700`, matching the rest of `~/.tool-agents/cli-agent/`.
+Asserted by a unit test extending the existing `bootstrapAgentDir` mode
+checks. **Status: Accepted (Plan 005).**
+
+### NFR-PROF-003: Schema validation with Zod
+
+The profile schema is expressed as a Zod schema in TypeScript and reused
+by the loader, the `profile-show` / `profile-dry-run` subcommands, and
+`profile-create --from-current`. No ad-hoc parsers. **Status: Accepted (Plan 005).**
+
+### NFR-PROF-004: Test coverage
+
+Unit + integration tests cover every edge case E1–E23, the precedence
+chain (CLI flag wins for at least three distinct knobs), tool-scoping
+ordering (`allow → deny → order`), `toolArgs` merge semantics, and at
+least one full end-to-end test that launches with `--profile` and verifies
+the active tool catalog matches the profile. **Status: Accepted (Plan 005).**
+

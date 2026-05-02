@@ -54,6 +54,18 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
     cliVersion: CLI_VERSION,
   });
 
+  if (cfg.activeProfile) {
+    logger.log({
+      kind: 'profile_active',
+      ts: new Date().toISOString(),
+      sessionId,
+      profileName: cfg.activeProfile.name,
+      profilePath: cfg.activeProfile.path,
+      schemaVersion: cfg.activeProfile.schemaVersion,
+      digest: cfg.activeProfile.digest,
+    });
+  }
+
   logger.log({
     kind: 'user_prompt',
     ts: new Date().toISOString(),
@@ -146,6 +158,18 @@ export async function* streamOneShotAgent(
     allowMutations: cfg.allowMutations,
     cliVersion: CLI_VERSION,
   });
+
+  if (cfg.activeProfile) {
+    logger.log({
+      kind: 'profile_active',
+      ts: new Date().toISOString(),
+      sessionId,
+      profileName: cfg.activeProfile.name,
+      profilePath: cfg.activeProfile.path,
+      schemaVersion: cfg.activeProfile.schemaVersion,
+      digest: cfg.activeProfile.digest,
+    });
+  }
 
   logger.log({
     kind: 'user_prompt',
@@ -247,6 +271,18 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
     cliVersion: CLI_VERSION,
   });
 
+  if (cfg.activeProfile) {
+    logger.log({
+      kind: 'profile_active',
+      ts: new Date().toISOString(),
+      sessionId,
+      profileName: cfg.activeProfile.name,
+      profilePath: cfg.activeProfile.path,
+      schemaVersion: cfg.activeProfile.schemaVersion,
+      digest: cfg.activeProfile.digest,
+    });
+  }
+
   const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
   return { agentGraph, logger, sessionId };
 }
@@ -285,6 +321,18 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     allowMutations: cfg.allowMutations,
     cliVersion: CLI_VERSION,
   });
+
+  if (cfg.activeProfile) {
+    logger.log({
+      kind: 'profile_active',
+      ts: new Date().toISOString(),
+      sessionId,
+      profileName: cfg.activeProfile.name,
+      profilePath: cfg.activeProfile.path,
+      schemaVersion: cfg.activeProfile.schemaVersion,
+      digest: cfg.activeProfile.digest,
+    });
+  }
 
   const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 

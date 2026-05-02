@@ -24,6 +24,12 @@ import {
   serializeOverlay,
   type OverlayRegistry,
 } from '../agent/tools/tool-prompt-overlay.js';
+import { loadProfile } from './profile-loader.js';
+import type {
+  ProfileCliParams,
+  ProfileTools,
+  ProfileToolArgs,
+} from './profile-schema.js';
 
 export const AGENT_TOOL_NAME = 'cli-agent';
 
@@ -214,6 +220,27 @@ export interface AgentConfig {
    * type-compatible. The runtime helpers tolerate `undefined` and
    * fall through to the built-in default. */
   readonly toolPromptOverlays?: OverlayRegistry;
+  /** Active configuration profile metadata (plan-005). Populated by
+   * `loadAgentConfig` ONLY when `--profile` or `CLI_AGENT_PROFILE` is
+   * set. Carries identification + reproducibility audit fields; does
+   * NOT carry the typed sub-trees (those live on `activeProfileData`). */
+  readonly activeProfile?: {
+    readonly name: string;
+    readonly path: string;
+    readonly schemaVersion: number;
+    readonly digest: string;
+  };
+  /** Active profile typed sub-trees (plan-005). Populated alongside
+   * `activeProfile`. Downstream consumers:
+   *   - per-knob expressions in `loadAgentConfig` consult `cliParams` (tier 5).
+   *   - `applyProfileToolScoping` consumes `tools` (U-SCOPE).
+   *   - `mergeProfileToolArgs` consumes `toolArgs` via `runConfig.configurable` (U-ARGS).
+   */
+  readonly activeProfileData?: {
+    readonly cliParams?: ProfileCliParams;
+    readonly tools?: ProfileTools;
+    readonly toolArgs?: ProfileToolArgs;
+  };
 }
 
 /** CLI flags. */
@@ -265,6 +292,11 @@ export interface AgentCliFlags {
       readonly todoWrite?: boolean;
     };
   };
+  /** Activate a named configuration profile (plan-005). When set the
+   * loader resolves `<agentDir>/profiles/<name>.{yaml|yml|json}` and
+   * threads `cliParams` into the per-knob precedence chain at tier 5.
+   * Equivalent env var: `CLI_AGENT_PROFILE`. CLI flag wins (E12). */
+  readonly profile?: string;
 }
 
 /* ---------- Paths ---------- */
@@ -316,6 +348,11 @@ export async function bootstrapAgentDir(
 
   await fsp.mkdir(capabilitiesDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(capabilitiesDir, 0o700); } catch { /* tolerated */ }
+
+  // Profiles directory (plan-005). Additive: directory only, never seeded.
+  const profilesDir = path.join(agentDir, 'profiles');
+  await fsp.mkdir(profilesDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(profilesDir, 0o700); } catch { /* tolerated */ }
 
   if (seedToolPrompts) {
     await bootstrapToolPromptsDir(toolPromptsDir);
@@ -566,6 +603,10 @@ const OTHER_ENV_KEYS = [
   'CLI_AGENT_AGT_PATCH',
   'CLI_AGENT_AGT_TODO_READ',
   'CLI_AGENT_AGT_TODO_WRITE',
+  // --- Configuration profiles (plan-005) ---
+  // Activates a named profile (equivalent to --profile <name>). CLI flag
+  // wins over env (E12) via natural ?? precedence in `loadAgentConfig`.
+  'CLI_AGENT_PROFILE',
 ] as const;
 
 const ALL_ENV_KEYS = [...PROVIDER_ENV_KEYS, ...OTHER_ENV_KEYS] as const;
@@ -703,26 +744,64 @@ export async function loadAgentConfig(
   // cached value (the path was computed identically).
   const configFile = earlyConfigFile;
 
+  // ---- Configuration profile activation (plan-005) ----
+  // Decided ONCE here, after the layered env snapshot and before per-knob
+  // resolution. CLI flag wins over env (E12) by ?? precedence. When neither
+  // is set, no filesystem access happens (NFR-PROF-001 / AC-21 invariant —
+  // ADR-PROF-13 short-circuit).
+  const profileName = flags.profile ?? layered['CLI_AGENT_PROFILE'];
+  let activeProfile: AgentConfig['activeProfile'] | undefined;
+  let activeProfileData: AgentConfig['activeProfileData'] | undefined;
+  if (profileName !== undefined && profileName.length > 0) {
+    const resolved = await loadProfile(profileName, agentDir);
+    activeProfile = {
+      name: resolved.name,
+      path: resolved.path,
+      schemaVersion: resolved.schemaVersion,
+      digest: resolved.digest,
+    };
+    activeProfileData = {
+      cliParams: resolved.cliParams,
+      tools: resolved.tools,
+      toolArgs: resolved.toolArgs,
+    };
+  }
+
   // Layer 4: CLI flags override everything.
+  // Tier-5 insertion: `?? activeProfileData?.cliParams?.X` is added between
+  // `layered[...]` and `configFile?.X` for each pinnable knob (plan-005 §12.G).
   const provider = resolveProvider(
-    flags.provider ?? layered['AGENT_PROVIDER'] ?? configFile?.provider,
+    flags.provider
+      ?? layered['AGENT_PROVIDER']
+      ?? activeProfileData?.cliParams?.provider
+      ?? configFile?.provider,
   );
 
   const model =
     flags.model ??
     layered['AGENT_MODEL'] ??
+    activeProfileData?.cliParams?.model ??
     configFile?.model ??
     defaultModelForProvider(provider) ??
     '';
 
-  const maxSteps = flags.maxSteps ?? configFile?.maxSteps ?? 25;
-  const temperature = flags.temperature ?? configFile?.temperature;
+  const maxSteps =
+    flags.maxSteps
+    ?? activeProfileData?.cliParams?.maxIterations
+    ?? configFile?.maxSteps
+    ?? 25;
+  const temperature =
+    flags.temperature
+    ?? activeProfileData?.cliParams?.temperature
+    ?? configFile?.temperature;
 
   let allowMutations: boolean;
   if (flags.allowMutations !== undefined) {
     allowMutations = flags.allowMutations;
   } else if (layered['AGENT_ALLOW_MUTATIONS'] !== undefined) {
     allowMutations = parseBooleanEnvVar(layered['AGENT_ALLOW_MUTATIONS'], 'AGENT_ALLOW_MUTATIONS');
+  } else if (activeProfileData?.cliParams?.allowMutations !== undefined) {
+    allowMutations = activeProfileData.cliParams.allowMutations;
   } else {
     allowMutations = configFile?.allowMutations ?? false;
   }
@@ -768,6 +847,7 @@ export async function loadAgentConfig(
   const webSearchBackend =
     flags.webSearchBackend ??
     layered['WEB_SEARCH_BACKEND'] ??
+    activeProfileData?.cliParams?.webSearchBackend ??
     webSearchConfig.backend ??
     'tavily';
 
@@ -859,6 +939,8 @@ export async function loadAgentConfig(
     // required config) at the end. Downstream code (registry / catalog
     // builder) relies on this field always being present.
     agentTools: resolveAgentTools(flags.agentTools, layered, configFile),
+    activeProfile,
+    activeProfileData,
   };
 }
 

@@ -32,6 +32,7 @@ import {
   getParamDescription,
   type OverlayRegistry,
 } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 /** LangChain-visible tool name. */
 export const AGT_MULTIEDIT_NAME = 'agt_multiedit' as const;
@@ -90,7 +91,12 @@ export function buildAgtMultieditTool(
     name: AGT_MULTIEDIT_NAME,
     description: getToolDescription(reg, AGT_MULTIEDIT_NAME, BUILTIN.description),
     schema: agtMultieditSchema,
-    func: async (input, _runManager, config) => {
+    func: async (rawInput, _runManager, config) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        config?.configurable as ProfileToolArgsConfigurable | undefined,
+        AGT_MULTIEDIT_NAME,
+      );
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {
         throw new Error(

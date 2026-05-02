@@ -2,6 +2,21 @@
 
 ## Pending
 
+### [MEDIUM] Pre-existing dependency-tree security & deprecation backlog
+- Surfaced by `dependency-validator` during plan-005 Phase 8. **None introduced by config-profiles** — all are pre-existing and could not be auto-fixed because remediation requires major-version migrations.
+- Full report: `docs/reference/dependency-validation-config-profiles.md`.
+- Items:
+  - **vitest 2 → 4 migration** — closes 1 deprecation (`glob`) and several vite/esbuild CVEs in the test toolchain.
+  - **`@langchain/anthropic` upgrade** — blocked on upstream shipping `@anthropic-ai/sdk >= 0.91.1`.
+  - **uuid override decision** for the langgraph dependency chain.
+  - Two additional minor advisories detailed in the report.
+- Suggested approach: dedicated upgrade tasks per item; do not bundle with feature work.
+
+### [MEDIUM] plan-005 E10 load-time toolArgs schema validation — defer to v2
+- **E10**: `validateToolArgsAgainstTool(name, args, schema?)` was originally named in plan-005 §6 / project-design §12.D so profile load could Zod-validate `toolArgs` entries against each tool's input schema (`.partial()`) and surface a hard `ConfigurationError` at load time for malformed presets against known schemas.
+- v1 disposition: NOT implemented. The shallow merge already lets runtime input override preset keys, so a bad preset value surfaces as a Zod parse error at the moment the LLM first calls the tool. This is acceptable for v1; the comment at the top of `src/agent/tools/profile-tool-args.ts` documents the disposition.
+- Suggested fix (v2): implement `validateToolArgsAgainstTool` in `profile-schema.ts`, plumb a tool-name → input-schema map from `registry.ts` to `loadProfile` (or evaluate at catalog assembly), and emit ConfigurationError for known schemas, stderr warning otherwise.
+
 ### [LOW] TUI does not react to terminal resize (SIGWINCH) mid-edit
 - The wrap-redraw fix tracks terminal rows correctly given the current `process.stdout.columns`
   value, but if the user resizes the terminal between two keystrokes the previous render's row
@@ -82,6 +97,28 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — plan-005 Phase 7 deferred items closed (AC-19, E9, AC-22)
+- **AC-19 / FR-PROF-007** — `profile_active` JSONL log event added.
+  - `LogEvent` union in `src/agent/logging.ts` extended with
+    `{ kind: 'profile_active'; ts; sessionId; profileName; profilePath; schemaVersion; digest }`.
+  - `src/agent/run.ts` emits the event after `session_start` and before `user_prompt`,
+    gated on `cfg.activeProfile`, in all four entry points: `runOneShotAgent`,
+    `streamOneShotAgent`, `buildTuiAgentRuntime`, `runInteractiveAgent`.
+  - Hermetic test in `src/agent/logging.spec.ts` constructs the event and verifies
+    the serialized fields.
+- **E9** — profile `toolArgs` dead-reference warning.
+  - `buildToolCatalog` in `src/agent/tools/registry.ts` walks
+    `cfg.activeProfileData?.toolArgs` keys after scoping and emits a
+    non-fatal stderr warning per name not present among survivors:
+    `"profile toolArgs references tool 'X' that is not in the active catalog (excluded by allow/deny or unknown)"`.
+  - Three tests in `src/agent/tools/registry.spec.ts` cover excluded-by-deny,
+    unknown-name, and the no-warning case for surviving keys.
+- **AC-22 / NFR-PROF-001** — cold-start smoke script.
+  - `test_scripts/smoke-profile-cold-start.ts` added; spawns three cold
+    `node dist/cli.js --help` runs and reports min/median/max in ms.
+  - Documented in `test_scripts/README.md` with the ≤ 50 ms regression
+    budget. Smoke is informational; does not gate CI.
 
 ### Done — User-editable tool prompt overlays (plan-004, v0.2.0)
 - **Goal**: let end users tune the LangChain `description` and per-parameter

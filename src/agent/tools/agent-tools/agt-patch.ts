@@ -30,6 +30,7 @@ import {
   getParamDescription,
   type OverlayRegistry,
 } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 /** LangChain-visible tool name. */
 export const AGT_PATCH_NAME = 'agt_patch' as const;
@@ -64,7 +65,12 @@ export function buildAgtPatchTool(deps: AgtPatchDeps): DynamicStructuredTool {
     name: AGT_PATCH_NAME,
     description: getToolDescription(reg, AGT_PATCH_NAME, BUILTIN.description),
     schema: agtPatchSchema,
-    func: async (input, _runManager, config) => {
+    func: async (rawInput, _runManager, config) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        config?.configurable as ProfileToolArgsConfigurable | undefined,
+        AGT_PATCH_NAME,
+      );
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {
         throw new Error(

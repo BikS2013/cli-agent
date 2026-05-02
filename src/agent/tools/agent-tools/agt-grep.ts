@@ -28,6 +28,7 @@ import {
   getParamDescription,
   type OverlayRegistry,
 } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 /** LangChain-visible tool name. */
 export const AGT_GREP_NAME = 'agt_grep' as const;
@@ -78,7 +79,12 @@ export function buildAgtGrepTool(deps: AgtGrepDeps): DynamicStructuredTool {
     name: AGT_GREP_NAME,
     description: getToolDescription(reg, AGT_GREP_NAME, BUILTIN.description),
     schema: agtGrepSchema,
-    func: async (input, _runManager, config) => {
+    func: async (rawInput, _runManager, config) => {
+      const input = mergeProfileToolArgs(
+        rawInput,
+        config?.configurable as ProfileToolArgsConfigurable | undefined,
+        AGT_GREP_NAME,
+      );
       const cfg = (config?.configurable ?? {}) as Partial<AgentToolsConfigurable>;
       if (typeof cfg.workingDirectory !== 'string' || cfg.workingDirectory.length === 0) {
         throw new Error(

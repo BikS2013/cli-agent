@@ -4,6 +4,7 @@ import { parseAllowlistEntries, buildAllowlistMatcher } from './allowlist.js';
 import type { AgentConfig } from '../../../config/agent-config.js';
 import { BUILTIN_TOOL_PROMPTS } from '../tool-prompts-builtin.js';
 import { getToolDescription } from '../tool-prompt-overlay.js';
+import { mergeProfileToolArgs, type ProfileToolArgsConfigurable } from '../profile-tool-args.js';
 
 const TOOL_NAME = 'bash_list_allowed';
 const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
@@ -18,7 +19,15 @@ export function createBashListAllowedTool(cfg: AgentConfig): DynamicStructuredTo
     name: TOOL_NAME,
     description: getToolDescription(reg, TOOL_NAME, BUILTIN.description),
     schema: schema as any, // eslint-disable-line @typescript-eslint/no-explicit-any
-    func: async () => {
+    func: async (rawInput, _runManager, runConfig) => {
+      // Merge profile-supplied presets even though this tool's schema is
+      // empty — keeps behaviour uniform across all 17 factories and lets
+      // future schema-additive bumps pick up presets transparently.
+      mergeProfileToolArgs(
+        rawInput as Record<string, unknown> | undefined,
+        runConfig?.configurable as ProfileToolArgsConfigurable | undefined,
+        TOOL_NAME,
+      );
       const entries = parseAllowlistEntries([...cfg.bash.allow]);
       const matcher = buildAllowlistMatcher(entries);
       return JSON.stringify({
