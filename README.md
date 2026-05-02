@@ -425,6 +425,13 @@ the whole point of the agent. Without `--allow-mutations`, a
 `[READ-ONLY-AGENT]` warning is embedded in the tool's description so
 the model self-restricts to read-only commands.
 
+> **Want to enable writing?** See
+> **[`docs/guides/enabling-write-capabilities.md`](docs/guides/enabling-write-capabilities.md)**
+> for a step-by-step user guide covering `--allow-mutations`, the bash
+> allowlist, `--bash-pass-secret`, fine-grained `argv-regex:` entries,
+> and worked examples for the common cases (editing files, running
+> `git`, posting to GitHub, etc.).
+
 ---
 
 ## Exit codes
@@ -476,20 +483,35 @@ cli-agent/
 
 ## Documentation
 
+### User guides
+
+- **[`docs/guides/enabling-write-capabilities.md`](docs/guides/enabling-write-capabilities.md)**
+  — how to let the agent edit files, run write-y subcommands of wrapped
+  CLIs, and pass through credentials. Covers the three switches
+  (`--allow-mutations`, the bash allowlist, `--bash-pass-secret`) with
+  worked examples and safety tips.
+
+### Reference & design
+
 - **[`docs/tools/cli-agent.md`](docs/tools/cli-agent.md)** — full
   reference for every CLI flag, env var, config key, slash command,
   and capability cache convention.
-- **[`docs/design/project-design.md`](docs/design/project-design.md)** —
-  architecture, module map, design decisions.
-- **[`docs/design/project-functions.md`](docs/design/project-functions.md)** —
-  functional requirements (`FR-AGT-*` and `FR-TUI-*`).
 - **[`docs/design/configuration-guide.md`](docs/design/configuration-guide.md)** —
   per-variable how-to-obtain, storage recommendation, defaults,
   expiration-tracking guidance.
+- **[`docs/design/project-design.md`](docs/design/project-design.md)** —
+  architecture, module map, design decisions.
+- **[`docs/design/project-functions.md`](docs/design/project-functions.md)** —
+  functional requirements (`FR-AGT-*`, `FR-TUI-*`, `FR-NEW-*`,
+  `FR-OVR-*`).
 - **[`docs/design/plan-001-agent-subcommand.md`](docs/design/plan-001-agent-subcommand.md)** —
   the original build plan.
 - **[`docs/design/plan-002-tui.md`](docs/design/plan-002-tui.md)** —
   the TUI build plan.
+- **[`docs/design/plan-003-agent-tools-integration.md`](docs/design/plan-003-agent-tools-integration.md)** —
+  the agent-tools pack integration plan.
+- **[`docs/design/plan-004-tool-prompt-overlays.md`](docs/design/plan-004-tool-prompt-overlays.md)** —
+  the user-editable tool-prompt overlay system.
 - **[`Issues - Pending Items.md`](Issues%20-%20Pending%20Items.md)** —
   open follow-ups and recently-closed issues.
 
