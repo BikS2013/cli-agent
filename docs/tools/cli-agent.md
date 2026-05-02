@@ -14,6 +14,7 @@
     <command>
         cli-agent [prompt]
           [-i | --interactive]
+          [-r | --resume [&lt;threadId&gt;]]    # TUI only; omit threadId to use cursor.json
           [--tool &lt;name&gt;]                 # repeatable; CLI binary to add to bash allowlist
           [-p | --provider &lt;name&gt;]
           [-m | --model &lt;id&gt;]
@@ -39,6 +40,7 @@
 
         cli-agent show-capabilities --tool &lt;name&gt;
         cli-agent refresh-capabilities [--tool &lt;name&gt;]
+        cli-agent extract-recipes --tool &lt;name&gt; [--max-recipes &lt;n&gt;]
     </command>
     <info>
         ## Overview
@@ -83,6 +85,8 @@
 
         History &amp; memory
             /history [offset]       Browse the most recent threads (newest first)
+            /resume [&lt;threadId&gt;]    Adopt a previously-persisted thread mid-session
+                                    (omit threadId to use cursor.json's lastThreadId)
             /last | /raw            Re-render the last assistant reply
             /copy                   Copy the last assistant reply to the system clipboard
             /memory                 Diagnostic view of MemorySaver state for the active thread
@@ -117,7 +121,10 @@
         Backspace / Delete          Delete char left / at cursor
         Ctrl+W / Alt+Backspace      Delete word left
         Ctrl+U / Ctrl+K             Delete to start / end of line
-        Ctrl+C                      During input: clear buffer; during a turn: abort the LLM call
+        Ctrl+C                      First press: cancel the current input or abort the
+                                    in-flight LLM turn; print a hint that mentions the
+                                    second-press exit. Second press within 1.5 s: graceful
+                                    shutdown (same path as /quit).
         ESC                         During a turn: abort the LLM call via AbortController
         Ctrl+D                      On empty input: exit the TUI
 
@@ -129,9 +136,40 @@
             thread-&lt;UTC-iso&gt;-&lt;threadId&gt;.jsonl  (mode 0600 — one line per turn)
             index.jsonl                         (mode 0600 — one line per thread; atomic)
             cursor.json                         (mode 0600 — last active threadId + ts)
+            checkpoint-&lt;threadId&gt;.json          (mode 0600 — LangGraph state snapshot)
 
         Per-turn JSONL records the user prompt and the assistant final text only —
         chunk-level fragments stay in `~/.tool-agents/cli-agent/logs/`.
+
+        ### Resume
+
+        cli-agent's MemorySaver checkpointer is in-process — restarting the binary
+        normally drops every LLM-side conversation memory. To restore the LLM-side
+        state across restarts, the TUI snapshots the active thread's checkpointer
+        to disk after every turn (`checkpoint-&lt;threadId&gt;.json`, see layout above)
+        and rehydrates it on `--resume`.
+
+        cli-agent --resume                  Resume the thread named in cursor.json
+        cli-agent -r &lt;threadId&gt;             Resume the specified thread by id
+        /resume                             (slash) Same as --resume, mid-session
+        /resume &lt;threadId&gt;                  (slash) Same as -r &lt;threadId&gt;, mid-session
+
+        On `--resume` the TUI:
+          - Reads the snapshot file and writes the encoded blobs back into a
+            fresh MemorySaver before constructing the agent graph; the LLM
+            sees the prior conversation as part of its checkpointed state.
+          - Re-renders the prior turns from the thread's JSONL transcript so
+            the user sees what was previously discussed.
+
+        Resume is supported only in TUI mode. `--resume --interactive` and
+        `--resume &lt;prompt&gt;` exit with code 2 and a clear error message.
+
+        Snapshots are best-effort: a write failure is logged in dim yellow as
+        a one-line warning and the session continues. The previous on-disk
+        snapshot (if any) is unchanged, so the next `--resume` still works.
+
+        Snapshots are NOT auto-pruned. To free space, `rm` the snapshot files
+        for threads you no longer need.
 
         ## Subcommands
 
@@ -160,6 +198,32 @@
             `capabilities.skipLlmBelowBytes` fast path is bypassed so a manual refresh
             always produces a fully LLM-analyzed capability document.
 
+            Discovery also probes `man -w &lt;tool&gt;` to detect a manual page. When found,
+            the cached document records `manRef: man:&lt;section&gt; &lt;tool&gt;` in frontmatter
+            and emits a `## Manual reference` section pointing the agent at
+            `man &lt;section&gt; &lt;tool&gt;`. When absent, neither artifact is written.
+
+        cli-agent extract-recipes --tool &lt;name&gt; [--max-recipes &lt;n&gt;] [--stdout] [--append]
+            Propose LLM-generated canonical invocation recipes for the given tool.
+            Reads the cached capability doc and (when a manRef is recorded) the man
+            page, feeds them through the configured LLM, and emits a `### &lt;title&gt;` +
+            fenced-bash block per recipe. Default 8 recipes; hard cap 20.
+
+            By default, writes the proposal directly between the existing
+            `&lt;!-- USER-RECIPES:START --&gt;` / `&lt;!-- USER-RECIPES:END --&gt;` markers
+            in `~/.tool-agents/cli-agent/capabilities/&lt;tool&gt;.md`, replacing any
+            existing inner content. The user is the curator: anything they don't
+            want they delete by hand.
+
+            --stdout      Print to stdout without modifying any file (use for
+                          piping, review, or CI).
+            --append      Keep any existing recipes and append the new ones
+                          instead of replacing the inner block.
+
+            Raises `UsageError` when the capability document is missing the
+            USER-RECIPES marker pair (e.g. an old schema-1 doc); fix it by
+            running `refresh-capabilities` to regenerate the schema-2 shape.
+
         ## Capability Cache Behavior
 
         On every agent invocation, for each declared --tool &lt;name&gt;:
@@ -177,6 +241,15 @@
             `cli-agent refresh-capabilities --tool &lt;name&gt;`. This is the
             only way to refresh the cache; the agent does NOT auto-detect
             binary upgrades.
+          - User content placed inside the `&lt;!-- USER-RECIPES:START --&gt; ...
+            &lt;!-- USER-RECIPES:END --&gt;` and `&lt;!-- USER-NOTES:START --&gt; ...
+            &lt;!-- USER-NOTES:END --&gt;` marker pairs is preserved verbatim
+            across every refresh. Recipes appear above notes; both are
+            embedded in the system prompt when within byte budget.
+          - schemaVersion 1 documents (pre-0.3.0) are treated as cache
+            miss on read and re-discovered on next refresh; user content
+            inside USER-NOTES is carried forward through the existing
+            preservation path. USER-RECIPES is empty after the upgrade.
 
         The capabilities folder also stores ONE non-tool file:
 

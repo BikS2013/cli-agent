@@ -17,6 +17,7 @@ import { Command } from 'commander';
 import { runAgentCommand } from './commands/agent.js';
 import { runShowCapabilities } from './commands/show-capabilities.js';
 import { runRefreshCapabilities } from './commands/refresh-capabilities.js';
+import { runExtractRecipes } from './commands/extract-recipes.js';
 import { runExtractToolPrompts } from './commands/extract-tool-prompts.js';
 import { runShowToolPrompt } from './commands/show-tool-prompt.js';
 import { runAuditToolPrompts } from './commands/audit-tool-prompts.js';
@@ -35,12 +36,13 @@ const program = new Command();
 program
   .name('cli-agent')
   .description('Generic LangGraph ReAct agent that wraps external CLI binaries.')
-  .version('0.2.0');
+  .version('0.3.0');
 
 /* ---------- Default command: agent run ---------- */
 program
   .argument('[prompt]', 'One-shot prompt for the agent')
   .option('-i, --interactive', 'Start an interactive REPL session', false)
+  .option('-r, --resume [threadId]', 'Resume a previous TUI thread (omit threadId to use the last active session from cursor.json)')
   .option('--tool <name>', 'CLI binary to wrap (repeatable)', collectTool, [] as string[])
   .option('-p, --provider <name>', 'LLM provider (openai|anthropic|gemini|azure-openai|azure-anthropic|ollama|litellm|mlx)')
   .option('-m, --model <id>', 'Model ID / deployment name')
@@ -92,6 +94,7 @@ program
 
       await runAgentCommand(prompt ?? null, {
         interactive: opts['interactive'] as boolean | undefined,
+        resume: opts['resume'] as boolean | string | undefined,
         tools,
         provider: opts['provider'] as string | undefined,
         model: opts['model'] as string | undefined,
@@ -154,6 +157,37 @@ program
       const toolName =
         (opts['tool'] as string | undefined) ?? pickFirstTool(merged['tool']);
       await runRefreshCapabilities(toolName, {
+        provider: opts['provider'] as string | undefined,
+        model: opts['model'] as string | undefined,
+        configFile: opts['config'] as string | undefined,
+        envFile: opts['envFile'] as string | undefined,
+      });
+    });
+  });
+
+/* ---------- extract-recipes subcommand ---------- */
+program
+  .command('extract-recipes')
+  .description('Propose canonical recipes for a wrapped tool. Default: write between the USER-RECIPES markers in the capability doc (replaces inner content). Use --stdout to print without writing, --append to keep existing recipes.')
+  .option('--tool <name>', 'Tool to propose recipes for')
+  .option('--max-recipes <n>', 'Maximum number of recipes (default 8, hard cap 20)', (v) => parseInt(v, 10))
+  .option('--stdout', 'Print the proposal to stdout instead of writing to the capability doc', false)
+  .option('--append', 'Keep any existing recipes and append the new ones instead of replacing', false)
+  .option('-p, --provider <name>', 'LLM provider')
+  .option('-m, --model <id>', 'Model ID')
+  .option('--config <path>', 'Path to config.json')
+  .option('--env-file <path>', 'Path to .env file')
+  .action(async function (this: Command, opts: Record<string, unknown>) {
+    await handleErrors(async () => {
+      // Recover from parent --tool shadowing — same pattern as
+      // refresh-capabilities and show-capabilities.
+      const merged = this.optsWithGlobals();
+      const toolName =
+        (opts['tool'] as string | undefined) ?? pickFirstTool(merged['tool']);
+      await runExtractRecipes(toolName, {
+        maxRecipes: opts['maxRecipes'] as number | undefined,
+        stdout: opts['stdout'] as boolean | undefined,
+        append: opts['append'] as boolean | undefined,
         provider: opts['provider'] as string | undefined,
         model: opts['model'] as string | undefined,
         configFile: opts['config'] as string | undefined,

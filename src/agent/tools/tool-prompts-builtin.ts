@@ -154,12 +154,13 @@ export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt 
   // -------------------------------------------------------------------------
   tool_help: Object.freeze({
     description:
-      'Look up the full help text of a wrapped CLI tool or one of its subcommands when the in-prompt summary is insufficient.',
+      'Look up the full help text of a wrapped CLI tool or one of its subcommands when the in-prompt summary is insufficient. ' +
+      'Use section="recipes" to fetch the user-curated invocation recipes and section="manref" to get the manual-page pointer.',
     parameters: Object.freeze({
       tool: 'Name of the wrapped CLI tool to look up.',
       subcommand: 'Specific subcommand to retrieve help for.',
       section:
-        'Which part of the document to return: "full" (default), "frontmatter", or "synopsis".',
+        'Which part of the document to return: "full" (default), "frontmatter", "synopsis", "recipes" (user-curated invocations), or "manref" (manual-page pointer).',
     }),
   }),
 

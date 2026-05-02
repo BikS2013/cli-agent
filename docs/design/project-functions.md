@@ -462,3 +462,183 @@ under default config has a matching entry in `BUILTIN_TOOL_PROMPTS`. This
 catches the "added a new tool, forgot to register its prompt" regression
 at CI time. **Status: Accepted.**
 
+## Capability Recipes & Manual Reference (FR-CAP-*)
+
+### FR-CAP-101: Manual-reference auto-detection
+
+`refresh-capabilities` (and the implicit discovery on first agent
+startup) probe `man -w <tool>` to detect whether the wrapped binary has
+a man page. When present, the capability document records `manRef:
+man:<section> <tool>` and `manPagePath: <absolute path>` in the YAML
+frontmatter, and emits a small `## Manual reference` section inside the
+AUTO-GENERATED block telling the agent how to read it (`man <section>
+<tool>`). When absent, neither artifact appears — there is no fallback,
+no synthesised pointer. **Status: Accepted.**
+
+### FR-CAP-102: User-curated recipes block
+
+Each capability document carries a `<!-- USER-RECIPES:START --> ...
+<!-- USER-RECIPES:END -->` marker pair. Content placed inside is
+preserved verbatim across every refresh, identical to the existing
+USER-NOTES guarantee. The block appears BEFORE the USER-NOTES block in
+the rendered file because it is the more frequently-edited section.
+**Status: Accepted.**
+
+### FR-CAP-103: Schema-2 capability documents
+
+`schemaVersion: 2` documents add the `manRef` / `manPagePath`
+frontmatter fields and the USER-RECIPES marker pair. v1 documents are
+treated as cache miss on read and re-discovered, with USER-NOTES carried
+forward via the existing preservation path. **Status: Accepted.**
+
+### FR-CAP-104: tool_help section dispatch
+
+`tool_help`'s `section` argument accepts `recipes` and `manref` in
+addition to the existing `full`/`frontmatter`/`synopsis` values. Both
+return the corresponding section body (markers stripped, trimmed,
+truncated to `cfg.perToolBudgetBytes`). Empty string is returned when
+the artifact is absent. **Status: Accepted.**
+
+### FR-CAP-105: System-prompt integration
+
+The "Wrapped CLI Capabilities" section of the system prompt embeds the
+USER-RECIPES content verbatim (when within byte budget). When the
+per-tool byte budget is exceeded, the compact entry preserves the
+manRef pointer and a one-line "recipes available — call `tool_help`
+with `section: \"recipes\"`" hint instead. **Status: Accepted.**
+
+### FR-CAP-106: extract-recipes subcommand
+
+`cli-agent extract-recipes --tool <name> [--max-recipes N] [--stdout]
+[--append]` reads the cached capability doc and (when `manRef` is
+present) the man page, feeds them through the configured LLM, and
+emits recipes in the documented `### <name>` + fenced-bash format.
+
+Default behavior writes the proposal directly between the existing
+`<!-- USER-RECIPES:START --> / <!-- USER-RECIPES:END -->` markers in
+the capability document, replacing any existing inner content. The
+user is the curator and prunes whatever they don't want by hand.
+`--stdout` prints to stdout without touching the file (for piping /
+review / CI). `--append` keeps existing recipes and appends the new
+ones instead of replacing.
+
+When the document is missing the USER-RECIPES marker pair (e.g. an
+old schema-1 doc), the default-write path raises `UsageError` with a
+message pointing the user at `refresh-capabilities`. Hard upper
+bound: 20 recipes; default: 8. **Status: Accepted.**
+
+### FR-CAP-107: No fallback on man-page detection failure
+
+When `man -w <tool>` returns non-zero / empty / unparseable output, or
+`man` itself is absent on the host, `manRef` is recorded as `null` and
+the document omits both the frontmatter line and the inline section
+entirely. There is no "no manual page available" placeholder. Per
+CLAUDE.md, the absence is the explicit "no man page" state, not a
+substituted default. **Status: Accepted.**
+
+### FR-CAP-108: extract-recipes input validation
+
+`extract-recipes` raises `UsageError` when `--tool` is omitted or
+`--max-recipes` is non-positive, and `CapabilityError` when the
+capability document is absent (`E_CAPABILITY_NOT_FOUND`). These error
+shapes match the existing capability-tool error contract.
+**Status: Accepted.**
+
+### NFR-CAP-101: Discovery cost ceiling
+
+Manual-reference detection adds at most one `man -w <tool>` spawn per
+discovery run, bounded by `cfg.capabilities.timeoutMs` (default 5000
+ms). On hosts with `man` installed the call typically completes in
+under 50 ms; on hosts without `man` the spawn fails fast with
+`exitCode: 1` and `manRef: null` is recorded. The detector is NOT
+behind a feature flag — the cost is too small to warrant config
+surface. **Status: Accepted.**
+
+
+## FR-EXR — TUI exit and JSON-snapshot resume (plan-005)
+
+### FR-EXR-001: Double Ctrl+C exit
+
+When the TUI input prompt receives a SIGINT, the controller records the
+timestamp and prints a hint that mentions the second-press exit window.
+A second SIGINT received within 1500 ms of the first triggers the same
+graceful shutdown path as `/quit` and Ctrl+D-on-empty (`session_end`
+log entry, `persistIndex`, `logger.close`, `exit(0)`). A second SIGINT
+arriving after the window only resets the hint timestamp; it does not
+exit. **Status: Accepted.**
+
+### FR-EXR-002: Per-turn checkpoint snapshot
+
+After every `TuiController.runTurn` (success or abort), the controller
+writes a JSON snapshot of `agentGraph.checkpointer` filtered to the
+active threadId to
+`~/.tool-agents/cli-agent/history/checkpoint-<threadId>.json` (mode
+0600, atomic tmp + rename). A snapshot write failure is logged as a
+dim warning to stderr and does NOT abort the session — the prior
+snapshot on disk (if any) remains valid. **Status: Accepted.**
+
+### FR-EXR-003: Snapshot schema (version 1)
+
+Snapshots contain: `version: 1`, `threadId`, `savedAt` (ISO 8601),
+`checkpointerKind: "MemorySaver"`, `storage` (mirroring
+`MemorySaver.storage[threadId]` with `Uint8Array` blobs encoded as
+base64 strings), and `writes` (mirroring entries of `MemorySaver.writes`
+whose outer key parses to a `[threadId, ns, checkpointId]` array
+matching the active thread). **Status: Accepted.**
+
+### FR-EXR-004: --resume / -r CLI flag
+
+`cli-agent --resume [<threadId>]` (alias `-r`) is accepted only when
+the bare TUI is dispatched (no positional prompt, no `--interactive`).
+Combining `--resume` with `--interactive` or with a positional prompt
+exits with code 2 and a clear error message. Omitting the threadId
+resolves it from `cursor.json`'s `lastThreadId`. **Status: Accepted.**
+
+### FR-EXR-005: Resume hydration order
+
+On a `--resume` request the agent: (a) resolves the target threadId,
+(b) builds the runtime (fresh MemorySaver), (c) calls
+`loadCheckpoint(threadId, checkpointer)`, (d) constructs the
+`TuiController`, (e) calls `controller.applyResume(threadId,
+startedAt, messages)` with messages reconstructed from the thread JSONL
+transcript. Hydration MUST happen before the first turn so the LLM
+sees the prior conversation as part of its checkpointed state.
+**Status: Accepted.**
+
+### FR-EXR-006: Resume failure modes
+
+`--resume` exits with code 2 (UsageError) when:
+  - The bare flag is used and `cursor.json` does not exist
+    ("no prior session to resume").
+  - The resolved threadId has no `checkpoint-<threadId>.json` file.
+  - The snapshot file has a `version` other than 1, a non-matching
+    `threadId`, or a `checkpointerKind` other than `MemorySaver`.
+No silent fallback to a fresh thread. **Status: Accepted.**
+
+### FR-EXR-007: /resume slash command
+
+The `/resume [<threadId>]` slash command performs the same hydration
+mid-session: it persists the current thread's index entry, builds a
+new agent graph, calls `loadCheckpoint`, and swaps
+`controller.agentGraph` plus the displayed messages. If the target
+thread is the one already active, it prints a no-op notice. If no
+snapshot exists for the requested thread, it prints a friendly hint
+(this is mid-session — exiting with code 2 would be hostile).
+**Status: Accepted.**
+
+### FR-EXR-008: No automatic snapshot pruning
+
+cli-agent does NOT auto-delete old `checkpoint-<threadId>.json` files,
+JSONL transcripts, or index entries. Users prune manually. The
+`/history` slash command surfaces the available threads.
+**Status: Accepted.**
+
+### FR-EXR-009: Banner hints
+
+When `--resume` was used, the TUI banner appends
+`Resumed thread <prefix> (<n> prior turns restored)` in green. When
+the bare TUI is launched without `--resume` and `cursor.json` exists,
+the existing "Last thread:" hint is enriched with
+`— pass --resume to continue` if and only if a checkpoint snapshot
+exists for the recorded threadId. **Status: Accepted.**
+
