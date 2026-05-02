@@ -21,6 +21,13 @@ vi.mock('./invalidate.js', async (importOriginal) => {
   };
 });
 
+// Keep tests hermetic: never spawn the real `man -w` against the test
+// host. The detector returns the no-man state by default; tests that
+// want to assert manRef-emission set their own mock per-test.
+vi.mock('./manref.js', () => ({
+  detectManRef: vi.fn().mockResolvedValue({ manRef: null, manPagePath: null }),
+}));
+
 function makeCfg(capabilitiesDir: string, overrides: Record<string, unknown> = {}) {
   return {
     capabilitiesDir,
@@ -61,7 +68,7 @@ describe('discoverTool — doc-exists shortcut', () => {
       'introspectedAt: 2026-04-26T00:00:00Z',
       'introspectionDepth: 2',
       'introspectionBytes: 100',
-      'schemaVersion: 1',
+      'schemaVersion: 2',
       '---',
       '',
       '<!-- AUTO-GENERATED:START hash=h -->',
@@ -91,7 +98,7 @@ describe('discoverTool — doc-exists shortcut', () => {
     const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
     await fsp.writeFile(
       path.join(tmpDir, 'nonexistent-binary-xyz.md'),
-      '---\ntool: x\nschemaVersion: 1\n---\nbody',
+      '---\ntool: x\nschemaVersion: 2\n---\nbody',
       'utf8',
     );
 
@@ -133,7 +140,7 @@ describe('discoverTool — doc-exists shortcut', () => {
         'binaryMtimeMs: 1', 'versionString: ""', 'versionHash: x',
         'introspectedAt: 2026-04-26T00:00:00Z',
         'introspectionDepth: 2', 'introspectionBytes: 100',
-        'schemaVersion: 1', '---', '', 'body',
+        'schemaVersion: 2', '---', '', 'body',
       ].join('\n'),
       'utf8',
     );
@@ -250,6 +257,45 @@ describe('discoverTool — doc-exists shortcut', () => {
 
     runHelpSpy.mockRestore();
     extractSpy.mockRestore();
+  });
+
+  it('emits manRef into the cached doc when detectManRef returns a hit', async () => {
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
+
+    const runHelpMod = await import('./runHelp.js');
+    const extractMod = await import('./extractSubcommands.js');
+    const manrefMod = await import('./manref.js');
+    const runHelpSpy = vi.spyOn(runHelpMod, 'runHelp').mockResolvedValue({
+      text: 'usage: git ...',
+      truncated: false,
+    } as unknown as Awaited<ReturnType<typeof runHelpMod.runHelp>>);
+    vi.spyOn(extractMod, 'extractSubcommands').mockResolvedValue([]);
+    vi.mocked(manrefMod.detectManRef).mockResolvedValueOnce({
+      manRef: 'man:1 git',
+      manPagePath: '/usr/share/man/man1/git.1.gz',
+    });
+
+    vi.mocked(invalidate.getBinaryInfo).mockResolvedValueOnce({
+      resolvedPath: '/usr/bin/git',
+      mtimeMs: 1,
+      versionString: 'git 2.45',
+      versionHash: 'sha256:fake',
+    });
+
+    await discoverTool(
+      'git',
+      makeCfg(tmpDir, { skipLlmBelowBytes: 0 }),
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      true,
+      Date.now() + 60000,
+    );
+
+    const written = await fsp.readFile(path.join(tmpDir, 'git.md'), 'utf8');
+    expect(written).toContain('manRef: man:1 git');
+    expect(written).toContain('## Manual reference');
+    expect(written).toContain('<!-- USER-RECIPES:START -->');
+    runHelpSpy.mockRestore();
   });
 
   it('skipLlmBelowBytes=0: even a tiny --help runs the LLM call', async () => {

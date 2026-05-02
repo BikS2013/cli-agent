@@ -16,6 +16,7 @@ import { extractSubcommands } from './extractSubcommands.js';
 import { composeCapabilityDoc } from './composeMarkdown.js';
 import { readCacheEntry, writeCacheEntry } from './cache.js';
 import { getBinaryInfo } from './invalidate.js';
+import { detectManRef } from './manref.js';
 import type { AgentConfig } from '../../config/agent-config.js';
 import type { BaseChatModel } from '../providers/types.js';
 import type { Logger } from '../logging.js';
@@ -213,6 +214,12 @@ export async function discoverTool(
 
   onPhase?.({ kind: 'probe', tool, durationMs: Date.now() - probeStart });
 
+  // Detect man-page reference. This is a single, fast `man -w <tool>`
+  // syscall (~50 ms) and is bounded by `cfg.capabilities.timeoutMs`.
+  // When the binary has no man entry the result is null and the
+  // composer omits both the frontmatter line and the inline section.
+  const manRefResult = await detectManRef(tool, cfg.capabilities.timeoutMs);
+
   // Read existing doc (only used here to preserve USER-NOTES across
   // regeneration). The doc-exists shortcut above already returned early
   // when a cached doc was acceptable, so reaching this line means we are
@@ -314,6 +321,8 @@ export async function discoverTool(
       introspectionBytes: totalBytes,
       topLevelHelp: topLevelHelp.text,
       subcommands,
+      manRef: manRefResult.manRef,
+      manPagePath: manRefResult.manPagePath,
     },
     existing?.fullContent,
   );

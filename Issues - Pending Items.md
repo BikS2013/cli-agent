@@ -2,6 +2,18 @@
 
 ## Pending
 
+### [LOW] Schema-2 capability migration may emit a one-time refresh on upgrade
+- 0.3.0 bumps the capability-doc schema from 1 to 2 (adds `manRef` /
+  `manPagePath` frontmatter fields and the USER-RECIPES marker pair). Per
+  `cache.ts`, schema-1 docs are treated as a cache miss on first read after
+  upgrade; the next agent invocation re-runs discovery and writes a v2 doc.
+- Existing USER-NOTES content is preserved byte-for-byte through the existing
+  `composeCapabilityDoc(opts, existingDoc)` path.
+- Pre-upgrade hand-edited content that lived OUTSIDE USER-NOTES (e.g. inside the
+  AUTO-GENERATED block) is overwritten by the regenerated content — that was
+  already the case in v1, so no new risk, but worth flagging.
+- Action: leave this entry until the first 0.3 release ships; remove afterwards.
+
 ### [LOW] TUI does not react to terminal resize (SIGWINCH) mid-edit
 - The wrap-redraw fix tracks terminal rows correctly given the current `process.stdout.columns`
   value, but if the user resizes the terminal between two keystrokes the previous render's row

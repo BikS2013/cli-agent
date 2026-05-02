@@ -15,6 +15,12 @@ import { startTui } from '../tui/index.js';
 export interface AgentCommandOptions extends AgentCliFlags {
   interactive?: boolean;
   tools?: string[];
+  /**
+   * `--resume`/`-r` flag. `true` means "resume last active thread from
+   * cursor.json"; a string means "resume that specific threadId".
+   * `undefined` means no resume requested.
+   */
+  resume?: boolean | string;
 }
 
 export async function runAgentCommand(
@@ -24,14 +30,21 @@ export async function runAgentCommand(
   const cfg = await loadAgentConfig(opts);
 
   if (opts.interactive) {
+    if (opts.resume !== undefined) {
+      throw new Error('cli-agent: --resume is supported only in TUI mode (omit --interactive).');
+    }
     await runInteractiveAgent(cfg);
     return;
   }
 
   if (!prompt) {
     // Bare invocation drops into the TUI
-    await startTui(cfg);
+    await startTui(cfg, { resume: opts.resume });
     return;
+  }
+
+  if (opts.resume !== undefined) {
+    throw new Error('cli-agent: --resume is supported only in TUI mode (drop the positional prompt).');
   }
 
   // One-shot mode: stream tokens to stdout as they arrive

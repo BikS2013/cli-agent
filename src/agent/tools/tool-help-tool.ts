@@ -7,6 +7,10 @@ import { CapabilityError } from '../../errors.js';
 import type { AgentConfig } from '../../config/agent-config.js';
 import { BUILTIN_TOOL_PROMPTS } from './tool-prompts-builtin.js';
 import { getToolDescription, getParamDescription } from './tool-prompt-overlay.js';
+import {
+  extractUserRecipesBody,
+  extractManualReferenceBody,
+} from '../capabilities/composeMarkdown.js';
 
 const TOOL_NAME = 'tool_help';
 const BUILTIN = BUILTIN_TOOL_PROMPTS[TOOL_NAME]!;
@@ -20,7 +24,7 @@ export function createToolHelpTool(cfg: AgentConfig): DynamicStructuredTool {
     subcommand: z.string().optional().describe(
       getParamDescription(reg, TOOL_NAME, 'subcommand', BUILTIN.parameters['subcommand']!),
     ),
-    section: z.enum(['full', 'frontmatter', 'synopsis']).optional().describe(
+    section: z.enum(['full', 'frontmatter', 'synopsis', 'recipes', 'manref']).optional().describe(
       getParamDescription(reg, TOOL_NAME, 'section', BUILTIN.parameters['section']!),
     ),
   });
@@ -55,6 +59,20 @@ export function createToolHelpTool(cfg: AgentConfig): DynamicStructuredTool {
         if (section === 'synopsis') {
           const synopsisMatch = content.match(/## Top-level synopsis\n([\s\S]*?)(?=\n## |\n<!-- |$)/);
           return JSON.stringify({ tool: input.tool, section: 'synopsis', content: synopsisMatch?.[1] ? synopsisMatch[1].trim() : '' });
+        }
+
+        if (section === 'recipes') {
+          const body = extractUserRecipesBody(content);
+          const truncated = body.length > cfg.perToolBudgetBytes;
+          const text = truncated ? body.slice(0, cfg.perToolBudgetBytes) + '\n…TRUNCATED' : body;
+          return JSON.stringify({ tool: input.tool, section: 'recipes', content: text, _truncated: truncated });
+        }
+
+        if (section === 'manref') {
+          const body = extractManualReferenceBody(content);
+          const truncated = body.length > cfg.perToolBudgetBytes;
+          const text = truncated ? body.slice(0, cfg.perToolBudgetBytes) + '\n…TRUNCATED' : body;
+          return JSON.stringify({ tool: input.tool, section: 'manref', content: text, _truncated: truncated });
         }
 
         // Full or subcommand section

@@ -4,7 +4,11 @@
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { extractUserNotes } from './composeMarkdown.js';
+import {
+  CAPABILITY_SCHEMA_VERSION,
+  extractUserNotes,
+  extractUserRecipes,
+} from './composeMarkdown.js';
 
 export interface CacheFrontmatter {
   tool: string;
@@ -16,14 +20,20 @@ export interface CacheFrontmatter {
   introspectionDepth: number;
   introspectionBytes: number;
   schemaVersion: number;
+  /** Canonical man-page identifier (e.g. `man:1 git`). Schema-2 only;
+   * absent on schema-1 docs (which are treated as cache miss anyway). */
+  manRef?: string | null;
+  /** Absolute path of the underlying man-page file. Schema-2 only. */
+  manPagePath?: string | null;
 }
 
-const SUPPORTED_SCHEMA_VERSION = 1;
+const SUPPORTED_SCHEMA_VERSION = CAPABILITY_SCHEMA_VERSION;
 
 export interface CacheEntry {
   frontmatter: CacheFrontmatter;
   fullContent: string;
   userNotes: string;
+  userRecipes: string;
 }
 
 function parseFrontmatter(raw: string): CacheFrontmatter | null {
@@ -40,6 +50,8 @@ function parseFrontmatter(raw: string): CacheFrontmatter | null {
     if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
     obj[key] = value;
   }
+  const manRefRaw = obj['manRef'];
+  const manPagePathRaw = obj['manPagePath'];
   return {
     tool: String(obj['tool'] ?? ''),
     binaryPath: String(obj['binaryPath'] ?? ''),
@@ -50,6 +62,8 @@ function parseFrontmatter(raw: string): CacheFrontmatter | null {
     introspectionDepth: Number(obj['introspectionDepth'] ?? 0),
     introspectionBytes: Number(obj['introspectionBytes'] ?? 0),
     schemaVersion: Number(obj['schemaVersion'] ?? 0),
+    manRef: typeof manRefRaw === 'string' && manRefRaw.length > 0 ? manRefRaw : null,
+    manPagePath: typeof manPagePathRaw === 'string' && manPagePathRaw.length > 0 ? manPagePathRaw : null,
   };
 }
 
@@ -69,6 +83,7 @@ export async function readCacheEntry(capabilitiesDir: string, tool: string): Pro
       frontmatter: fm,
       fullContent: content,
       userNotes: extractUserNotes(content),
+      userRecipes: extractUserRecipes(content),
     };
   } catch (e) {
     if ((e as { code?: string }).code === 'ENOENT') return null;
