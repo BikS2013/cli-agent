@@ -102,7 +102,19 @@ Files under `~/.tool-agents/cli-agent/capabilities/<tool>.md`.
 Cache validity: `binaryPath` + `binaryMtimeMs` + `versionHash` must all match. If any changes,
 the cache is invalidated. `--refresh-capabilities` bypasses the cache entirely.
 
-The USER-NOTES section is preserved byte-for-byte across re-introspection.
+The USER-NOTES and USER-RECIPES sections are preserved byte-for-byte across
+re-introspection. USER-RECIPES (introduced in schema-2 / 0.3.0) holds user-curated
+canonical invocations; the `extract-recipes` subcommand proposes recipes via the
+LLM and prints them to stdout for the user to review and paste — it never writes
+to disk. USER-RECIPES appears above USER-NOTES in the rendered file.
+
+Discovery also probes `man -w <tool>` to detect a manual page. When found, the
+document records `manRef: man:<section> <tool>` in YAML frontmatter and emits a
+`## Manual reference` section pointing the agent at `man <section> <tool>`.
+When `man -w` exits non-zero / empty / unparseable, both artifacts are omitted
+entirely — no fallback, no placeholder. Schema-1 documents (pre-0.3.0) are
+treated as cache miss on read and re-discovered into schema-2 with USER-NOTES
+carried forward.
 
 The same folder also stores ONE non-tool file: `system-prompt.md` (mode 0600), which
 holds the externalized BASE system prompt (see Section 5a). The capability cache
@@ -2153,3 +2165,83 @@ New ADRs introduced during this design phase:
   seams already required by the implementation. This is an additive
   extension; the FR-PROF-007 contract on `profile_active` is unchanged.
 
+## §13. TUI exit and JSON-snapshot resume
+
+Plan: `docs/design/plan-005-tui-exit-and-resume.md`. Functional
+requirements: FR-EXR-001 through FR-EXR-009.
+
+### §13.A Goal
+
+Two ergonomic gaps in the TUI that surfaced during user testing:
+
+1. Ctrl+C never exited the TUI — only `/quit` or Ctrl+D-on-empty did.
+   That is surprising versus every other modern REPL.
+2. Conversation memory was lost across restarts. The transcript was
+   persisted to JSONL but the LangGraph `MemorySaver` is in-process,
+   so quitting and restarting started the LLM from a blank slate.
+
+### §13.B Architecture
+
+- **Double Ctrl+C exit**: a debounced state machine in
+  `src/tui/index.ts`'s main loop. First press emits the existing hint
+  (now updated to mention the second-press window). A second press
+  within 1500 ms triggers the same graceful shutdown that `/quit` and
+  Ctrl+D-on-empty already use.
+
+- **JSON-snapshot resume**: instead of pulling in `SqliteSaver` (and
+  `better-sqlite3`), we persist the active thread's MemorySaver state
+  to a single JSON file per thread. `MemorySaver.storage` and
+  `MemorySaver.writes` are public-typed fields whose `Uint8Array`
+  values are already serialised by langgraph's `JsonPlusSerializer`,
+  so we only need to round-trip the bytes (base64). The new module
+  `src/agent/checkpoint-store.ts` owns `saveCheckpoint(threadId, saver)`
+  and `loadCheckpoint(threadId, saver)`. Snapshots live alongside the
+  existing transcript files at
+  `~/.tool-agents/cli-agent/history/checkpoint-<threadId>.json` (mode
+  0600, atomic tmp + rename).
+
+- **Persistence cadence**: end-of-turn (in `TuiController.runTurn`'s
+  `finally`). A failed write is logged as a dim warning; the prior
+  snapshot remains valid.
+
+- **Resume entry points**: the `--resume`/`-r` CLI flag for cold start,
+  and the `/resume [<threadId>]` slash for mid-session swap. Both
+  follow the same hydration order: resolve threadId, build a fresh
+  graph, hydrate the new saver, re-render the JSONL transcript, swap
+  `controller.agentGraph`.
+
+### §13.C Architectural decisions
+
+- **ADR-EXR-1**: JSON snapshot, not SQLite. A single-user CLI agent
+  doesn't need indexed pruning, multi-thread concurrency, or branching
+  history; one file per thread is sufficient. Avoiding `better-sqlite3`
+  keeps the install graph free of native bindings.
+- **ADR-EXR-2**: Reach into `MemorySaver.storage` / `.writes` rather
+  than wrapping the saver in our own `BaseCheckpointSaver` subclass.
+  Both fields are part of the public type definition (verified in
+  `node_modules/@langchain/langgraph-checkpoint/dist/memory.d.ts`), so
+  this is a contract LangGraph commits to. The snapshot loader fails
+  loudly if the shape ever changes.
+- **ADR-EXR-3**: Per-turn write, not end-of-session-only. Cheap (low
+  tens of ms IO), crash-safe, and matches what a SQLite-backed
+  checkpointer would do anyway.
+- **ADR-EXR-4**: Hydration before `TuiController` construction. The LLM
+  sees the prior conversation only because the checkpointer it's
+  attached to already carries the prior state — the rendered transcript
+  is purely cosmetic. Constructing the controller first and hydrating
+  afterwards would create a window during which the controller's first
+  turn could fire against an empty saver.
+- **ADR-EXR-5**: 1500 ms double-Ctrl+C window. Long enough to feel
+  intentional, short enough that the hint can't go stale and let an
+  accidental Ctrl+C minutes later exit the session.
+- **ADR-EXR-6**: No silent fallbacks on resume errors. If the user
+  asks to resume something that doesn't exist (no `cursor.json`, no
+  `checkpoint-<id>.json`, schema mismatch), exit code 2 — same policy
+  as missing config. Mid-session `/resume` reports the error inline
+  rather than killing the session, since the user has live state worth
+  preserving.
+- **ADR-EXR-7**: No auto-pruning. Old snapshots are user-deletable
+  files; auto-cleanup risks discarding state the user may still want.
+  When/if a long-tail accumulation problem emerges, a dedicated
+  `cli-agent prune-history --older-than <duration>` subcommand can be
+  added.

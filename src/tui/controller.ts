@@ -23,6 +23,7 @@ import {
 } from './transcript/persist.js';
 import type { TurnRecord } from './transcript/types.js';
 import { dispatchSlash, type SlashContext } from './slash/registry.js';
+import { saveCheckpoint } from '../agent/checkpoint-store.js';
 
 export interface TuiAssistantMessage {
   readonly role: 'assistant';
@@ -98,6 +99,25 @@ export class TuiController {
     this.threadStartedAt = new Date();
     this.messages = [];
     this.lastAssistantText = '';
+  }
+
+  /**
+   * Adopt a previously-persisted thread. Caller is responsible for having
+   * already hydrated `agentGraph.checkpointer` (via loadCheckpoint) so that
+   * the next user turn benefits from the prior LangGraph state.
+   *
+   * `messages` should be the user/assistant turns read from the thread's
+   * JSONL file — purely for transcript rendering. The controller copies
+   * the array; the caller may discard the source.
+   */
+  public applyResume(threadId: string, threadStartedAt: Date, messages: TuiMessage[]): void {
+    this.threadId = threadId;
+    this.threadStartedAt = threadStartedAt;
+    this.messages = [...messages];
+    const lastAssistant = [...messages]
+      .reverse()
+      .find((m): m is TuiAssistantMessage => m.role === 'assistant');
+    this.lastAssistantText = lastAssistant?.text ?? '';
   }
 
   /** Persist a TurnRecord to the active thread's JSONL file. */
@@ -243,6 +263,16 @@ export class TuiController {
       }
     } finally {
       await this.persistIndex();
+      // Snapshot LangGraph state so --resume picks up where we left off.
+      // Best-effort: a failure here does not abort the session — the next
+      // turn will produce a fresh snapshot, and the prior one (if any)
+      // remains valid on disk.
+      try {
+        await saveCheckpoint(this.threadId, this.agentGraph.checkpointer);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        this.stderr.write(`${DIM}[checkpoint snapshot failed: ${msg}]${RESET}\n`);
+      }
     }
   }
 
