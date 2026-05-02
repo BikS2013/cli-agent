@@ -38,6 +38,12 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       if (String(p).endsWith('config.json')) return enoent();
       return enoent();
     }),
+    // loadOverlayRegistry calls readdir on <agentDir>/tool-prompts/. Without
+    // this mock, readdir falls through to the host filesystem — on a machine
+    // that has used cli-agent, the dir has 17 real overlay files; readdir
+    // returns them, then the mocked readFile rejects each with ENOENT and
+    // loadOverlayRegistry throws. Returning [] keeps the test hermetic.
+    readdir: vi.fn().mockResolvedValue([]),
   };
   return {
     ...actual,
