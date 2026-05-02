@@ -105,6 +105,14 @@ On first run the agent creates `~/.tool-agents/cli-agent/` with mode
 `0700`, seeds a `.env` template with mode `0600`, and creates `logs/`
 and `capabilities/` subdirectories.
 
+> **Don't have an Azure deployment?** The Quick start above happens to
+> use Azure OpenAI — substitute any of the other 7 providers
+> (OpenAI, Anthropic, Gemini, Azure Foundry, Ollama, MLX, LiteLLM) by
+> following the recipe for your case in
+> **[`docs/guides/configuring-cli-agent.md`](docs/guides/configuring-cli-agent.md)**.
+> That guide also covers credential storage, switching providers per-
+> session, CI scripting, and cost tuning.
+
 ---
 
 ## Use cases
@@ -485,6 +493,13 @@ cli-agent/
 
 ### User guides
 
+- **[`docs/guides/configuring-cli-agent.md`](docs/guides/configuring-cli-agent.md)**
+  — how to wire cli-agent up to the LLM provider you have access to.
+  Decision tree, copy-pasteable recipes for all 8 supported providers
+  (OpenAI, Anthropic, Gemini, Azure OpenAI, Azure Foundry, Ollama, MLX,
+  LiteLLM), where to put credentials vs non-secret defaults, and
+  scenario-by-scenario walkthroughs (corporate Azure, CI scripting,
+  switching providers per-session, privacy/offline, cost tuning).
 - **[`docs/guides/enabling-write-capabilities.md`](docs/guides/enabling-write-capabilities.md)**
   — how to let the agent edit files, run write-y subcommands of wrapped
   CLIs, and pass through credentials. Covers the three switches
