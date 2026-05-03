@@ -215,12 +215,51 @@ function buildSpawnArgs(
   manifest: CompositeManifest,
   invocationArgs: readonly string[],
 ): string[] {
+  return buildCompositeArgv(manifest.members, invocationArgs);
+}
+
+/**
+ * Build the argv tail (everything after the cli-agent binary path) that
+ * would be passed to a fresh cli-agent subprocess to dispatch a composite
+ * with the given members + invocation args. Pure function, exposed so the
+ * `composite-show --command` introspection mode can render the resolved
+ * command without ever touching `child_process.spawn`.
+ *
+ * Output shape: `["--tool", m1, "--tool", m2, ..., ...invocationArgs]`.
+ */
+export function buildCompositeArgv(
+  members: readonly string[],
+  invocationArgs: readonly string[],
+): string[] {
   const argv: string[] = [];
-  for (const member of manifest.members) {
+  for (const member of members) {
     argv.push('--tool', member);
   }
   for (const a of invocationArgs) argv.push(a);
   return argv;
+}
+
+/**
+ * POSIX single-quote escape — same logic as `shim-writer.ts`. Wraps
+ * `value` in single quotes and escapes any embedded single quote with
+ * the canonical `'\''` dance. Safe to copy-paste into `/bin/sh`.
+ */
+function shellEscape(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Render a shell-pasteable command line for the resolved composite
+ * invocation. Pure function — no spawn, no side effects. Used by
+ * `composite-show --command`.
+ */
+export function formatCompositeCommand(
+  binPath: string,
+  members: readonly string[],
+  invocationArgs: readonly string[],
+): string {
+  const argv = buildCompositeArgv(members, invocationArgs);
+  return [binPath, ...argv].map(shellEscape).join(' ');
 }
 
 async function dispatchSubprocess(

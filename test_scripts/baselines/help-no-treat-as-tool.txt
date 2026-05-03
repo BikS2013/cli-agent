@@ -76,5 +76,5 @@ Commands:
   profile-dry-run [options]                       Resolve config + tool scoping; print effective state without launching the LLM (FR-PROF-013).
   composite-synthesize [options]                  Synthesize a composite intelligent tool from --tool members (plan-006 §14.E).
   composite-list|composites [options]             List synthesised composite intelligent tools (plan-006 §14.E).
-  composite-show [options] <name>                 Print a synthesised composite capability doc (plan-006 §14.E).
+  composite-show [options] <name> [args...]       Print a synthesised composite capability doc, or with --command, the resolved command the composite would run (plan-006 §14.E).
   composite-delete|composite-rm [options] <name>  Delete a synthesised composite and all of its artefacts (plan-006 §14.E).

@@ -600,13 +600,23 @@ migrateSubcommandHelp(
 
 migrateSubcommandHelp(
   program
-    .command('composite-show <name>')
-    .description('Print a synthesised composite capability doc (plan-006 §14.E).')
-    .option('--json', 'Emit machine-readable JSON output', false),
-).action(async function (this: Command, name: string, opts: Record<string, unknown>) {
+    .command('composite-show <name> [args...]')
+    .description('Print a synthesised composite capability doc, or with --command, the resolved command the composite would run (plan-006 §14.E).')
+    .option('--json', 'Emit machine-readable JSON output', false)
+    .option('--command', 'Print the resolved command the composite would dispatch (cli-agent + --tool flags + trailing args) WITHOUT executing it. Trailing positional args are folded into the resolved argv.', false),
+).action(async function (
+  this: Command,
+  name: string,
+  args: string[],
+  opts: Record<string, unknown>,
+) {
   await handleErrors(async () => {
     if (maybePrintSubcommandHelp(this, opts)) return;
-    await runCompositeShow(name, { json: opts['json'] as boolean | undefined });
+    await runCompositeShow(name, {
+      json: opts['json'] as boolean | undefined,
+      command: opts['command'] as boolean | undefined,
+      invocationArgs: args ?? [],
+    });
   });
 });
 

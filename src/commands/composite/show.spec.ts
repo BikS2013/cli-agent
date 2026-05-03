@@ -46,17 +46,22 @@ afterEach(async () => {
   await fsp.rm(TMP_HOME, { recursive: true, force: true });
 });
 
-async function placeCompositeDoc(name: string): Promise<void> {
+async function placeCompositeDoc(
+  name: string,
+  members: readonly string[] = ['m1'],
+): Promise<void> {
   const dir = path.join(TMP_HOME, '.tool-agents', 'cli-agent', 'capabilities', 'composite');
   await fsp.mkdir(dir, { recursive: true });
   const { composeCompositeDoc } = await import('../../agent/composite/composeCompositeDoc.js');
+  const memberDigests: Record<string, string> = {};
+  for (const m of members) memberDigests[m] = 'd'.repeat(16);
   const doc = composeCompositeDoc({
     frontmatter: {
       schemaVersion: 3,
       composite: true,
       compositeName: name,
-      members: ['m1'],
-      memberDigests: { m1: 'd'.repeat(16) },
+      members: [...members],
+      memberDigests,
       synthesizedAt: '2024-05-01T00:00:00Z',
       syntheticDigest: 'placeholder',
       cliAgentVersion: '0.3.0',
@@ -112,5 +117,79 @@ describe('composite-show', () => {
       code: 'E_USAGE',
       exitCode: 2,
     });
+  });
+
+  it('--command prints the resolved command without executing it', async () => {
+    await placeCompositeDoc('demo', ['m1', 'm2']);
+    const { runCompositeShow } = await import('./show.js');
+    await runCompositeShow('demo', {
+      command: true,
+      cliAgentBinPathOverride: '/usr/local/bin/cli-agent',
+    });
+    const out = captured.stdout.join('').trim();
+    // Single shell-pasteable line; bin path + one --tool flag per member,
+    // single-quoted via the dispatcher's POSIX escape helper. Trailing args
+    // are absent because the caller did not pass any.
+    expect(out).toBe(
+      "'/usr/local/bin/cli-agent' '--tool' 'm1' '--tool' 'm2'",
+    );
+    // The command branch must not emit the doc body.
+    expect(out).not.toMatch(/Body for demo/);
+  });
+
+  it('--command folds trailing invocation args into the resolved argv', async () => {
+    await placeCompositeDoc('demo', ['m1', 'm2']);
+    const { runCompositeShow } = await import('./show.js');
+    await runCompositeShow('demo', {
+      command: true,
+      invocationArgs: ['hello world', "it's me"],
+      cliAgentBinPathOverride: '/usr/local/bin/cli-agent',
+    });
+    const out = captured.stdout.join('').trim();
+    expect(out).toBe(
+      "'/usr/local/bin/cli-agent' '--tool' 'm1' '--tool' 'm2' 'hello world' 'it'\\''s me'",
+    );
+  });
+
+  it('--command --json emits structured payload (argv + commandLine)', async () => {
+    await placeCompositeDoc('demo', ['m1', 'm2']);
+    const { runCompositeShow } = await import('./show.js');
+    await runCompositeShow('demo', {
+      command: true,
+      json: true,
+      invocationArgs: ['summarize'],
+      cliAgentBinPathOverride: '/usr/local/bin/cli-agent',
+    });
+    const parsed = JSON.parse(captured.stdout.join('')) as {
+      compositeName: string;
+      members: string[];
+      binPath: string;
+      invocationArgs: string[];
+      argv: string[];
+      commandLine: string;
+    };
+    expect(parsed.compositeName).toBe('demo');
+    expect(parsed.members).toEqual(['m1', 'm2']);
+    expect(parsed.binPath).toBe('/usr/local/bin/cli-agent');
+    expect(parsed.invocationArgs).toEqual(['summarize']);
+    expect(parsed.argv).toEqual([
+      '/usr/local/bin/cli-agent',
+      '--tool',
+      'm1',
+      '--tool',
+      'm2',
+      'summarize',
+    ]);
+    expect(parsed.commandLine).toContain("'--tool' 'm1' '--tool' 'm2' 'summarize'");
+  });
+
+  it('--command on a missing composite still raises UsageError', async () => {
+    const { runCompositeShow } = await import('./show.js');
+    await expect(
+      runCompositeShow('nope', {
+        command: true,
+        cliAgentBinPathOverride: '/usr/local/bin/cli-agent',
+      }),
+    ).rejects.toMatchObject({ code: 'E_USAGE', exitCode: 2 });
   });
 });
