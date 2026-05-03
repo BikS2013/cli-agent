@@ -32,7 +32,7 @@ vi.mock('../agent/graph.js', async (importOriginal) => {
   };
 });
 
-import { TuiController } from './controller.js';
+import { TuiController, formatToolCallArgs } from './controller.js';
 
 let tmpHome: string;
 let savedHome: string | undefined;
@@ -86,6 +86,10 @@ describe('TuiController.runTurn', () => {
     expect(all).toContain('world!');
     expect(all).toContain('↳');
     expect(all).toContain('bash_run');
+    // For bash_run, the wrapped binary is surfaced inside the parens
+    // instead of `(...)` so the user can see which CLI is actually running.
+    // ANSI escapes between the tool name and the open paren are tolerated.
+    expect(all).toMatch(/bash_run\x1b\[[0-9;]*m\(ls\)/);
     expect(all).toContain('✓');
     expect(all).toMatch(/42\s*ms/);
 
@@ -116,5 +120,40 @@ describe('TuiController.runTurn', () => {
     if (process.platform !== 'win32') {
       expect(stat.mode & 0o777).toBe(0o600);
     }
+  });
+});
+
+describe('formatToolCallArgs', () => {
+  it('returns "..." for non-bash_run tools', () => {
+    expect(formatToolCallArgs('file_read', { path: 'a.txt' })).toBe('...');
+    expect(formatToolCallArgs('web_search', { query: 'x' })).toBe('...');
+  });
+
+  it('renders the wrapped binary when args is the parsed object', () => {
+    expect(formatToolCallArgs('bash_run', { command: 'ls' })).toBe('ls');
+    expect(formatToolCallArgs('bash_run', { command: 'git', args: ['status', '-s'] })).toBe('git status -s');
+  });
+
+  // Regression: LangChain v2 `streamEvents` delivers tool input as
+  // `{ input: "<JSON string>" }` rather than the parsed object. If the
+  // helper does not unwrap that shape, every real bash_run call falls
+  // back to the placeholder `(...)` even though the binary name is
+  // available in the payload.
+  it('unwraps the LangChain { input: "<json>" } envelope', () => {
+    const args = { input: JSON.stringify({ command: 'open', args: ['README.md'], confirmed: true }) };
+    expect(formatToolCallArgs('bash_run', args)).toBe('open README.md');
+  });
+
+  it('clips long argv to keep the line on one row', () => {
+    const args = { command: 'echo', args: ['x'.repeat(200)] };
+    const rendered = formatToolCallArgs('bash_run', args);
+    expect(rendered.length).toBeLessThanOrEqual(60);
+    expect(rendered.endsWith('…')).toBe(true);
+  });
+
+  it('returns "..." when payload is malformed', () => {
+    expect(formatToolCallArgs('bash_run', null)).toBe('...');
+    expect(formatToolCallArgs('bash_run', { input: 'not-json' })).toBe('...');
+    expect(formatToolCallArgs('bash_run', { args: ['x'] })).toBe('...');
   });
 });

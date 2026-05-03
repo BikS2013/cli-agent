@@ -25,6 +25,49 @@ import type { TurnRecord } from './transcript/types.js';
 import { dispatchSlash, type SlashContext } from './slash/registry.js';
 import { saveCheckpoint } from '../agent/checkpoint-store.js';
 
+/**
+ * Render the inner-paren preview shown next to a tool call.
+ *
+ * For `bash_run` the LLM is calling a wrapped CLI through the shell, so the
+ * binary name is far more informative than `(...)`. We surface
+ * `command` + the first few `args` (clipped) so the user sees what binary
+ * is actually being invoked. For every other tool we keep the historical
+ * `(...)` placeholder.
+ *
+ * LangChain v2 `streamEvents` delivers tool input as `{ input: "<JSON
+ * string>" }` rather than the parsed object — so we unwrap a stringified
+ * `input` field before reading `command` / `args`. We tolerate the
+ * already-parsed shape too in case the runtime path ever shifts.
+ */
+export function formatToolCallArgs(toolName: string, args: unknown): string {
+  if (toolName !== 'bash_run') return '...';
+  const parsed = unwrapToolArgs(args);
+  if (parsed === null) return '...';
+  const command = parsed['command'];
+  if (typeof command !== 'string' || command.length === 0) return '...';
+  const rawArgv = parsed['args'];
+  const argv = Array.isArray(rawArgv) ? rawArgv.filter((v): v is string => typeof v === 'string') : [];
+  const joined = [command, ...argv].join(' ');
+  const MAX = 60;
+  return joined.length > MAX ? `${joined.slice(0, MAX - 1)}…` : joined;
+}
+
+function unwrapToolArgs(args: unknown): Record<string, unknown> | null {
+  if (typeof args !== 'object' || args === null) return null;
+  const obj = args as Record<string, unknown>;
+  const inner = obj['input'];
+  if (typeof inner === 'string') {
+    try {
+      const decoded = JSON.parse(inner);
+      return typeof decoded === 'object' && decoded !== null ? (decoded as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
+  if (typeof inner === 'object' && inner !== null) return inner as Record<string, unknown>;
+  return obj;
+}
+
 export interface TuiAssistantMessage {
   readonly role: 'assistant';
   readonly text: string;
@@ -208,7 +251,7 @@ export class TuiController {
           case 'tool_call_start':
             pauseSpinnerForOutput();
             ensureHeader();
-            this.stdout.write(`\n  ${CYAN}↳${RESET} calling ${BOLD}${ev.toolName}${RESET}(...)`);
+            this.stdout.write(`\n  ${CYAN}↳${RESET} calling ${BOLD}${ev.toolName}${RESET}(${formatToolCallArgs(ev.toolName, ev.args)})`);
             toolCallTimes.set(ev.toolName, Date.now());
             break;
           case 'tool_call_end': {
