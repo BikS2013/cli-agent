@@ -2245,3 +2245,1231 @@ Two ergonomic gaps in the TUI that surfaced during user testing:
   When/if a long-tail accumulation problem emerges, a dedicated
   `cli-agent prune-history --older-than <duration>` subcommand can be
   added.
+
+## §14. Composite Intelligent Tools (plan-006)
+
+**Plan reference**: `docs/design/plan-006-composite-tools.md`.
+**Spec reference**: `docs/design/refined-request-composite-tools.md`
+(FR-CMP-001 … FR-CMP-023 + NFR-CMP-001 … NFR-CMP-007 in
+`docs/design/project-functions.md`; 27 acceptance criteria; 23 edge
+cases; the canonical `--treat-as-tool` flag interaction matrix).
+**Research references**: `docs/research/llm-prompt-caching-providers.md`
+(per-provider cache wire format; `withSynthesisCache` helper sketch),
+`docs/research/posix-wrapper-shim-design.md` (verbatim shim text;
+atomic-write pattern; absolute-path resolution).
+**Investigation reference**: `docs/reference/investigation-composite-tools.md`
+(7 design recommendations; resolves O-1, O-2, O-4 deferred questions).
+**Codebase scan reference**: `docs/reference/codebase-scan-composite-tools.md`
+(11 integration points IP-1 … IP-11).
+**Coexists with**: §11 (overlays — NOT in v1 cache key per ADR-CMP-7),
+§12 (profiles — passthrough only via `cliParams`; `tools.allow/deny/order`
+is NOT consulted during synthesis per FR-CMP-019), the plan-005
+capability-recipes / `manRef` contract (composites carry `manRef: null`
+always per A-10), and §13 TUI exit/resume (orthogonal — `--treat-as-tool`
+is incompatible with `--resume`).
+
+A *composite intelligent tool* packages a curated cli-agent invocation
+(`cli-agent --tool A --tool B …`) as a *new* `--tool <composite-id>`
+attachable to an outer cli-agent. Because a composite has no real binary
+`--help` to introspect, its capability document is **synthesised** by a
+two-stage LLM pipeline (per-member distillation → composite composition)
+keyed by sorted member names + per-member doc digests + cli-agent version
++ composite schema version + composite name + synthesis model. The
+synthesised schema-3 document is then distributed in three opt-in
+forms: (a) a doc-only artifact, (b) an executable POSIX shim, (c) a
+manifest registered as a "virtual tool" in cli-agent's runtime
+registry. Every existing flag, behaviour, exit code, and capability-doc
+consumer remains byte-identical when `--treat-as-tool` and its siblings
+are absent (NFR-CMP-001).
+
+### §14.A Architecture diagram (text)
+
+```
+                     ┌──────────────────────────────────────────────────────┐
+                     │ User invokes one of:                                  │
+                     │   cli-agent --tool A --tool B --treat-as-tool --help  │
+                     │   cli-agent composite-synthesize --tool A --tool B    │
+                     │   cli-agent --treat-as-tool ... [--regenerate-... ]   │
+                     │                              [--emit-wrapper ...]     │
+                     │                              [--register-virtual ...] │
+                     └────────────────────────────┬─────────────────────────┘
+                                                  │
+                                                  ▼
+                     ┌─────────────────────────────────────────────────────┐
+                     │ src/cli.ts                                           │
+                     │   program.helpOption(false)        ← P4 migration   │
+                     │   .option('--help', …, false)      ← manual flag    │
+                     │   .option('--treat-as-tool', …)                     │
+                     │   + 9 sibling flags (§14.E / §14.H)                 │
+                     │   .action(): branch on opts['help'] + treatAsTool   │
+                     │     no  → existing runAgentCommand (byte-identical) │
+                     │     yes → runComposite (NEW)                        │
+                     └────────────────────────────┬─────────────────────────┘
+                                                  │
+              ┌───────────────────────────────────┼───────────────────────────────────┐
+              ▼                                   ▼                                    ▼
+   ┌────────────────────────┐    ┌──────────────────────────┐    ┌──────────────────────────────┐
+   │ runAgentCommand        │    │ src/commands/composite/   │    │ composite-synthesize | -list │
+   │   (existing path —     │    │   synthesize.ts           │    │ composite-show | -delete     │
+   │    no composite logic) │    │   (--treat-as-tool path)  │    │ (subcommand entry points)    │
+   └────────────────────────┘    └──────────────┬───────────┘    └──────────────┬───────────────┘
+                                                │                                │
+                                                └────────────────┬───────────────┘
+                                                                 │
+                                                                 ▼
+                     ┌────────────────────────────────────────────────────────────────────┐
+                     │ src/agent/composite/synthesizer.ts        synthesizeComposite()    │
+                     │                                                                     │
+                     │  Inputs: (cfg, llm=createLLM(cfg), members[], compositeName,        │
+                     │           dryRun, budgetTokens, logger)                             │
+                     │                                                                     │
+                     │  ┌────────────────────────────────────────────────────────────┐    │
+                     │  │ Stage-1 (per-member, embarrassingly parallel)               │    │
+                     │  │   for each member m:                                        │    │
+                     │  │     digest = sha256(memberDocCanonical                      │    │
+                     │  │                     ‖ STAGE1_TEMPLATE_VERSION               │    │
+                     │  │                     ‖ cfg.model)[:16]                       │    │
+                     │  │     path: <distillDir>/<m>@<digest>.json                    │    │
+                     │  │     IF cache hit  → load JSON                               │    │
+                     │  │     ELSE          → llm.invoke(stage1Prompt(m))             │    │
+                     │  │                      ; write JSON (mode 0600)               │    │
+                     │  └────────────────────────────────────────────────────────────┘    │
+                     │                       ▼                                              │
+                     │  ┌────────────────────────────────────────────────────────────┐    │
+                     │  │ Stage-2 (single LLM call)                                   │    │
+                     │  │   messages = [SystemMessage(STATIC_SYNTH_PROMPT),           │    │
+                     │  │               HumanMessage([distillBlock,                   │    │
+                     │  │                             COMPOSE_INSTRUCTION])]          │    │
+                     │  │   messages = withSynthesisCache(messages, {                 │    │
+                     │  │              providerFamily: resolveProviderFamily(cfg),    │    │
+                     │  │              prefixEndIndex: 1, anthropicTtl: '1h' })       │    │
+                     │  │   response  = await llm.invoke(messages)                    │    │
+                     │  │   doc       = composeCompositeDoc({frontmatter, body,       │    │
+                     │  │                                    recipes, notes:''})      │    │
+                     │  │   extractCacheUsage(response.response_metadata)             │    │
+                     │  │     → JSONL composite_synthesis_stage event                 │    │
+                     │  └────────────────────────────────────────────────────────────┘    │
+                     └────────────────────────────┬───────────────────────────────────────┘
+                                                  │
+                                                  ▼
+                     ┌──────────────────────────────────────────────────────────────────┐
+                     │ src/agent/composite/cache.ts                                      │
+                     │   COMPOSITE_CAPABILITY_SCHEMA_VERSION = 3 (NEW constant)          │
+                     │   key = sha256(sortedMembers ‖ memberDigests ‖ cliVer             │
+                     │                ‖ schemaVer ‖ compositeName ‖ synthModel)          │
+                     │   USER-RECIPES + USER-NOTES preserved across rewrite              │
+                     │   atomic temp+rename; mode 0600                                   │
+                     └────────────────────────────┬─────────────────────────────────────┘
+                                                  │
+       ┌──────────────────────────────────────────┼──────────────────────────────────────────┐
+       ▼                                          ▼                                          ▼
+┌─────────────────────────┐   ┌────────────────────────────────────┐   ┌──────────────────────────────────────┐
+│ FORM (a) Doc            │   │ FORM (b) Wrapper shim               │   │ FORM (c) Virtual tool                 │
+│ default ON (with        │   │ default OFF — opt-in --emit-wrapper │   │ default OFF — opt-in --register-virt. │
+│ --treat-as-tool)        │   │                                      │   │                                        │
+│ writes:                 │   │ writes:                              │   │ writes:                                │
+│  capabilities/          │   │  composites/<id>/<id>  (mode 0755)   │   │  composites/<id>/manifest.json (0600)  │
+│   composite/<id>.md     │   │  + optional symlink                  │   │ scanned by loadVirtualTools at startup │
+│   (mode 0600)           │   │   ~/.local/bin/<id>                  │   │ dispatched by dispatcher.ts:           │
+│  + mirror file copy     │   │ #!/bin/sh; exec abs-path-cli         │   │   child-process (default; ADR-CMP-5)   │
+│   capabilities/<id>.md  │   │   --tool m1 --tool m2 "$@"           │   │   in-process (experimental)            │
+│   so existing           │   │ (research §5 verbatim template)      │   │ recursion guard at register + dispatch │
+│   composeCapabilities-  │   │                                      │   │ child env CLI_AGENT_VIRTUAL_DISPATCH_  │
+│   SystemPrompt picks    │   │                                      │   │   RECURSION_GUARD=1 hard-disables     │
+│   it up (ADR-CMP-12)    │   │                                      │   │   nested loadVirtualTools             │
+└─────────────────────────┘   └────────────────────────────────────┘   └──────────────────────────────────────┘
+       │                                          │                                          │
+       └──────────────────────────────────────────┼──────────────────────────────────────────┘
+                                                  ▼
+                     ┌──────────────────────────────────────────────────────────────────┐
+                     │ Outer cli-agent runs `cli-agent --tool <id>`:                     │
+                     │  resolution order at registry seam (registry.ts:84):              │
+                     │   1. built-in tool name                                           │
+                     │   2. virtual tool manifest match → meta-tool dispatch             │
+                     │   3. PATH binary (the shim, if --emit-wrapper-on-path used)       │
+                     │  composeCapabilitiesSystemPrompt reads <id>.md transparently      │
+                     │  → outer system prompt embeds composite USER-RECIPES verbatim     │
+                     └──────────────────────────────────────────────────────────────────┘
+```
+
+The `withSynthesisCache(messages, options)` helper from the prompt-caching
+research is the single provider-agnostic adapter that annotates Stage-2
+messages with `cache_control` markers on Anthropic and LiteLLM-Anthropic
+and returns the messages unmodified on every other provider (where prefix
+stability handles caching automatically or where caching is unavailable).
+The synthesis subsystem co-locates with the existing capability cache
+(it shares `agentCapabilitiesDir()` for the schema-3 mirror copy),
+the profile system (it consumes `cfg.activeProfileData?.cliParams`
+through the shared `createLLM(cfg)` factory but ignores `tools.*`),
+and the §11 overlay system (overlays are NOT part of the v1 cache key —
+their current effective digest is captured in JSONL telemetry only,
+per ADR-CMP-7 / OQ-1).
+
+### §14.B Module layout
+
+```
+src/agent/composite/                                              [NEW package]
+├── types.ts                       interfaces consumed by all units (§14.D)
+├── prompts.ts                     STAGE1_TEMPLATE / STAGE2_TEMPLATE + version constants
+├── cache.ts                       schema-3 reader/writer, member-doc digest,
+│                                  cache-key composition, USER-* preservation,
+│                                  Stage-1 distill cache helpers
+├── cache.spec.ts
+├── composeCompositeDoc.ts         schema-3 doc composer (frontmatter + AUTO-GEN
+│                                  + USER-RECIPES + USER-NOTES)
+├── composeCompositeDoc.spec.ts
+├── stage1.ts                      per-member distillation + on-disk cache lookup
+├── stage1.spec.ts
+├── stage2.ts                      compose call + buildStage2Messages helper
+├── stage2.spec.ts
+├── synthesizer.ts                 synthesizeComposite() — orchestrates 1+2
+├── synthesizer.spec.ts
+├── llm-cache.ts                   withSynthesisCache + extractCacheUsage
+│                                  + resolveProviderFamily (the 9 ProviderFamily
+│                                  values). Verbatim from research §"Helper
+│                                  Sketch". Adapter is the single integration
+│                                  surface for all 8 supported providers.
+├── llm-cache.spec.ts
+├── shim-writer.ts                 generateCompositeWrapperShim (POSIX shim
+│                                  emitter, atomic temp+rename, 0o755 mode,
+│                                  nvm/volta/asdf detection warning)
+├── shim-writer.spec.ts
+├── manifest.ts                    readManifest / writeManifest; collision
+│                                  detection (FR-CMP-017)
+├── manifest.spec.ts
+├── virtual-registry.ts            loadVirtualTools(cfg, logger) → DynamicStructuredTool[]
+├── virtual-registry.spec.ts
+├── dispatcher.ts                  dispatchComposite(input) — child-process
+│                                  default; in-process opt-in (experimental);
+│                                  recursion guard at dispatch time
+└── dispatcher.spec.ts
+
+src/commands/composite/                                          [NEW package]
+├── synthesize.ts                  flag-driven AND subcommand entry
+├── regenerate.ts                  alias of synthesize --regenerate
+├── list.ts                        composite-list (manifest scan)
+├── show.ts                        composite-show <id> (print cached doc)
+├── delete.ts                      composite-delete <id> [--yes]
+├── derive-name.ts                 validateCompositeName, deriveCompositeName
+├── shared.ts                      resolveCompositePath, formatTable
+└── *.spec.ts                      one per handler
+
+src/cli-composite-flags.ts                                       [NEW]
+                                   maps Commander opts → CompositeCliFlags
+                                   (parallel to cli-agent-tools-flags.ts);
+                                   flag-conflict enforcement (§14.H)
+
+EXTENDED touch points (small, line-bounded):
+  src/cli.ts                      register 10 new flags + 4 new subcommands;
+                                   helpOption(false) migration (NFR-CMP-001
+                                   pinned baseline)
+  src/config/agent-config.ts      AgentCliFlags extension (10 fields);
+                                   AgentConfig extension (compositeCapabilitiesDir,
+                                   compositeDistillDir, compositesDir);
+                                   bootstrapAgentDir +3 dirs (mode 0700);
+                                   OTHER_ENV_KEYS += CLI_AGENT_COMPOSITE_BUDGET,
+                                   CLI_AGENT_VIRTUAL_DISPATCH
+  src/agent/capabilities/cache.ts                NO change
+                                   (composite reader is a separate function in
+                                    src/agent/composite/cache.ts; ADR-CMP-6)
+  src/agent/capabilities/compose-system-prompt.ts                small extension
+                                   add fallback to <capabilitiesDir>/composite/<id>.md
+                                   when <capabilitiesDir>/<id>.md is absent
+                                   (defensive; mirror copy from ADR-CMP-12 covers
+                                   the 99% case)
+  src/agent/tools/registry.ts     line ~84: call loadVirtualTools(cfg, logger)
+                                   between buildAgentToolsGroup and
+                                   applyProfileToolScoping; virtual tools subject
+                                   to profile scoping like native tools
+  src/agent/logging.ts            extend LogEvent union with 9 new event kinds
+                                   (§14.M)
+```
+
+`package.json` gains NO new runtime dependency. The `withSynthesisCache`
+helper uses `@langchain/core/messages` already in the dependency graph.
+The shim writer uses `node:fs/promises`, `node:os`, and `node:path` —
+all stdlib.
+
+### §14.C Schema-3 capability doc format (canonical)
+
+The synthesised composite document extends schema-2 with composite-specific
+frontmatter while preserving every body marker that the existing
+`composeCapabilitiesSystemPrompt` reader expects (so an outer cli-agent
+finds the doc transparently — no consumer-side changes).
+
+```markdown
+---
+schemaVersion: 3              # required (number; literal 3 in v1)
+composite: true               # required (boolean; literal true)
+compositeName: <id>           # required (string; ^[a-z][a-z0-9_-]{0,62}$)
+members:                      # required (sorted array of canonical member names)
+  - file-cli
+  - outlook-cli
+memberDigests:                # required (object; <name> → sha256 first 16 hex)
+  file-cli: a1b2c3d4e5f60718
+  outlook-cli: 0f1e2d3c4b5a6978
+synthesizedAt: <ISO 8601>     # required (string; UTC)
+syntheticDigest: <16-hex>     # required (string; sha256[:16] of canonicalised inputs)
+cliAgentVersion: <semver>     # required (string; the running cli-agent version)
+synthesisModel: <vendor>:<id> # required (string; e.g. "anthropic:claude-sonnet-4-6")
+activeProfile: <name | null>  # required (string or null; traceability only,
+                              #   per FR-CMP-019 — NOT used as input)
+manRef: null                  # required (literal null; A-10 — composites have no man page)
+manPagePath: null             # required (literal null; companion to manRef)
+---
+
+# <compositeName> — capability document
+
+<!-- AUTO-GENERATED:START hash=<hex64> -->
+<synthesised body: synopsis, intents, parameter glossary, cross-tool examples>
+<!-- AUTO-GENERATED:END -->
+
+<!-- USER-RECIPES:START -->
+<pre-filled by Stage-2; user-editable; preserved across --regenerate-capabilities>
+<!-- USER-RECIPES:END -->
+
+<!-- USER-NOTES:START -->
+<empty stub on first synthesis; user-editable; preserved across --regenerate-capabilities>
+<!-- USER-NOTES:END -->
+```
+
+**Frontmatter ordering** is fixed (the writer emits keys in the order
+listed above for byte-stable digests). All frontmatter keys are required
+in v1; `activeProfile: null` represents "no profile active" rather than
+the field being absent.
+
+**Member-doc digest algorithm** (used both inside `memberDigests` and
+inside the cache-key — §14.L): given the member's capability-doc text,
+
+1. Strip everything between `<!-- USER-RECIPES:START -->` and
+   `<!-- USER-RECIPES:END -->` (inclusive of the markers).
+2. Strip everything between `<!-- USER-NOTES:START -->` and
+   `<!-- USER-NOTES:END -->` (inclusive of the markers).
+3. Strip trailing whitespace from each remaining line; normalise
+   line endings to `\n`.
+4. `sha256(canonicalisedBytes).hex().slice(0, 16)`.
+
+The `canonicaliseMemberDoc(text)` helper is the single source of truth;
+both writer (when populating `memberDigests`) and reader (when comparing
+for cache invalidation) call it.
+
+**`syntheticDigest`** = `sha256(JSON.stringify(canonicalInputs)).hex().slice(0, 16)`,
+where `canonicalInputs = { schemaVersion, compositeName, members, memberDigests,
+cliAgentVersion, synthesisModel }`. Stage-2 prompt content does NOT enter
+the digest — the digest is keyed to inputs only, not to LLM nondeterminism.
+
+### §14.D Data models
+
+The following TypeScript interfaces are the contract the seven Phase-6
+parallel implementation units consume (§14.P). They live in
+`src/agent/composite/types.ts` (data shapes) and across the unit-owned
+modules (function signatures).
+
+```typescript
+// src/agent/composite/types.ts
+
+import type { BaseMessage } from '@langchain/core/messages'
+import type { BaseChatModel } from '@langchain/core/language_models/chat_models'
+import type { AgentConfig } from '../../config/agent-config.js'
+import type { Logger } from '../logging.js'
+
+// --- Frontmatter / cache models ---
+
+export interface CompositeSchemaV3Frontmatter {
+  readonly schemaVersion: 3
+  readonly composite: true
+  readonly compositeName: string
+  readonly members: readonly string[]
+  readonly memberDigests: Readonly<Record<string, string>>
+  readonly synthesizedAt: string                  // ISO 8601 UTC
+  readonly syntheticDigest: string                // sha256[:16]
+  readonly cliAgentVersion: string                // semver
+  readonly synthesisModel: string                 // "<vendor>:<modelId>"
+  readonly activeProfile: string | null
+  readonly manRef: null
+  readonly manPagePath: null
+}
+
+export interface CompositeManifest {              // composites/<id>/manifest.json
+  readonly schemaVersion: 1
+  readonly compositeName: string
+  readonly members: readonly string[]
+  readonly memberDigests: Readonly<Record<string, string>>
+  readonly createdAt: string
+  readonly cliAgentVersion: string
+  readonly capabilityDocPath: string              // absolute path
+}
+
+export interface CompositeMemberRef {             // logical reference, not stored
+  readonly name: string                           // canonical member name
+  readonly capabilityDocPath: string              // absolute resolved path
+  readonly memberDocDigest: string                // sha256[:16] (canonicalised)
+}
+
+// --- The Composite as in-memory aggregate ---
+
+export interface Composite {
+  readonly frontmatter: CompositeSchemaV3Frontmatter
+  readonly autoGeneratedBody: string              // between AUTO-GEN markers
+  readonly userRecipes: string                    // between USER-RECIPES markers
+  readonly userNotes: string                      // between USER-NOTES markers
+}
+
+// --- Synthesis pipeline I/O ---
+
+export interface Stage1Distillation {
+  readonly memberName: string
+  readonly content: string                        // structured intent surface (~2 KB)
+  readonly modelId: string                        // synthesis model that produced this
+  readonly templateVersion: string                // STAGE1_TEMPLATE_VERSION
+  readonly createdAt: string                      // ISO 8601 UTC
+}
+
+export interface SynthesisInputs {
+  readonly cfg: AgentConfig
+  readonly llm: BaseChatModel                     // already createLLM(cfg)'d
+  readonly members: readonly string[]             // sorted canonical names (caller pre-sorts)
+  readonly compositeName: string                  // validated or derived
+  readonly dryRun: boolean                        // true → emit prompts, no LLM, no fs writes
+  readonly budgetTokens: number                   // combined Stage-1 + Stage-2 cap
+  readonly logger: Logger
+}
+
+export interface SynthesisResult {
+  readonly doc: string                            // full schema-3 markdown body
+  readonly frontmatter: CompositeSchemaV3Frontmatter
+  readonly totalTokens: number                    // sum of Stage-1 + Stage-2 input+output
+  readonly cacheHit: boolean                      // top-level cache hit (not Stage-1 distill)
+}
+
+// --- Wrapper shim (form b) ---
+
+export interface CompositeWrapperShimSpec {
+  readonly compositeName: string
+  readonly members: readonly string[]
+  readonly cliAgentBinPath: string                // absolute, resolved at synthesis time
+  readonly capabilityDocPath: string              // absolute path to mirror copy
+  readonly shimDir: string                        // composites/<id>/
+  readonly synthesizedAt: string
+}
+
+// --- Virtual tool (form c) ---
+
+export type DispatchMode = 'child-process' | 'in-process'
+
+export interface VirtualToolHandle {
+  readonly name: string                           // composite id
+  readonly manifest: CompositeManifest
+  readonly description: string                    // loaded from manifest.capabilityDocPath
+  readonly dispatch: (args: readonly string[]) => Promise<{
+    exitCode: number
+    stdout: string
+    stderr: string
+  }>
+}
+
+// --- Provider-agnostic prompt cache helper (U-CACHE) ---
+
+export type ProviderFamily =
+  | 'anthropic'         | 'openai'           | 'azure-openai'
+  | 'azure-inference'   | 'google-gemini'    | 'litellm-anthropic'
+  | 'litellm-openai'    | 'ollama'           | 'local-compat'
+
+export interface SynthesisCacheOptions {
+  readonly providerFamily: ProviderFamily
+  readonly prefixEndIndex: number                 // messages 0..N marked for cache
+  readonly anthropicTtl?: '5m' | '1h'             // ignored on non-Anthropic
+}
+```
+
+Function-level contracts (each unit's owned exports):
+
+```typescript
+// U-FLAGS — src/cli-composite-flags.ts
+export interface CompositeCliFlags {
+  readonly treatAsTool: boolean
+  readonly compositeName: string | null
+  readonly emitDoc: boolean                       // true by default with --treat-as-tool
+  readonly emitWrapper: boolean
+  readonly emitWrapperOnPath: boolean
+  readonly registerVirtual: boolean
+  readonly regenerateCapabilities: boolean
+  readonly dryRunSynthesis: boolean
+  readonly synthesisBudgetTokens: number          // default 32768
+  readonly forceOverwrite: boolean
+}
+export function parseCompositeFlags(opts: Record<string, unknown>): CompositeCliFlags
+export function enforceCompositeFlagMatrix(flags: CompositeCliFlags, opts: { help: boolean; tools: readonly string[] }): void  // throws UsageError per §14.H
+
+// U-SYNTH — src/agent/composite/synthesizer.ts
+export async function synthesizeComposite(input: SynthesisInputs): Promise<SynthesisResult>
+
+// U-CACHE — src/agent/composite/llm-cache.ts
+export function withSynthesisCache(messages: BaseMessage[], options: SynthesisCacheOptions): BaseMessage[]
+export function extractCacheUsage(responseMetadata: Record<string, unknown>): {
+  cachedTokens: number
+  cacheCreationTokens: number
+  provider: 'anthropic' | 'openai-compat' | 'unknown'
+}
+export function resolveProviderFamily(cfg: AgentConfig): ProviderFamily
+
+// U-DOC — src/agent/composite/cache.ts + composeCompositeDoc.ts
+export const COMPOSITE_CAPABILITY_SCHEMA_VERSION: 3
+export const SUPPORTED_COMPOSITE_SCHEMA_VERSIONS: ReadonlySet<number>  // = {3} in v1
+export function computeCompositeCacheKey(input: {
+  members: readonly string[]
+  memberDigests: Readonly<Record<string, string>>
+  cliAgentVersion: string
+  schemaVersion: number
+  compositeName: string
+  synthesisModel: string
+}): string
+export function computeMemberDocDigest(memberDocPath: string): Promise<string>
+export function canonicaliseMemberDoc(text: string): string
+export function readCompositeCacheEntry(path: string): Promise<{
+  frontmatter: CompositeSchemaV3Frontmatter
+  body: string
+  userRecipes: string
+  userNotes: string
+} | null>
+export function writeCompositeCacheEntry(path: string, doc: string): Promise<void>
+export function mirrorCompositeDocToCapabilities(compositeName: string, fromPath: string, capabilitiesDir: string): Promise<void>
+export function composeCompositeDoc(input: {
+  frontmatter: CompositeSchemaV3Frontmatter
+  body: string                                    // AUTO-GEN body from Stage-2
+  recipes: string                                 // pre-filled by Stage-2 OR preserved
+  notes: string                                   // empty on first synthesis OR preserved
+}): string
+
+// U-WRAPPER — src/agent/composite/shim-writer.ts
+export async function generateCompositeWrapperShim(spec: CompositeWrapperShimSpec): Promise<{ shimPath: string; mode: number }>
+export async function generatePathSymlink(shimPath: string, symlinkDir: string, compositeName: string): Promise<{ symlinkPath: string }>
+
+// U-VIRTUAL — src/agent/composite/{manifest,virtual-registry,dispatcher}.ts
+export async function readManifest(path: string): Promise<CompositeManifest | null>
+export async function writeManifest(path: string, manifest: CompositeManifest, opts: { force: boolean }): Promise<void>
+export async function loadVirtualTools(cfg: AgentConfig, logger: Logger): Promise<readonly VirtualToolHandle[]>
+export async function dispatchComposite(input: {
+  manifest: CompositeManifest
+  invocationArgs: readonly string[]
+  mode: DispatchMode
+  cfg: AgentConfig
+  logger: Logger
+}): Promise<{ exitCode: number; stdout: string; stderr: string }>
+
+// U-CMD — src/commands/composite/*
+export async function runCompositeSynthesize(opts: CompositeCliFlags & { tools: readonly string[]; help: boolean }): Promise<void>
+export async function runCompositeList(opts: { json?: boolean }): Promise<void>
+export async function runCompositeShow(name: string, opts: { json?: boolean }): Promise<void>
+export async function runCompositeDelete(name: string, opts: { yes?: boolean }): Promise<void>
+export function validateCompositeName(name: string): string                  // returns name on pass; throws UsageError on regex fail
+export function deriveCompositeName(members: readonly string[], cliAgentVersion: string, schemaVersion: number): string
+```
+
+These interfaces are the load-bearing contract. No unit may broaden a
+return shape, narrow an input, or add required parameters without
+explicit cross-unit coordination.
+
+### §14.E Subcommand surface (flat hyphenated — ADR-CMP-4)
+
+Per the codebase convention (five existing flat-hyphenated subcommands;
+zero nested groups) and plan-005's ADR-PROF-5 precedent, composite
+subcommands are flat-hyphenated. The refined-spec wording
+`cli-agent composite synthesize` (which reads as a nested group) is
+rendered with hyphens — mechanically reversible if the user prefers
+nested.
+
+| Subcommand | Effect | Default exit codes |
+|---|---|---|
+| `composite-synthesize --tool <m1> --tool <m2> [--composite-name <id>] [--regenerate] [--emit-wrapper] [--emit-wrapper-on-path] [--register-virtual] [--dry-run] [--force-overwrite] [--synthesis-budget-tokens <n>] [--no-emit-doc]` | Run the synthesis pipeline; produce all artifacts opted in via flags. Same pipeline as `--treat-as-tool --help`; this entry point is for non-interactive / CI use. | 0 / 2 (UsageError) / 3 (ConfigurationError) / 6 (cache stale) |
+| `composite-list [--json]` | Tabular listing of registered virtual composites (manifest scan): name, members, cli-agent version, createdAt. Empty registry → hint message. | 0 / 6 (IO error) |
+| `composite-show <id> [--json]` | Print the cached composite doc (raw markdown by default). `--json` opt-in returns `{ frontmatter, body, recipes, notes }`. | 0 / 2 (missing) |
+| `composite-delete <id> [--yes]` | Remove manifest + wrapper folder + cached canonical doc + mirror copy + symlink (if present). Confirmation prompt unless `--yes`. Idempotent on already-missing artifacts. | 0 / 2 (missing without `--yes`) |
+
+Output formats follow the §12.E precedent: human-readable by default
+(table style for `composite-list`, raw markdown for `composite-show`);
+`--json` is opt-in for `composite-list` and `composite-show`.
+
+The flag-driven path (`--treat-as-tool --help` on the default command)
+remains the **primary documented user-facing path**; the four
+subcommands above are equivalents for scripting and CI (FR-CMP-022).
+
+### §14.F Filesystem layout
+
+The composite subsystem owns three new directories and four file shapes.
+All directories are created by `bootstrapAgentDir` at mode `0o700`
+(extending the existing five-directory scaffold). All files are written
+atomically (temp + rename) at the modes listed below.
+
+```
+~/.tool-agents/cli-agent/
+  capabilities/                                 (existing, mode 0700)
+    <member-tool>.md                            (existing, mode 0600)  schema-2 member docs
+    <composite-id>.md                           (NEW, mode 0600)        ← MIRROR COPY of composite/<id>.md
+                                                                         (ADR-CMP-12; consumed by composeCapabilitiesSystemPrompt)
+    composite/                                  (NEW, mode 0700)
+      <composite-id>.md                         (NEW, mode 0600)        ← canonical schema-3 composite doc
+      _distill/                                 (NEW, mode 0700)
+        <member>@<digest>.json                  (NEW, mode 0600)        ← Stage-1 per-member cache
+                                                                         filename: <member>@<sha256[:16]>.json
+                                                                         contents: { memberName, content,
+                                                                                    modelId, templateVersion,
+                                                                                    createdAt }
+  composites/                                   (NEW, mode 0700)
+    <composite-id>/                             (NEW, mode 0700)
+      <composite-id>                            (NEW, mode 0755)        ← POSIX shim (form b; opt-in)
+      manifest.json                             (NEW, mode 0600)        ← virtual-tool manifest (form c; opt-in)
+      .lock                                     (advisory, transient)   ← O_EXCL race guard for parallel
+                                                                         registrations (R-8 mitigation)
+  ~/.local/bin/<composite-id>                   (NEW, symlink; opt-in)  ← --emit-wrapper-on-path
+                                                                         points at composites/<id>/<id>
+```
+
+**Composite-name validation rules** (FR-CMP-011):
+
+- Regex: `^[a-z][a-z0-9_-]{0,62}$` (max 63 chars; lowercase alphanumeric
+  + `_` + `-`; must start with a letter).
+- Violations: `UsageError` exit 2 with message
+  `composite-name '<id>' violates ^[a-z][a-z0-9_-]{0,62}$`.
+- Filesystem-character invariants: the regex is strictly tighter than
+  the POSIX portable-filename character set, so no further filename
+  validation is needed.
+
+**Auto-derivation when `--composite-name` is omitted** (FR-CMP-011):
+
+- `<sorted-members-joined-by-+>@<hash8>` where `<hash8>` is the first 8
+  hex chars of `sha256(JSON.stringify({ members, memberDigests,
+  cliAgentVersion, schemaVersion }))`.
+- Example: members `[file-cli, outlook-cli]` → `file-cli+outlook-cli@a1b2c3d4`.
+- The derived name MUST also pass the regex; if `+` would violate, the
+  derivation falls back to all-`-` (NEVER silently — but in v1 the spec
+  members are guaranteed to satisfy the regex by `--tool` validation).
+
+**Atomic write pattern** (used by every composite-owned writer):
+
+1. `await fs.writeFile(tmpPath, content, { mode: 0o600 })` (or 0o755 for shim).
+2. `await fs.rename(tmpPath, finalPath)` — atomic on the same filesystem.
+3. If the rename throws `EXDEV` (cross-device), surface `ConfigurationError`
+   exit 3 with a message pointing the user to keep `~/.tool-agents/`
+   on the home filesystem.
+
+### §14.G Synthesis pipeline integration
+
+The synthesis pipeline is owned by U-SYNTH and consumes the
+provider-cache helper (U-CACHE). It calls the existing `createLLM(cfg)`
+factory (`src/agent/providers/registry.ts:24–30`) — there is no new LLM
+wiring, no alternate provider, no alternate auth.
+
+**Stage-1 prompt template** (high level; verbatim text in
+`src/agent/composite/prompts.ts`):
+
+```
+SYSTEM
+  You are a capability-distillation pre-processor for cli-agent's composite-tool
+  synthesis pipeline. Given a member tool's full capability document, emit a
+  STRUCTURED INTENT SURFACE in YAML with: top-level intents (verbs the user
+  might want), a parameter glossary (canonical name → 1-line purpose),
+  illustrative single-tool examples (≤ 3), and any noted constraints/quirks.
+  Refrain from emitting credential placeholders. Output target: ~2 KB.
+
+USER
+  ## Member tool: <memberName>
+  <canonicalised member-doc bytes>
+```
+
+**Stage-2 prompt template** (high level):
+
+```
+SYSTEM (the static prefix; sized ≥1024 tokens to satisfy provider cache thresholds)
+  You are the composite synthesizer for cli-agent. You compose a SINGLE
+  capability document for a composite tool from per-member intent surfaces.
+  The output document must contain: synopsis, top-level cross-tool intents,
+  a parameter glossary that disambiguates by member, illustrative cross-tool
+  recipes for the USER-RECIPES block (3–7 recipes), and any cross-tool
+  constraints. Use AUTO-GENERATED:START/END markers around the synthesised
+  body and USER-RECIPES:START/END / USER-NOTES:START/END markers around
+  the user-editable blocks (USER-NOTES empty on first synthesis). Refrain
+  from emitting credential placeholders.
+
+USER (HumanMessage with two content blocks)
+  Block 0 (the cacheable members block):
+    ## file-cli
+    <Stage-1 distillation>
+    ---
+    ## outlook-cli
+    <Stage-1 distillation>
+
+  Block 1 (the variable compose instruction):
+    Compose the composite "<compositeName>" capability doc.
+    Members (sorted): [file-cli, outlook-cli]. Today: <ISO date>.
+    Frontmatter is provided by the host; emit only the body below the
+    H1 title `# <compositeName> — capability document`.
+```
+
+**`withSynthesisCache` placement**: applied to the Stage-2 message
+array AFTER assembly, with `prefixEndIndex: 1` (cache through the
+HumanMessage members block). The compose-instruction block (Block 1
+inside the HumanMessage) is the dynamic tail and is NOT marked. On
+Anthropic, two `cache_control` markers are emitted (one on the system
+message's last content block, one on the members block); on
+OpenAI/Azure/Gemini, the helper returns messages unmodified and prefix
+stability handles caching automatically.
+
+**Profile interaction**: synthesis re-uses the active profile's
+provider/model via `cfg.activeProfileData?.cliParams?.{provider,model}`
+already resolved by `loadAgentConfig`. The active profile's `tools.allow
+/deny/order` is **NOT** consulted for member selection (FR-CMP-019);
+only the explicit `--tool` flags constitute the member set. The active
+profile's `toolArgs` is **NOT** embedded in the synthesised doc. The
+profile's `name` is recorded in `frontmatter.activeProfile` for
+traceability only. This is the entire profile passthrough surface —
+all other plan-005 profile machinery (scoping, tool-args injection)
+is bypassed during synthesis.
+
+**Token-budget enforcement**: `budgetTokens` (default 32 768; CLI flag
+`--synthesis-budget-tokens <n>`; env `CLI_AGENT_COMPOSITE_BUDGET`;
+config key `composite.synthesisBudgetTokens`) caps the *combined*
+input + output tokens across Stage-1 (all members) + Stage-2. The
+synthesizer accumulates a running counter across both stages and:
+
+- Aborts Stage-1 mid-loop with `UsageError` exit 2 if the running total
+  would exceed the cap on the next member (Stage-1 cache writes already
+  performed are kept — they are independently durable).
+- Aborts Stage-2 with `UsageError` exit 2 if the response would push
+  the running total over the cap (no Stage-2 doc written).
+
+The error message names the consumed token count and the configured cap.
+There is no automatic fallback to a smaller pipeline. Per-stage budgets
+are NOT exposed in v1 (ADR-CMP-10 / OQ-3).
+
+### §14.H `--treat-as-tool` flag interaction matrix (canonical)
+
+This is the locked, enforceable matrix from the refined spec (§"Flag
+Interaction Matrix") with the OQ-7 / ADR-CMP-3 deviation applied to the
+`--regenerate-capabilities` row. Enforcement lives in
+`enforceCompositeFlagMatrix()` (U-FLAGS); `OK` rows pass through; `ERR-2`
+rows throw `UsageError` exit 2 with the documented message.
+
+| Flag set                                                  | Without `--treat-as-tool`                                                                                                              | With `--treat-as-tool` (no `--help`)         | With `--treat-as-tool` AND `--help`                                  |
+|-----------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------|----------------------------------------------|----------------------------------------------------------------------|
+| (none — bare invocation)                                  | Today's behaviour (byte-identical)                                                                                                     | Treated as a normal run; flag is metadata    | Synthesise composite doc; print to stdout; exit 0                    |
+| `--help`                                                  | Today's `--help` (pinned baseline)                                                                                                     | N/A (caught above)                           | Synthesise composite doc; print to stdout; exit 0                    |
+| `--regenerate-capabilities`                               | Existing `refresh-capabilities` flow on the default command? **NO — ERR-2 per ADR-CMP-3.** Message: `--regenerate-capabilities requires --treat-as-tool; use --refresh-capabilities for member-tool discovery refresh` | Force re-synthesis on next help; metadata    | Force re-synthesis; print fresh doc                                  |
+| `--composite-name <id>`                                   | ERR-2 (`--composite-name requires --treat-as-tool`)                                                                                    | OK; recorded if synthesis happens later      | OK; used as composite id                                             |
+| `--emit-doc` / `--no-emit-doc`                            | ERR-2 (`--emit-doc/--no-emit-doc requires --treat-as-tool`)                                                                            | OK; affects future synthesis                 | OK; gates writing the cached file                                    |
+| `--emit-wrapper` / `--emit-wrapper-on-path`               | ERR-2 (`--emit-wrapper requires --treat-as-tool`)                                                                                      | OK; deferred to next synthesis               | OK; writes shim after synthesis                                      |
+| `--register-virtual`                                      | ERR-2 (`--register-virtual requires --treat-as-tool`)                                                                                  | OK; deferred to next synthesis               | OK; writes manifest after synthesis                                  |
+| `--dry-run-synthesis`                                     | ERR-2 (`--dry-run-synthesis requires --treat-as-tool`)                                                                                 | OK; no-op (no synthesis would run)           | Print stage prompts + digests; do NOT call LLM; do NOT write cache   |
+| `--force-overwrite`                                       | ERR-2 (`--force-overwrite requires --treat-as-tool`)                                                                                   | OK; recorded for next synthesis              | OK; permits manifest/doc replacement on collision (FR-CMP-017)       |
+| `--synthesis-budget-tokens <n>`                           | OK (no-op; ignored without synthesis)                                                                                                  | OK (recorded for next synthesis in session)  | OK; enforced during synthesis                                        |
+| `--composite-name <id>` + existing different manifest     | (See above)                                                                                                                            | (See above)                                  | ERR-2 unless `--force-overwrite` (FR-CMP-017)                        |
+| `--treat-as-tool` with no `--tool` and `--help`           | N/A                                                                                                                                    | N/A (no synthesis)                           | ERR-2 (`composite synthesis requires at least one --tool argument`)  |
+| `--treat-as-tool` + member is a registered virtual composite | (member resolves via PATH/registry lookup as today)                                                                                  | ERR-2 at agent startup (recursion guard)     | ERR-2 (recursion guard, FR-CMP-016)                                  |
+| `--register-virtual` + recursion detected                 | (n/a)                                                                                                                                  | ERR-2 at registration time                   | ERR-2 at synthesis time                                              |
+| `--treat-as-tool` + `--resume`                            | (n/a)                                                                                                                                  | ERR-2 (`--treat-as-tool is incompatible with --resume`) | ERR-2 (same)                                            |
+
+The `--regenerate-capabilities` row is the single deviation from the
+refined spec's wording (which implies aliasing with
+`--refresh-capabilities`). Per ADR-CMP-3 / OQ-7, the two flags are
+*distinct*: silent aliasing was judged a maintenance landmine that
+hides the intent difference (introspection-only refresh vs LLM-driven
+synthesis). The deviation is mechanically reversible if the user
+prefers the spec's original aliasing semantics.
+
+### §14.I Three distribution forms (a / b / c)
+
+All three forms can coexist for the same `<id>`; the outer cli-agent's
+resolution order (§14.K) deterministically picks one path per
+invocation.
+
+| Form | Flag (default) | Artifact path (mode) | Lifetime | Outer-agent invocation contract |
+|---|---|---|---|---|
+| **(a) Doc only** | `--emit-doc` / `--no-emit-doc` (default ON whenever `--treat-as-tool` is in effect) | Canonical: `~/.tool-agents/cli-agent/capabilities/composite/<id>.md` (0600). Mirror: `~/.tool-agents/cli-agent/capabilities/<id>.md` (0600) — file copy, NOT symlink (ADR-CMP-12). | Overwritten on every successful synthesis (USER-RECIPES + USER-NOTES preserved byte-for-byte across rewrite per FR-CMP-010). Removed by `composite-delete <id>`. | The user shares / hand-edits / copies the file. The mirror is consumed automatically by `composeCapabilitiesSystemPrompt` whenever an outer cli-agent declares `--tool <id>` AND a binary exists for `<id>` (the doc-only form requires either the shim OR a third-party binary on PATH to actually invoke `--tool <id>`). |
+| **(b) Wrapper shim** | `--emit-wrapper` (default OFF) | `~/.tool-agents/cli-agent/composites/<id>/<id>` (0755 — executable). Optional symlink `~/.local/bin/<id>` if `--emit-wrapper-on-path` (default OFF). | Overwritten on every regeneration. Removed by `composite-delete <id>`. The shim refuses to run with exit 6 if its cached doc is missing (cache-stale). | Outer cli-agent finds `<id>` on PATH (when the shim's directory is on PATH or `--emit-wrapper-on-path` is set). On `--help`, the shim `exec cat`s the canonical composite doc; on any other args, the shim `exec`s the synthesis-time-resolved absolute `cli-agent` binary with the recorded `--tool <m1> --tool <m2> "$@"` list. The absolute path is captured at synthesis time (ADR-CMP-9 / OQ-6) — nvm/volta/asdf paths trigger a stderr warning at synthesis. |
+| **(c) Virtual tool** | `--register-virtual` (default OFF) | `~/.tool-agents/cli-agent/composites/<id>/manifest.json` (0600). | Overwritten on regeneration; manifest writes are atomic temp+rename with O_EXCL `.lock` for race protection (R-8). Removed by `composite-delete <id>`. | The cli-agent registry's `loadVirtualTools(cfg, logger)` scans `composites/*/manifest.json` at every startup and injects each as a `DynamicStructuredTool` between `buildAgentToolsGroup` and `applyProfileToolScoping` (`registry.ts:84`). When the outer cli-agent declares `--tool <id>`, the virtual-tool entry is matched (resolution order step 2 — see §14.K). The tool's runtime `invoke` calls `dispatchComposite(...)` which forks a child `cli-agent` (default; ADR-CMP-5) with the recorded member list and a fresh per-call agent state. In-process dispatch is opt-in via `composite.virtualDispatch=in-process` and explicitly experimental in v1. |
+
+**Defaults**: form (a) is the only default-ON distribution because it is
+information-only (no PATH or registry side-effects). Forms (b) and (c)
+are explicit opt-ins because they have visible side-effects on the
+filesystem and the tool registry — the user must consciously elect them
+(refined-spec Assumption A-4).
+
+### §14.J Help interception (Commander `helpOption(false)`)
+
+Commander v12 intercepts `--help` *before* the `.action()` callback
+fires (`src/cli.ts:384`'s `program.parseAsync(process.argv)`). To
+permit the composite branch on `--treat-as-tool --help`, Phase 4
+migrates the program from the auto-help mechanism to manual
+interception:
+
+```typescript
+// src/cli.ts (P4 migration)
+program.helpOption(false)                                                 // disable Commander's built-in --help / -h
+program.option('--help', 'Show help (composite-aware when --treat-as-tool)', false)
+program.option('-h, --help', …)                                           // re-register -h as alias on the manual flag
+
+// In the default command's .action() (lines 94–134):
+if (opts['help']) {
+  const tools: string[] = opts['tool'] ?? []
+  if (opts['treatAsTool']) {
+    if (tools.length === 0) {
+      throw new UsageError('composite synthesis requires at least one --tool argument')
+    }
+    return runComposite({ ...opts, tools, mode: 'help-synthesis' })       // composite branch
+  }
+  program.outputHelp()                                                     // existing behaviour, byte-identical
+  process.exit(0)
+}
+```
+
+The same `helpOption(false)` strategy is applied to each composite
+subcommand registration (so `cli-agent composite-synthesize --help`
+prints the subcommand's own usage rather than passing through to the
+composite branch).
+
+**Byte-stability guarantee for the no-`--treat-as-tool` path**
+(NFR-CMP-001): a regression test `test_scripts/help-baseline.spec.ts`
+diffs `node dist/cli.js --help` against a pinned baseline file
+`test_scripts/baselines/help-no-treat-as-tool.txt` (captured BEFORE the
+`helpOption(false)` migration). The diff must be empty for every CI
+run. The same pinning applies to each subcommand's `--help` (one
+baseline file per subcommand). Any future change that drifts the byte
+stream is caught by the regression test; intentional drifts must
+re-record the baseline as part of the same commit.
+
+### §14.K Virtual-tool dispatch (form c)
+
+Virtual-tool dispatch has two recursion guards and a default-subprocess
+isolation policy.
+
+**Guard at registration time** (`writeManifest` and the
+`--register-virtual` action): if any element of `members` is itself a
+registered virtual-tool name (i.e., another composite's manifest
+exists under `composites/<member>/manifest.json`), throw `UsageError`
+exit 2 with the FR-CMP-016 message
+`composite-of-composite is not supported in v1; member '<id>' is itself a composite`.
+
+**Guard at dispatch time** (`dispatchComposite`): re-check membership
+against the live registry on every dispatch (the manifest may have been
+updated since registration). Same `UsageError` if any member is a
+virtual composite.
+
+**Subprocess default** (ADR-CMP-5): `dispatchComposite` defaults to
+`mode: 'child-process'`. The child is forked via `child_process.spawn`
+on the synthesis-time-resolved absolute `cli-agent` binary path with
+the recorded `--tool` list. The child inherits a *minimal* env (the
+existing `passEnv` set per §7 security model) plus the recursion-guard
+env var:
+
+```
+CLI_AGENT_VIRTUAL_DISPATCH_RECURSION_GUARD=1
+```
+
+When the child boots, `loadVirtualTools(cfg, logger)` reads the env var
+at the top of its body and returns `[]` immediately — structurally
+preventing nested composites at the registry level even if a user
+manually adds a virtual composite as a member. This is the
+load-bearing recursion guard for the dispatch path; the manifest-time
+guard is a fast-fail safety net.
+
+**In-process opt-in** (ADR-CMP-5; experimental in v1): set
+`composite.virtualDispatch=in-process` (env `CLI_AGENT_VIRTUAL_DISPATCH=in-process`)
+to re-enter the cli-agent agent-graph builder with the recorded tool
+list, reusing the same Node process. Each call starts a *fresh*
+`MemorySaver` (per refined-spec O-2 → ADR-CMP-5: stateless from the
+caller's perspective). The integration test `dispatcher.spec.ts`
+asserts FR-CMP-015: same input produces identical observable output
+across both modes.
+
+**`composite_dispatched`** (JSONL event): emitted on every dispatch
+with `{ compositeName, mode, members, exitCode, latencyMs }`.
+**`composite_recursion_guarded`**: emitted when either guard fires.
+
+### §14.L Cache key + invalidation (closing O-1, O-4)
+
+The composite cache key is the deterministic concatenation of:
+
+```
+sha256(
+  sortedMembers.join(',')               // 1. canonical name list, sorted
+  ‖ JSON.stringify(memberDigests, sortedKeys)   // 2. per-member doc digest
+                                                //    (canonicalised, USER-* stripped)
+  ‖ cliAgentVersion                     // 3. running cli-agent semver
+  ‖ COMPOSITE_CAPABILITY_SCHEMA_VERSION  // 4. literal 3 in v1
+  ‖ compositeName                       // 5. explicit or derived name
+  ‖ synthesisModel                      // 6. "<vendor>:<modelId>"
+).hex().slice(0, 64)                    // full 64-char hex; truncated to 16 in
+                                         // syntheticDigest only
+```
+
+**Inputs explicitly excluded from the cache key** (per ADR-CMP-7 / OQ-1):
+
+- `tool-prompts/<member>.md` overlay digests (overlays change *prompt-time
+  description*, not capability-time bytes; the synthesis input is the
+  member's `--help`-derived capability doc, not its overlay).
+- `~/.tool-agents/cli-agent/.env` contents (credentials must not feed
+  cache keys; see §7 redaction policy).
+- The active profile's `tools.*` or `toolArgs` sections (synthesis
+  ignores them per FR-CMP-019).
+- Stage-2 LLM response content (the cache is keyed to inputs, not
+  outputs).
+
+**Invalidation triggers** (any single change → cache miss → re-synthesis):
+
+- A member's capability doc bytes changed (canonicalised digest differs).
+- A member added to or removed from `--tool` flags (members list shape changed).
+- The cli-agent binary's reported semver differs from the recorded value.
+- The composite-name changed (a different name → a different cache file).
+- The synthesis model changed (provider OR model id).
+- The composite schema version bumped (v1.x → v2.x cache miss; documented).
+
+**`cli-agent` version mismatch policy** (ADR-CMP-8 / OQ-4): when the
+running cli-agent reads a cached doc whose recorded `cliAgentVersion` is
+*older* than the running version, treat as a strict cache miss. The
+cache miss triggers re-synthesis on the next pipeline run, AND emits:
+
+- A one-line stderr notice:
+  `[cli-agent] composite '<id>' cached against cli-agent <oldver>; resynthesising for <newver>`
+- A JSONL event `composite_cache_version_mismatch` with payload
+  `{ compositeName, recordedVersion, runningVersion }`.
+
+There is no semver tolerance. The Stage-1 distill cache is independent
+of `cliAgentVersion` (it keys to `STAGE1_TEMPLATE_VERSION` + `cfg.model`),
+so member docs unchanged → Stage-1 hit → only Stage-2 re-runs on a
+version bump. Cost is bounded.
+
+**Future v1.1 instrumentation** (forward-looking only): the JSONL event
+`composite_synthesis_started` includes a forward-looking field
+`currentEffectiveOverlayDigests: { <member>: <digest> }` capturing the
+overlay digest at synthesis time. v1 does not consult this field for
+invalidation; production telemetry over a 30-day window will inform the
+v1.1 decision on whether to add overlay digests to the cache key.
+
+### §14.M Logging schema additions
+
+Nine new event kinds extend the `LogEvent` union in `src/agent/logging.ts`.
+All events are subject to the existing JSONL redaction policy
+(`redactString`); prompt and response *bodies* are NEVER logged — only
+their sha256[:16] digests, per FR-CMP-021 / A-12.
+
+| Event kind | Emitted at | Payload (top-level keys) |
+|---|---|---|
+| `composite_synthesis_started` | `synthesizeComposite()` entry | `compositeName`, `members[]`, `cacheHit`, `dryRun`, `providerFamily`, `stage1OnDiskHits`, `currentEffectiveOverlayDigests` (forward-looking; OQ-1 instrumentation) |
+| `composite_stage1_cached` | per-member, when distill cache hit | `compositeName`, `member`, `distillCacheKey`, `cacheFilePath` |
+| `composite_stage1_run` | per-member, when distill cache miss | `compositeName`, `member`, `promptDigest16`, `tokensInput`, `tokensOutput`, `latencyMs` |
+| `composite_stage2_run` | once per synthesis | `compositeName`, `promptDigest16`, `tokensInput`, `tokensOutput`, `latencyMs`, `providerCacheCreation`, `providerCacheRead` (the last two extracted via `extractCacheUsage` from the response — Anthropic's `cache_creation_input_tokens` / `cache_read_input_tokens` OR OpenAI-compat's `prompt_tokens_details.cached_tokens`; zeros on `unknown` providers) |
+| `composite_cache_hit` | top-level cache hit (cached doc returned without LLM contact) | `compositeName`, `cacheKey16`, `cacheFilePath` |
+| `composite_cache_miss` | top-level cache miss path entered | `compositeName`, `cacheKey16`, `reason` (one of `member_doc_changed`, `cli_agent_version_mismatch`, `members_changed`, `composite_name_changed`, `synthesis_model_changed`, `schema_version_changed`, `not_present`) |
+| `composite_cache_version_mismatch` | reading a doc whose `cliAgentVersion` is older than running | `compositeName`, `recordedVersion`, `runningVersion` |
+| `composite_dispatched` | virtual-tool dispatch invocation (form c) | `compositeName`, `mode` (`child-process`/`in-process`), `members[]`, `exitCode`, `latencyMs` |
+| `composite_recursion_guarded` | recursion guard at register-time OR dispatch-time | `compositeName`, `offendingMember`, `phase` (`register`/`dispatch`) |
+
+The `composite_emit` event from FR-CMP-021 is also retained (per
+artifact: `doc`, `wrapper`, `manifest`, `symlink`) with payload
+`{ artifact, absolutePath, mode }`. The five FR-CMP-021 events
+(`composite_synthesis_start/_stage/_end`, `composite_emit`,
+`composite_dispatch`) map onto the nine kinds above as follows:
+`_start` → `composite_synthesis_started`, `_stage` → `composite_stage1_run`
++ `composite_stage2_run`, `_end` → either `composite_cache_hit` or
+`composite_cache_miss` (the canonical end-of-synthesis disposition),
+`_emit` and `_dispatch` retained verbatim.
+
+### §14.N Test strategy
+
+Tests follow the existing two-layer convention: co-located `*.spec.ts`
+under `src/agent/composite/` and `src/commands/composite/` for unit-level
+coverage; `test_scripts/fixtures/synthesis/<scenario>/` folders for
+end-to-end pipeline scenarios.
+
+**Fixture pattern** (ADR-CMP-11): one folder per scenario. Each folder
+contains:
+
+```
+test_scripts/fixtures/synthesis/<scenario>/
+  inputs.json                     compositeName, members, cfg overrides
+  members/<m>.md                  fixture member capability docs
+  transcript.json                 { "<sha256-of-prompt>": "<canned LLM output>" }
+  expected.md                     expected composite doc bytes
+  expected-transcript.jsonl       expected JSONL event sequence (subset match)
+```
+
+**Stub-LLM dispatcher** (NFR-CMP-002): the test harness provides
+`test_scripts/lib/synthesisFixture.ts`:
+
+```typescript
+export async function loadScenario(name: string): Promise<{
+  stubLLM: BaseChatModel
+  inputs: SynthesisInputs
+  expectedDoc: string
+  expectedTranscript: LogEvent[]
+}>
+export async function recordScenario(name: string, realLLM: BaseChatModel): Promise<void>
+  // gated on process.env['RECORD'] === '1'; rewrites transcript.json
+```
+
+The stub LLM keys responses by `sha256(JSON.stringify(messages))[:16]`
+and throws `Error("No canned response for prompt digest <key>")` on
+miss — matching the `extract-recipes.spec.ts:41-44` precedent. Stubs
+operate at the `createLLM` factory boundary
+(`vi.spyOn(registry, 'createLLM').mockReturnValue(...)`) — never at
+the LangChain import level, preserving every other code path's real
+behaviour.
+
+**Required scenarios** (each is a folder under
+`test_scripts/fixtures/synthesis/`):
+
+- `two-cli-tools-happy-path/` — covers AC-2 (synthesis), AC-4 (cache hit),
+  AC-5 (cache miss on member doc change), AC-9 (derived name), AC-10
+  (`--no-emit-doc`).
+- `empty-recipes-edge-case/` — LLM-output that yields empty USER-RECIPES;
+  ensures markers still present.
+- `three-members-large-budget/` — covers `--synthesis-budget-tokens`
+  enforcement.
+- `with-overlay-applied/` — NFR-CMP-007 coexistence (member has overlay;
+  synthesis ignores overlay; OQ-1 instrumentation captures overlay digest
+  in JSONL).
+- `regenerate-preserves-user-blocks/` — covers AC-6 (USER-RECIPES + USER-NOTES
+  byte-preservation across regeneration).
+
+**Baseline-pinned regression** (NFR-CMP-001): the AC-1 invariant — that
+`cli-agent --help` (no `--treat-as-tool`) produces a byte-identical
+output stream pre and post the `helpOption(false)` migration — is
+asserted by `test_scripts/help-baseline.spec.ts` against the pinned
+file `test_scripts/baselines/help-no-treat-as-tool.txt`. The pinning
+runs on every CI invocation and fails the build on any drift.
+
+**Smoke scripts** (NFR-CMP-003 / NFR-CMP-004 / NFR-CMP-007):
+
+- `test_scripts/smoke-cache-hit-cost.ts` — process boot → stdout flushed
+  → exit 0 on a cache hit; assert ≤ 500 ms.
+- `test_scripts/smoke-synthesis-latency.ts` — synthesis under stub LLM
+  ≤ 30 s for a 2-member ≤32 KB composite.
+- `test_scripts/smoke-coexistence-end-to-end.ts` — profile active +
+  overlay applied to member + member has USER-RECIPES + synthesis +
+  outer cli-agent attaching the composite via `--tool <id>` produces a
+  coherent system prompt embedding the composite USER-RECIPES.
+
+### §14.O Coexistence with §11 overlays / §12 profiles / capability recipes / §13 TUI exit-resume
+
+The composite subsystem is orthogonal to all four pre-existing
+subsystems. The orthogonality table maps every interaction explicitly.
+
+| Concern | §11 Overlays (plan-004) | §12 Profiles (plan-005) | Capability recipes / `manRef` (plan-005-recipes) | §13 TUI exit/resume (plan-005-tui-exit) |
+|---|---|---|---|---|
+| Composite synthesis input | Member-tool overlays NOT in v1 cache key (ADR-CMP-7 / OQ-1). Overlay digest captured in JSONL telemetry only. | `cliParams.{provider,model,temperature,...}` flow through `loadAgentConfig` → `cfg`; `createLLM(cfg)` honours profile model. `tools.allow/deny/order` is **NOT** consulted for member selection (FR-CMP-019). `toolArgs` is **NOT** embedded in the synthesised doc. | Member doc bytes (canonicalised, USER-* blocks stripped) feed Stage-1. Composite docs always carry `manRef: null` per A-10. | No interaction (TUI is orthogonal to CLI flag plumbing). |
+| Composite synthesis output | Not affected. | `frontmatter.activeProfile = <name | null>` for traceability. Read-only from the profile loader. | Composite USER-RECIPES is pre-filled by Stage-2 (3–7 cross-tool recipes). Preserved byte-for-byte across `--regenerate-capabilities` (FR-CMP-010). | No interaction. |
+| Outer-agent consumption (when an outer cli-agent attaches a composite via `--tool <id>`) | Composites have no overlay file (overlay format applies to wrapped binaries; composites are virtual). The composite's USER-RECIPES section is the only user-editable surface for prompt customisation. | Profile scoping applies to virtual tools — `loadVirtualTools` injects them into `assembled` BEFORE `applyProfileToolScoping` (`registry.ts:84`); so a profile's `tools.allow/deny` can include or exclude a composite by id, exactly like a native tool. | `composeCapabilitiesSystemPrompt` reads the mirror copy at `capabilities/<id>.md` like any other capability doc; USER-RECIPES embeds within the per-tool byte budget; synopsis falls back when over budget (FR-CMP-020). The composite's `manRef: null` is honoured by the existing `extractManRef` parser. | `--treat-as-tool` is incompatible with `--resume` — `UsageError` exit 2 on the combination. |
+| Bootstraps | No overlap; overlay dir owned by §11. | No overlap; profiles dir owned by §12. | No bootstrap (additive frontmatter). | No overlap; snapshot dir owned by §13. |
+| New bootstrap dirs (this plan) | — | — | — | `capabilities/composite/`, `capabilities/composite/_distill/`, `composites/` (additive; mode 0700) |
+
+The composite subsystem does NOT modify the overlay loader, the profile
+loader, the recipe extractor, or the TUI exit/resume snapshot store.
+The only existing read site touched is `compose-system-prompt.ts:99`
+(extended with a `composite/` fallback in U-DOC); the registry seam
+at `registry.ts:84` gains one new call (`loadVirtualTools`) inserted
+between `buildAgentToolsGroup` and `applyProfileToolScoping`.
+
+### §14.P Phase 6 parallel implementation units (interface contracts)
+
+Phase 6 fans out into seven implementation units. Each unit consumes
+only the foundation modules delivered by P3–P5 (paths, schema constant,
+type definitions, cache reader scaffolding, derive-name helper, baseline
+regression test) and the interface contracts in §14.D. Integration
+happens at module boundaries locked by P3–P5; no two units edit the
+same line of `src/cli.ts` or `src/agent/tools/registry.ts` (R-12
+mitigation).
+
+| Unit | Imports from foundation (P3–P5) | Exports to other units | Owned files (created or fully owned) |
+|---|---|---|---|
+| **U-FLAGS** | `AgentCliFlags` (P3), `UsageError` (errors.ts), `helpOption(false)` migration (P4) | `CompositeCliFlags`, `parseCompositeFlags`, `enforceCompositeFlagMatrix` (consumed by U-CMD) | `src/cli-composite-flags.ts`, `src/cli-composite-flags.spec.ts`. Edits in `src/cli.ts` lines 49–93 (default-command options block). |
+| **U-SYNTH** | `CompositeSchemaV3Frontmatter`, `Stage1Distillation`, `SynthesisInputs`, `SynthesisResult` (types.ts), `computeMemberDocDigest`, `composeCompositeDoc` (P5), `createLLM` (`providers/registry.ts`), `withSynthesisCache`, `extractCacheUsage`, `resolveProviderFamily` (U-CACHE) | `synthesizeComposite(input): Promise<SynthesisResult>` (consumed by U-CMD); Stage-1 distill cache helpers `readDistillCacheEntry` / `writeDistillCacheEntry` (consumed by future v1.1 audit hooks) | `src/agent/composite/synthesizer.ts`, `stage1.ts`, `stage2.ts`, `prompts.ts`, `synthesizer.spec.ts`, `stage1.spec.ts`, `stage2.spec.ts`. |
+| **U-CACHE** | `BaseMessage` (`@langchain/core/messages`), `AgentConfig` (P3) | `withSynthesisCache`, `extractCacheUsage`, `resolveProviderFamily`, `ProviderFamily`, `SynthesisCacheOptions` (consumed by U-SYNTH) | `src/agent/composite/llm-cache.ts`, `llm-cache.spec.ts`. |
+| **U-DOC** | `CompositeSchemaV3Frontmatter` (types.ts), `canonicaliseMemberDoc` helper (P5), USER-* block parsers (existing `composeMarkdown.ts`) | `COMPOSITE_CAPABILITY_SCHEMA_VERSION`, `computeCompositeCacheKey`, `computeMemberDocDigest`, `readCompositeCacheEntry`, `writeCompositeCacheEntry`, `mirrorCompositeDocToCapabilities`, `composeCompositeDoc` (consumed by U-SYNTH and U-CMD) | `src/agent/composite/cache.ts` (full body; P5 stub becomes complete), `composeCompositeDoc.ts`, both specs. Small extension to `src/agent/capabilities/compose-system-prompt.ts` (composite/ fallback). |
+| **U-WRAPPER** | `CompositeWrapperShimSpec` (types.ts), atomic temp+rename helper (existing in `agent-config.ts`) | `generateCompositeWrapperShim`, `generatePathSymlink` (consumed by U-CMD) | `src/agent/composite/shim-writer.ts`, `shim-writer.spec.ts`, `test_scripts/shim-e2e.ts`. |
+| **U-VIRTUAL** | `CompositeManifest`, `VirtualToolHandle`, `DispatchMode` (types.ts), `AgentConfig` (P3), `Logger` (logging.ts) | `readManifest`, `writeManifest`, `loadVirtualTools`, `dispatchComposite` (consumed by U-CMD and `registry.ts:84`) | `src/agent/composite/manifest.ts`, `virtual-registry.ts`, `dispatcher.ts`, all three specs. Edit in `src/agent/tools/registry.ts:84` (single insertion site). |
+| **U-CMD** | `CompositeCliFlags` (U-FLAGS), `synthesizeComposite` (U-SYNTH), `writeCompositeCacheEntry`, `mirrorCompositeDocToCapabilities` (U-DOC), `generateCompositeWrapperShim` (U-WRAPPER), `writeManifest` (U-VIRTUAL), `validateCompositeName`, `deriveCompositeName` (P5) | (no exports to other P6 units) | `src/commands/composite/synthesize.ts`, `regenerate.ts`, `list.ts`, `show.ts`, `delete.ts`, `derive-name.ts` (filled — P5 stubbed), `shared.ts`, all specs. Subcommand registrations in `src/cli.ts` (separate region from U-FLAGS' edits). |
+
+If seven parallel coders are not available, the natural pair-up is:
+
+- `(U-FLAGS + U-CMD)` — both touch `src/cli.ts` and the command surface
+  (different line regions; no merge conflict).
+- `(U-SYNTH + U-CACHE)` — synthesizer consumes the cache helper directly.
+- `(U-DOC)` standalone.
+- `(U-WRAPPER + U-VIRTUAL)` — both write under `composites/<id>/`.
+
+This contracts to four effective workstreams.
+
+**Merge-conflict mitigation** (R-12): P5 lands ALL flag/env/subcommand-stub
+registrations BEFORE P6 fans out. P6 unit U-FLAGS owns `src/cli.ts`
+lines 49–93 (default-command options). U-CMD owns the
+`program.command(...)` registrations (different file region). U-VIRTUAL
+owns `src/agent/tools/registry.ts:84` (single insertion). No two units
+edit the same line.
+
+### §14.Q Architectural decisions (ADRs)
+
+The twelve ADRs locked in plan-006 §6 are restated here for completeness;
+two additional decisions emerged during this design phase.
+
+- **ADR-CMP-1 — Pipeline shape**. **Decision**: two-stage (Stage-1
+  per-member distill + Stage-2 compose) with Stage-1 outputs cached as
+  addressable per-member artifacts at `capabilities/composite/_distill/<member>@<digest>.json`.
+  **Rationale**: refined-spec FR-CMP-006 + investigation Recommendation #1.
+  Stage-1 outputs are ~500 tokens each — below every provider's 1 024-token
+  cache threshold — so on-disk addressable cache is the only effective
+  Stage-1 mechanism. Provider-side prompt caching is reserved for Stage-2.
+  **Alternatives rejected**: single combined prompt (loses per-member
+  reusability across composites), three-stage with intermediate review
+  pass (over-engineered for v1 surface). **Status**: Locked.
+
+- **ADR-CMP-2 — Wrapper shim shebang**. **Decision**: `#!/bin/sh`
+  (NOT `#!/usr/bin/env bash`); no `set -euo pipefail`; `exec` for both
+  cat and cli-agent. **Rationale**: matches npm's battle-tested `cmd-shim`
+  reference (research §13); eliminates Alpine/no-bash failure mode;
+  POSIX-portable (`pipefail` is non-POSIX-2017). The shim body uses only
+  POSIX `sh` constructs. **Alternatives rejected**: `#!/usr/bin/env bash`
+  per investigator's recommendation — defensible on macOS+mainstream Linux
+  but introduces unnecessary portability risk. **Status**: Locked
+  (deviation from refined-spec FR-CMP-013 wording; reversible).
+
+- **ADR-CMP-3 — `--regenerate-capabilities` is distinct from
+  `--refresh-capabilities`**. **Decision**: the two flags are NOT aliases.
+  Without `--treat-as-tool`, `--regenerate-capabilities` exits 2 with a
+  guidance message pointing to `--refresh-capabilities`. **Rationale**:
+  silent aliasing creates a maintenance landmine and hides intent
+  (introspection-only refresh vs LLM-driven synthesis). **Alternatives
+  rejected**: silent aliasing per refined-spec FR-CMP-010 wording.
+  **Status**: Locked (deviation; OQ-7 confirmation pending).
+
+- **ADR-CMP-4 — Subcommand surface is flat hyphenated**. **Decision**:
+  `composite-synthesize`, `composite-list`, `composite-show`,
+  `composite-delete`. **Rationale**: codebase convention (5 existing
+  flat-hyphenated subcommands; zero nested groups) + plan-005 ADR-PROF-5
+  precedent. **Alternatives rejected**: nested `cli-agent composite synthesize`
+  per refined-spec FR-CMP-022 wording. **Status**: Locked (mechanically
+  reversible).
+
+- **ADR-CMP-5 — Virtual-tool dispatch default**. **Decision**:
+  `child-process` is the default; `in-process` is opt-in via
+  `composite.virtualDispatch=in-process` AND explicitly experimental in v1.
+  **Rationale**: investigation Recommendation #3 — LangGraph subgraph
+  re-entry has known state-pollution hazards (Issue #3020); subprocess
+  dispatch is the tested production path. **Alternatives rejected**:
+  in-process default, in-process only (closes OQ-2). **Status**: Locked.
+
+- **ADR-CMP-6 — Schema versioning**. **Decision**: a separate constant
+  `COMPOSITE_CAPABILITY_SCHEMA_VERSION = 3` lives in
+  `src/agent/composite/cache.ts`. The existing
+  `CAPABILITY_SCHEMA_VERSION = 2` in `src/agent/capabilities/composeMarkdown.ts`
+  is **NOT** modified. The composite reader is a separate function;
+  member-tool docs continue to be loaded by the existing reader.
+  **Rationale**: investigation Recommendation #4; codebase scan §IP-4.
+  Bumping the existing constant would invalidate every member-tool cache
+  entry in the wild. **Alternatives rejected**: bump `CAPABILITY_SCHEMA_VERSION = 3`,
+  share the reader. **Status**: Locked.
+
+- **ADR-CMP-7 — Cache key composition (overlay digest)**. **Decision**:
+  the cache key is exactly the FR-CMP-009 set: `(sortedMembers,
+  memberDigests, cliAgentVersion, COMPOSITE_CAPABILITY_SCHEMA_VERSION,
+  compositeName, synthesisModel)`. **Overlay digest is NOT included.**
+  The current effective overlay digest is recorded in
+  `composite_synthesis_started.currentEffectiveOverlayDigests` for v1.1
+  instrumentation only. **Rationale**: investigation Recommendation #5
+  (closes OQ-1). Synthesis input is `--help`-derived bytes, not overlay
+  text. Including overlay digest would force re-synthesis on cosmetic
+  edits and defeat the cache. Users force fresh synthesis explicitly
+  via `--regenerate-capabilities`. **Alternatives rejected**: include
+  overlay digest. **Status**: Locked.
+
+- **ADR-CMP-8 — Older cli-agent version cache policy**. **Decision**:
+  strict mismatch = cache miss with stderr notice and
+  `composite_cache_version_mismatch` JSONL event. No semver tolerance.
+  **Rationale**: closes OQ-4; the cache key already contains
+  `cli-agent-version`; minor-version tolerance is invisible policy that
+  drifts in production. The notice + telemetry preserves user awareness
+  without prompting. Re-synthesis cost is bounded by the on-disk
+  Stage-1 cache. **Alternatives rejected**: minor-version tolerance,
+  silent re-synthesis without notice. **Status**: Locked.
+
+- **ADR-CMP-9 — Wrapper shim binary path**. **Decision**: absolute path
+  resolved at synthesis time. nvm/volta/asdf detection produces a
+  stderr warning (non-fatal) at synthesis time. **Rationale**: shim
+  research §6 (closes OQ-6) — PATH lookup at execution time is
+  unreliable; the composites directory may not be on PATH; user PATH
+  may differ at synthesis vs invocation. Cross-machine sync is
+  explicitly deferred (refined-spec Out-of-scope §2). **Alternatives
+  rejected**: PATH lookup at runtime, embedded relative path.
+  **Status**: Locked.
+
+- **ADR-CMP-10 — Synthesis budget knob**. **Decision**: one combined
+  `--synthesis-budget-tokens` (default 32 768). No per-stage budgets in
+  v1. **Rationale**: research-prompt-caching Finding 1 (closes OQ-3) —
+  Stage-1 outputs (~500 tokens each) sit below every provider's
+  1 024-token cache threshold. Splitting the budget creates a UX surface
+  that v1 cannot calibrate. The combined cap is sufficient for the
+  2–5 member surface. **Alternatives rejected**: per-stage budgets,
+  no budget. **Status**: Locked.
+
+- **ADR-CMP-11 — Test fixture pattern**. **Decision**: folder per
+  scenario under `test_scripts/fixtures/synthesis/<name>/` with
+  `inputs.json`, `members/*.md`, `transcript.json`, `expected.md`.
+  Recordable via `RECORD=1` env var. **Rationale**: investigation
+  Recommendation #6; matches the project's existing
+  `test_scripts/fixtures/` precedent. **Alternatives rejected**:
+  inline-string fixtures (poor diffability), single transcript per
+  test file (couples scenarios). **Status**: Locked.
+
+- **ADR-CMP-12 — Composite-doc co-location**. **Decision**: write the
+  canonical doc to `capabilities/composite/<id>.md` AND mirror (file
+  copy, NOT symlink) to `capabilities/<id>.md` so the existing
+  `composeCapabilitiesSystemPrompt` (`compose-system-prompt.ts:99`)
+  finds it without code changes. The function is also extended (U-DOC)
+  to fall back to the `composite/` subdirectory if the mirror is
+  absent (defensive). **Rationale**: codebase scan §IP-3 / §Notes —
+  symlinks are problematic on Windows (out of scope) and on backup
+  systems that don't preserve them; file copy is portable and the
+  mirror's freshness is enforced by `composite-delete` removing both.
+  **Alternatives rejected**: symlink, single canonical location with
+  reader changes (broader blast radius). **Status**: Locked.
+
+New ADRs introduced during this design phase:
+
+- **ADR-CMP-13 — Manifest race protection via O_EXCL `.lock`**.
+  **Decision**: `writeManifest` wraps the read-then-write sequence in
+  an O_EXCL lock at `composites/<id>/.lock`. On contention, exit 1
+  with `concurrent registration in progress; retry`. **Rationale**:
+  R-8 from plan-006 §8 — two parallel `--register-virtual` invocations
+  for the same composite name could race the manifest write. A real
+  POSIX advisory lock would require a native module; the O_EXCL file
+  approach is filesystem-portable, atomic on the same filesystem, and
+  trivially cleaned up by the rare-contention path. v1.1 may upgrade
+  to a flock-based scheme if real contention is observed.
+  **Alternatives rejected**: no lock (race window observable in
+  scripted CI runs), POSIX flock (native dep). **Status**: Locked.
+
+- **ADR-CMP-14 — Stage-1 cache key omits `cli-agent` version**.
+  **Decision**: the Stage-1 distill cache key is
+  `sha256(memberDocCanonical ‖ STAGE1_TEMPLATE_VERSION ‖ cfg.model)[:16]`,
+  intentionally NOT including `cliAgentVersion`. **Rationale**: a
+  cli-agent version bump that changes synthesis prompts will already
+  bump `STAGE1_TEMPLATE_VERSION` (by code change). Including
+  `cliAgentVersion` would invalidate the Stage-1 cache on every
+  cli-agent release, undoing the bounded-cost guarantee for the
+  ADR-CMP-8 mismatch path. The Stage-2 cache key (the top-level
+  composite key) DOES include `cliAgentVersion`, so version mismatches
+  still trigger top-level re-synthesis — only the per-member
+  distillation is preserved. **Alternatives rejected**: include
+  cliAgentVersion in the Stage-1 key (breaks the bounded-cost
+  guarantee), include in both keys redundantly (no value).
+  **Status**: Locked.
+
+ADR deviations summary (from refined spec, for at-a-glance scan):
+
+- **ADR-CMP-2** — shim shebang is `#!/bin/sh`, not `#!/usr/bin/env bash`.
+- **ADR-CMP-3** — `--regenerate-capabilities` and `--refresh-capabilities`
+  are distinct, not aliases (OQ-7 pending user confirmation).
+- **ADR-CMP-4** — subcommands are flat hyphenated (codebase consistency).
+
+All three deviations are flagged in plan-006 §0 (OQ-6 covers ADR-CMP-9;
+OQ-7 covers ADR-CMP-3) and are mechanically reversible if the user
+prefers the original spec wording.

@@ -1,0 +1,80 @@
+Usage: cli-agent [options] [command] [prompt]
+
+Generic LangGraph ReAct agent that wraps external CLI binaries.
+
+Arguments:
+  prompt                                          One-shot prompt for the agent
+
+Options:
+  -V, --version                                   output the version number
+  -i, --interactive                               Start an interactive REPL session (default: false)
+  -r, --resume [threadId]                         Resume a previous TUI thread (omit threadId to use the last active session from cursor.json)
+  --tool <name>                                   CLI binary to wrap (repeatable) (default: [])
+  -p, --provider <name>                           LLM provider (openai|anthropic|gemini|azure-openai|azure-anthropic|ollama|litellm|mlx)
+  -m, --model <id>                                Model ID / deployment name
+  --base-url <url>                                Override provider base URL
+  --config <path>                                 Path to config.json
+  --env-file <path>                               Path to .env file
+  --max-steps <n>                                 Maximum ReAct steps
+  --temperature <t>                               Sampling temperature
+  --system-prompt <path-or-name>                  Select the BASE system prompt file. Resolution: absolute path → verbatim; bare filename → joined onto <capabilitiesDir>; relative path with separators → joined onto cwd. Omit to use the seeded default at <capabilitiesDir>/system-prompt.md.
+  --system <text>                                 Append text to system prompt
+  --system-file <path>                            Append file contents to system prompt
+  --per-tool-budget <bytes>                       Per-tool result byte budget
+  --allow-mutations                               Enable mutating tools (file_write, file_edit, file_append) (default: false)
+  --bash-allow <csv>                              Extra bash allowlist entries (csv or argv-regex:)
+  --bash-allow-file <path>                        File with bash allowlist entries (one per line)
+  --bash-pass-secret <NAME>                       Pass credential env var to child processes (repeatable) (default: [])
+  --web-search-backend <id>                       Web search backend (tavily|serpapi|brave|duckduckgo|custom-http)
+  --introspect-depth <n>                          Capability discovery depth
+  --introspect-max-bytes <n>                      Per-tool capability byte budget
+  --introspect-timeout-ms <ms>                    Per --help call timeout (ms)
+  --introspect-total-budget-ms <ms>               Total capability discovery budget (ms)
+  --introspect-skip-llm-below-bytes <n>           Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)
+  --refresh-capabilities                          Force regenerate cached capability docs (default: false)
+  --verbose                                       Emit structured debug logs to stderr (default: false)
+  --agent-tools                                   Enable the agent-tools pack umbrella (default; rarely needed)
+  --no-agent-tools                                Disable the agent-tools pack umbrella (no agt_* tools registered)
+  --enable-agt-glob                               Enable agt_glob (default-on)
+  --disable-agt-glob                              Disable agt_glob
+  --enable-agt-grep                               Enable agt_grep (default-on)
+  --disable-agt-grep                              Disable agt_grep
+  --enable-agt-multiedit                          Enable agt_multiedit (default-on; mutation-gated)
+  --disable-agt-multiedit                         Disable agt_multiedit
+  --enable-agt-patch                              Enable agt_patch (default-on; mutation-gated)
+  --disable-agt-patch                             Disable agt_patch
+  --enable-agt-todo-read                          Enable agt_todo_read (default-off)
+  --disable-agt-todo-read                         Disable agt_todo_read
+  --enable-agt-todo-write                         Enable agt_todo_write (default-off)
+  --disable-agt-todo-write                        Disable agt_todo_write
+  --profile <name>                                Activate a named configuration profile (env: CLI_AGENT_PROFILE)
+  --treat-as-tool                                 Treat this cli-agent invocation as a composite tool (synthesise a single capability doc from the --tool members)
+  --composite-name <id>                           Explicit composite id; matches /^[a-z][a-z0-9_-]{0,62}$/. Omit to derive from member list
+  --emit-doc                                      Emit the composite capability doc under <agentDir>/capabilities/composite/<id>.md (default ON whenever --treat-as-tool is set)
+  --no-emit-doc                                   Suppress writing the composite capability doc (synthesis still runs; output goes to stdout only)
+  --emit-wrapper                                  Emit a POSIX shim under <agentDir>/composites/<id>/<id> (form b)
+  --emit-wrapper-on-path                          Additionally place a symlink at ~/.local/bin/<id> (requires --emit-wrapper)
+  --register-virtual                              Register the composite as a virtual tool — writes <agentDir>/composites/<id>/manifest.json (form c)
+  --regenerate-capabilities                       Force re-synthesis even on cache hit; preserves USER-RECIPES / USER-NOTES blocks (distinct from --refresh-capabilities — see ADR-CMP-3)
+  --dry-run-synthesis                             Print the stage prompts + digests; do NOT call the LLM and do NOT write the cache
+  --synthesis-budget-tokens <n>                   Combined Stage-1 + Stage-2 token cap for the synthesis pipeline (env CLI_AGENT_COMPOSITE_BUDGET; default 32768)
+  --force-overwrite                               Overwrite an existing composite of the same name without prompting
+  -h, --help                                      display help for command
+
+Commands:
+  show-capabilities [options]                     Print the cached capability document for a wrapped tool.
+  refresh-capabilities [options]                  Re-run capability discovery for one or all configured tools.
+  extract-recipes [options]                       Propose canonical recipes for a wrapped tool. Default: write between the USER-RECIPES markers in the capability doc (replaces inner content). Use --stdout to print without writing, --append to keep existing recipes.
+  extract-tool-prompts [options]                  Write/refresh per-tool overlay markdown files under <agentDir>/tool-prompts/.
+  show-tool-prompt [options]                      Print the effective (overlay-merged) prompt block for a tool.
+  audit-tool-prompts [options]                    Cross-check overlay files against the current built-in registry.
+  profile-list|profiles [options]                 List configuration profiles (FR-PROF-008).
+  profile-show [options] <name>                   Print a configuration profile (raw + parsed) (FR-PROF-009).
+  profile-create [options] <name>                 Scaffold a new configuration profile (FR-PROF-010).
+  profile-edit <name>                             Open a configuration profile in $EDITOR (FR-PROF-011).
+  profile-delete|profile-rm [options] <name>      Delete a configuration profile (FR-PROF-012).
+  profile-dry-run [options]                       Resolve config + tool scoping; print effective state without launching the LLM (FR-PROF-013).
+  composite-synthesize [options]                  Synthesize a composite intelligent tool from --tool members (plan-006 §14.E).
+  composite-list|composites [options]             List synthesised composite intelligent tools (plan-006 §14.E).
+  composite-show [options] <name>                 Print a synthesised composite capability doc (plan-006 §14.E).
+  composite-delete|composite-rm [options] <name>  Delete a synthesised composite and all of its artefacts (plan-006 §14.E).

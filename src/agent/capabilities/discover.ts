@@ -11,6 +11,7 @@
  */
 
 import path from 'node:path';
+import fsp from 'node:fs/promises';
 import { runHelp } from './runHelp.js';
 import { extractSubcommands } from './extractSubcommands.js';
 import { composeCapabilityDoc } from './composeMarkdown.js';
@@ -21,6 +22,22 @@ import type { AgentConfig } from '../../config/agent-config.js';
 import type { BaseChatModel } from '../providers/types.js';
 import type { Logger } from '../logging.js';
 import { newTurnId } from '../logging.js';
+
+async function isVirtualComposite(cfg: AgentConfig, tool: string): Promise<{ docPath: string; bytes: number } | null> {
+  const manifestPath = path.join(cfg.compositesDir, tool, 'manifest.json');
+  try {
+    await fsp.access(manifestPath);
+  } catch {
+    return null;
+  }
+  const mirrorPath = path.join(cfg.capabilitiesDir, `${tool}.md`);
+  try {
+    const stat = await fsp.stat(mirrorPath);
+    return { docPath: mirrorPath, bytes: stat.size };
+  } catch {
+    return null;
+  }
+}
 
 export interface DiscoveryResult {
   tool: string;
@@ -141,6 +158,27 @@ export async function discoverTool(
 ): Promise<DiscoveryResult> {
   const start = Date.now();
   onPhase?.({ kind: 'start', tool });
+
+  // Virtual-composite shortcut (plan-006 patch): when `tool` is a registered
+  // composite (manifest exists at <compositesDir>/<tool>/manifest.json AND
+  // mirror doc exists at <capabilitiesDir>/<tool>.md), trust the synthesized
+  // doc unconditionally and skip binary discovery. The mirror doc is
+  // schema-3 which `readCacheEntry` (schema-2 only) would reject as a cache
+  // miss, so without this shortcut the code falls through to PATH lookup
+  // and fails for `--register-virtual` composites.
+  if (!forceRefresh) {
+    const composite = await isVirtualComposite(cfg, tool);
+    if (composite) {
+      const elapsed = Date.now() - start;
+      onPhase?.({ kind: 'cache_hit', tool, bytes: composite.bytes, durationMs: elapsed });
+      return {
+        tool,
+        status: 'cached',
+        bytes: composite.bytes,
+        durationMs: elapsed,
+      };
+    }
+  }
 
   // Doc-exists shortcut: if a capability document already exists for this
   // tool and the user has not forced a refresh, trust it and skip every

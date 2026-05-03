@@ -836,3 +836,323 @@ the existing "Last thread:" hint is enriched with
 `— pass --resume to continue` if and only if a checkpoint snapshot
 exists for the recorded threadId. **Status: Accepted.**
 
+
+## Composite Intelligent Tools (FR-CMP-*)
+
+Plan reference: `docs/design/plan-006-composite-tools.md`.
+Refined request (canonical authoritative source for the full 22 functional
+requirements, 7 NFRs, 27 acceptance criteria, 23 enumerated edge cases, and
+the `--treat-as-tool` flag-interaction matrix):
+`docs/design/refined-request-composite-tools.md`.
+Investigation: `docs/reference/investigation-composite-tools.md`.
+Research (provider prompt cache): `docs/research/llm-prompt-caching-providers.md`.
+Research (POSIX shim): `docs/research/posix-wrapper-shim-design.md`.
+Codebase scan: `docs/reference/codebase-scan-composite-tools.md`.
+Design: `docs/design/project-design.md` §14 (added in plan-006 P2).
+
+A "composite intelligent tool" packages a curated cli-agent invocation
+(`cli-agent --tool A --tool B …`) as a *new* tool that another cli-agent can
+attach with a single `--tool <composite-id>`. v1 ships three opt-in
+distribution forms: (a) a synthesised schema-3 capability document at
+`~/.tool-agents/cli-agent/capabilities/composite/<id>.md`; (b) a POSIX
+`/bin/sh` wrapper shim at `~/.tool-agents/cli-agent/composites/<id>/<id>`;
+(c) a virtual-tool manifest at
+`~/.tool-agents/cli-agent/composites/<id>/manifest.json` consumed by the
+cli-agent tool registry at startup. A two-stage LLM synthesis pipeline
+(per-member distill → compose) runs against the same provider/model the
+outer cli-agent run resolved through the standard 4-tier chain. The pipeline
+caches Stage-1 outputs per-member at
+`capabilities/composite/_distill/<member>@<digest>.json` and applies
+provider-side prompt caching at Stage-2 via a provider-agnostic
+`withSynthesisCache(messages, prefixEndIndex)` helper. Composite docs and
+artifacts are subject to the existing file-mode invariants (`0700` dirs,
+`0600` doc/manifest, `0755` shim).
+
+The entries below summarise the high-level functional capabilities; the
+refined request file remains the canonical authoritative version.
+
+### FR-CMP-001: `--treat-as-tool` is metadata when used alone
+
+Supplying `--treat-as-tool` without `--help`, `--emit-*`, or
+`--register-virtual` produces byte-identical runtime behavior to the
+equivalent invocation without the flag. The flag exists to gate the
+help-synthesis path and to mark the run as a composite candidate.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-002: `--help` re-routing under `--treat-as-tool`
+
+When BOTH `--treat-as-tool` AND `--help` are supplied AND at least one
+`--tool` is declared, cli-agent runs the synthesis pipeline (or loads from
+the cache) and prints the resulting capability document on stdout, then
+exits 0. Without `--treat-as-tool`, `--help` prints cli-agent's own help
+exactly as today (NFR-CMP-001 / AC-1 — pinned by a baseline snapshot test).
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-003: Empty member list under `--treat-as-tool --help`
+
+`cli-agent --treat-as-tool --help` with no `--tool` arguments and no
+profile-supplied member list exits 2 (`UsageError`) with the message
+`composite synthesis requires at least one --tool argument`. There is no
+degenerate doc; this is an explicit error per the no-fallback rule.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-004: Schema-3 capability document
+
+The synthesised composite document carries frontmatter:
+`schemaVersion: 3`, `composite: true`, `compositeName: <id>`,
+`members: [<sorted>]`, `memberDigests: { <name>: <sha256-hex-prefix-16> }`,
+`synthesizedAt`, `syntheticDigest`, `cliAgentVersion`,
+`synthesisModel: <provider>:<model-id>`, `activeProfile: <name | null>`,
+`manRef: null`, `manPagePath: null`. The body section sequence
+(synopsis, AUTO-GENERATED block, USER-RECIPES, USER-NOTES) matches the
+discovery-doc shape so that an outer cli-agent's existing capability
+consumer loads it transparently. **Status: Accepted (Plan 006).**
+
+### FR-CMP-005: Schema validator parity
+
+The schema-3 doc passes the same structural validators that schema-2 docs
+pass (frontmatter delimiters, AUTO-GENERATED markers, USER-RECIPES markers,
+USER-NOTES markers, H1 = canonical tool name). The capability loader
+accepts `schemaVersion ∈ {2, 3}`; v1 docs remain a cache miss.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-006: Two-stage synthesis pipeline
+
+Stage 1 distills each member tool's capability doc into a structured
+"intent surface" (top intents, parameter glossary, illustrative examples)
+at ≈500 tokens per member. Stage 2 composes the array of Stage-1 outputs
+into the AUTO-GENERATED body plus a curated USER-RECIPES block. The
+pipeline uses the LLM provider/model already resolved for the cli-agent
+run; no alternate auth path. Stage-1 outputs are cached on-disk, keyed by
+`(member-doc-digest, distill-template-version, model-id)`. Stage-2
+applies provider-side prompt caching via the `withSynthesisCache` helper.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-007: `--dry-run-synthesis`
+
+`cli-agent --treat-as-tool --tool A --tool B --dry-run-synthesis` prints
+both stage prompts (with sha256 digests) to stdout, contacts no LLM,
+writes no cache, and exits 0. Allowed alongside `--help`; in that
+combination the dry-run output replaces the synthesised doc on stdout.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-008: Synthesis token budget
+
+`--synthesis-budget-tokens <n>` (config key `composite.synthesisBudgetTokens`,
+env `CLI_AGENT_COMPOSITE_BUDGET`) caps the combined input+output token
+count of the two-stage pipeline. Default `32 768`. Mid-pipeline overrun
+aborts synthesis with `UsageError` exit 2 naming consumed/cap. No
+automatic fallback to a smaller pipeline. **Status: Accepted (Plan 006).**
+
+### FR-CMP-009: Cache key + hit semantics
+
+Cache file path: `~/.tool-agents/cli-agent/capabilities/composite/<id>.md`.
+Cache key: `sha256(sortedMembers ‖ memberDigests ‖ cliAgentVersion ‖
+COMPOSITE_CAPABILITY_SCHEMA_VERSION ‖ compositeName ‖ synthesisModel)`.
+A hit serves the cached doc verbatim. Member-tool overlay edits do NOT
+invalidate the cache in v1 (Open Question O-1 / ADR-CMP-7); the user
+forces a fresh synthesis with `--regenerate-capabilities`. The current
+effective overlay digest is recorded in the
+`composite_synthesis_start.currentEffectiveOverlayDigests` JSONL field
+for v1.1 instrumentation. **Status: Accepted (Plan 006).**
+
+### FR-CMP-010: `--regenerate-capabilities`
+
+When supplied alongside `--treat-as-tool`, this flag forces a fresh
+synthesis even on cache hit, atomically replacing the cached file. The
+existing `<!-- USER-RECIPES:START -->…` and `<!-- USER-NOTES:START -->…`
+blocks are preserved byte-for-byte across the rewrite. **Deviation from
+spec wording**: per ADR-CMP-3, `--regenerate-capabilities` and the existing
+`--refresh-capabilities` are NOT aliases; supplying
+`--regenerate-capabilities` *without* `--treat-as-tool` produces a
+`UsageError` exit 2 with a guidance message pointing to
+`--refresh-capabilities`. **Status: Accepted (Plan 006).**
+
+### FR-CMP-011: `--composite-name <id>` and derivation
+
+When supplied, `<id>` is used verbatim and must match
+`^[a-z][a-z0-9_-]{0,62}$` (violation → exit 2). When omitted, the name is
+derived as `<sorted-members-joined-by-+>@<hash8>` where `<hash8>` is the
+first 8 hex chars of sha256 over the canonical input set defined in
+FR-CMP-009 keys 1–4. Example: `file-cli+outlook-cli@a1b2c3d4`.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-012: `--emit-doc` (distribution form a)
+
+Default ON whenever `--treat-as-tool` is in effect. Writes the synthesised
+doc to the cache path defined in FR-CMP-009 at mode `0o600`; the
+`composite/` directory at mode `0o700`. `--no-emit-doc` opts out
+(synthesis still runs; output goes to stdout only).
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-013: `--emit-wrapper` (distribution form b)
+
+Default OFF. When supplied, after successful synthesis cli-agent writes a
+POSIX `/bin/sh` shim at `~/.tool-agents/cli-agent/composites/<id>/<id>`
+(mode `0o755`) plus the manifest. The shim's body, on `--help`, `cat`s the
+cached composite doc to stdout and exits 0; on any other invocation, it
+`exec`s the absolute-resolved cli-agent path with the recorded
+`--tool <m1> --tool <m2> …` list and the user's positional args; on
+missing cache, exit 6 with the documented message. `--emit-wrapper-on-path`
+adds a symlink from `~/.local/bin/<id>` (default OFF). **Deviation from
+spec wording**: shebang is `#!/bin/sh` (not `#!/usr/bin/env bash`) and no
+`set -euo pipefail` (per ADR-CMP-2, matching npm `cmd-shim`).
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-014: `--register-virtual` (distribution form c)
+
+Default OFF. Writes `composites/<id>/manifest.json` (mode `0o600`) with the
+schema documented in the refined spec. The cli-agent tool registry, on
+every startup, scans `composites/*/manifest.json` and registers each as a
+virtual tool recognised by `--tool <id>`. Resolution order on `--tool <id>`:
+(1) built-in tool name → registered tool; (2) virtual tool manifest match
+→ meta-tool dispatch; (3) PATH binary lookup → wrapped CLI tool.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-015: Virtual-tool dispatch mode
+
+Two modes are supported, controlled by `composite.virtualDispatch` (env
+`CLI_AGENT_VIRTUAL_DISPATCH`): `child-process` (DEFAULT — fork a child
+cli-agent with the recorded `--tool` list; hermetic isolation) and
+`in-process` (re-enter the agent-graph builder; lower latency; flagged
+experimental in v1). An integration test pins observable equivalence
+between modes on a stable test prompt. **Status: Accepted (Plan 006).**
+
+### FR-CMP-016: Recursion guard
+
+A composite whose member list contains another registered virtual-tool name
+is rejected with `UsageError` exit 2 at BOTH registration time
+(`--register-virtual`) and dispatch time. The child process spawned in
+`child-process` mode receives `CLI_AGENT_VIRTUAL_DISPATCH_RECURSION_GUARD=1`;
+the child's `loadVirtualTools` returns `[]` so structural recursion is
+impossible. **Status: Accepted (Plan 006).**
+
+### FR-CMP-017: Composite-name collision policy
+
+Re-registering the same `<id>` with a different member set or a different
+cli-agent version exits 2 unless `--force-overwrite` is supplied (which
+atomically replaces both manifest and cached doc, preserving USER-* blocks
+per FR-CMP-010). Identical re-registration is idempotent.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-018: Missing constituent at synthesis time
+
+A declared `--tool <name>` with no cached capability document AND no PATH
+binary aborts synthesis with `ConfigurationError` exit 3. If the binary IS
+on PATH, the existing discovery flow runs first to populate the
+constituent's capability doc, then synthesis proceeds. No silent
+degradation. **Status: Accepted (Plan 006).**
+
+### FR-CMP-019: Profile passthrough during synthesis
+
+When a profile is active during a `--treat-as-tool --help` run, its
+`cliParams` flow through normally so synthesis uses the profile's chosen
+provider/model. Its `tools.allow/deny/order` is IGNORED for member
+selection — only explicit `--tool` flags constitute the member set. Its
+`toolArgs` is NOT embedded in the synthesised doc. The active profile name
+is recorded as `activeProfile` in the schema-3 frontmatter for traceability
+only. **Status: Accepted (Plan 006).**
+
+### FR-CMP-020: System-prompt integration when consuming a composite
+
+When an outer cli-agent loads a composite capability doc, the existing
+system-prompt composition path (FR-AGT-008, FR-CAP-105) applies unchanged.
+The composite's USER-RECIPES block embeds verbatim within the per-tool
+byte budget; the synopsis falls back when the budget is exceeded. No new
+prompt section is added — composites are opaque to the prompt builder.
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-021: Logging
+
+Synthesis runs emit the following JSONL events under
+`~/.tool-agents/cli-agent/logs/`:
+- `composite_synthesis_start` (composite name, members, cacheHit, dryRun,
+  providerFamily, currentEffectiveOverlayDigests)
+- `composite_synthesis_stage` (stage index, prompt-digest-16, token I/O,
+  latency, providerCacheCreation, providerCacheRead)
+- `composite_synthesis_end` (status, totalTokens, output digest-16, cache
+  file path)
+- `composite_emit` (per artifact: doc / wrapper / manifest / symlink, with
+  absolute path and mode)
+- `composite_dispatch` (composite name, dispatch mode, members)
+- `composite_cache_version_mismatch` (composite name, recorded vs running
+  cli-agent version)
+
+Existing redaction policy applies; bodies are NOT logged (digest only).
+**Status: Accepted (Plan 006).**
+
+### FR-CMP-022: Subcommand surface (alternative to flag combo)
+
+`cli-agent composite-synthesize --tool A --tool B [--composite-name <id>]
+[--regenerate] [--emit-wrapper] [--register-virtual] [--dry-run]
+[--force-overwrite]` is the scriptable equivalent of the
+`--treat-as-tool --help` flag-driven path. Companion subcommands:
+`composite-list` (table of registered virtuals), `composite-show <id>`
+(print cached doc), `composite-delete <id> [--yes]` (remove manifest +
+wrapper folder + cached doc + mirror copy + symlink). **Deviation from
+spec wording**: subcommands are flat hyphenated (per ADR-CMP-4, matching
+the codebase's existing 5 flat-hyphenated subcommands) rather than nested
+under a `composite` group. **Status: Accepted (Plan 006).**
+
+### FR-CMP-023: Documentation registration
+
+The feature is documented in:
+- `docs/design/project-functions.md` — this section.
+- `docs/design/project-design.md` — §14 (added in P2).
+- `docs/design/configuration-guide.md` — composite knobs
+  (`composite.synthesisBudgetTokens`, `composite.virtualDispatch`).
+- `docs/tools/cli-agent.md` — `<compositeTools>` subsection.
+- `docs/design/plan-006-composite-tools.md` — implementation plan.
+**Status: Accepted (Plan 006).**
+
+### NFR-CMP-001: No drift on flag absence
+
+A regression test pins `cli-agent --help` and tool-registration behaviour
+when `--treat-as-tool` is absent. Diff against the baseline snapshot
+captured before the Commander `helpOption(false)` migration (P4) must be
+empty. **Status: Accepted (Plan 006).**
+
+### NFR-CMP-002: Deterministic test harness
+
+Synthesis tests are deterministic via a stub LLM that returns canned
+outputs keyed by `sha256(prompt)`. The harness lives in
+`test_scripts/lib/synthesisFixture.ts`; fixtures are folder-per-scenario
+under `test_scripts/fixtures/synthesis/<name>/` with `inputs.json`,
+`members/*.md`, `transcript.json`, `expected.md`. Recordable from a real
+LLM via `RECORD=1`. **Status: Accepted (Plan 006).**
+
+### NFR-CMP-003: Synthesis latency ceiling (smoke)
+
+A synthesis run for a 2-member composite where each member doc is ≤ 32 KB
+completes in under 30 s under the stub LLM (network elided) on the
+standard test machine. Real-LLM smoke is documented but not gated in CI.
+**Status: Accepted (Plan 006).**
+
+### NFR-CMP-004: Cache hit cost
+
+A `--treat-as-tool --help` cache hit completes (process boot → stdout
+flushed → exit 0) in under 500 ms on the standard test machine. Asserted
+by `test_scripts/smoke-cache-hit-cost.ts`. **Status: Accepted (Plan 006).**
+
+### NFR-CMP-005: File-mode invariants
+
+`composite/` and `composites/` directories at mode `0o700`; cached doc and
+manifest at mode `0o600`; wrapper shim at mode `0o755` (executable).
+Asserted by unit tests extending `bootstrapAgentDir` mode checks.
+**Status: Accepted (Plan 006).**
+
+### NFR-CMP-006: Schema migration test
+
+A schema-2 composite cache file (synthesised in a hypothetical intermediate
+state) is treated as cache miss and re-synthesised. Pinned by
+`cache.spec.ts`. **Status: Accepted (Plan 006).**
+
+### NFR-CMP-007: Coexistence smoke
+
+An end-to-end test demonstrates, in a single run: (1) profile activation;
+(2) tool-prompt overlay applied to a member; (3) member capability doc
+with USER-RECIPES; (4) synthesis of a composite from the two members;
+(5) outer cli-agent attaching the composite via `--tool <id>` and
+producing a coherent system prompt that embeds the composite's
+USER-RECIPES content. Lives at
+`test_scripts/smoke-coexistence-end-to-end.ts`. **Status: Accepted (Plan 006).**

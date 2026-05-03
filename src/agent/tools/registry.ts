@@ -29,6 +29,7 @@ import {
   type AgentToolsCatalogMeta,
 } from './agent-tools/group-builder.js';
 import { applyProfileToolScoping } from './profile-scoping.js';
+import { loadVirtualToolsSync } from '../composite/virtual-registry.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyTool = any;
@@ -87,6 +88,18 @@ export function buildToolCatalog(
     ...bashRunTools,
     ...agentToolsGroup.tools,
   ];
+
+  // Virtual tools (composites — plan-006 U-VIRTUAL). Loaded BEFORE
+  // profile scoping so a profile's `tools.allow/deny/order` can include
+  // or exclude a composite by id, exactly like a native tool (§14.O).
+  // The recursion guard at register-time is enforced inside
+  // `loadVirtualToolsSync`; the dispatch-time guard is enforced inside
+  // `dispatchComposite` via the `CLI_AGENT_VIRTUAL_DISPATCH_RECURSION_GUARD`
+  // env sentinel (read by `loadVirtualToolsSync` on subsequent boots).
+  const virtualHandles = loadVirtualToolsSync(cfg, logger);
+  for (const handle of virtualHandles) {
+    assembled.push(handle.langchainTool);
+  }
 
   // Profile tool scoping (plan-005 U-SCOPE). Runs AFTER the catalog is
   // fully built so allow/deny/order operate on the same names that the

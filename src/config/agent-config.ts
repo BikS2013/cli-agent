@@ -167,6 +167,16 @@ export interface AgentConfig {
   readonly agentDir: string;
   readonly capabilitiesDir: string;
   readonly logsDir: string;
+  /** Canonical schema-3 composite capability docs root (plan-006 §14.F).
+   * Always populated by `loadAgentConfig`; created at mode 0o700 by
+   * `bootstrapAgentDir`. */
+  readonly compositeCapabilitiesDir: string;
+  /** Stage-1 per-member distillation cache (plan-006 §14.F). Filenames
+   * follow `<member>@<digest16>.json`. Always populated. */
+  readonly compositeDistillDir: string;
+  /** Per-composite manifest + wrapper-shim folder root (plan-006
+   * §14.F). Always populated. */
+  readonly compositesDir: string;
   readonly providerEnv: ProviderEnvSnapshot;
   /** Merged tool list from config.json + CLI --tool flags (deduped). */
   readonly tools: ReadonlyArray<string>;
@@ -297,6 +307,48 @@ export interface AgentCliFlags {
    * threads `cliParams` into the per-knob precedence chain at tier 5.
    * Equivalent env var: `CLI_AGENT_PROFILE`. CLI flag wins (E12). */
   readonly profile?: string;
+  /* ---------- Composite-intelligent-tools flags (plan-006 P3) ----------
+   *
+   * Foundation declarations only — wired through Commander in U-FLAGS
+   * (Phase 6). Help-interception logic is implemented in P4. The
+   * subset below is what U-FLAGS / U-CMD parses and what
+   * `enforceCompositeFlagMatrix` validates against §14.H.
+   */
+  /** When `--treat-as-tool` is present, the default-command `--help`
+   * branch hands off to the composite synthesis pipeline (or rejects
+   * with `UsageError` when no `--tool` is supplied). */
+  readonly treatAsTool?: boolean;
+  /** Explicit composite-id override (FR-CMP-011). When omitted, U-CMD
+   * derives the name from the sorted member list. */
+  readonly compositeName?: string;
+  /** Emit a schema-3 composite capability doc into
+   * `<agentDir>/capabilities/composite/<id>.md` (form a). Default
+   * true with `--treat-as-tool`; opt-out via `--no-emit-doc`. */
+  readonly emitDoc?: boolean;
+  /** Emit a POSIX wrapper shim under `<agentDir>/composites/<id>/<id>`
+   * (form b). Opt-in. */
+  readonly emitWrapper?: boolean;
+  /** Additionally place a symlink at `~/.local/bin/<id>` so the
+   * composite is invocable from PATH. Implies `--emit-wrapper`. */
+  readonly emitWrapperOnPath?: boolean;
+  /** Register the composite as a virtual tool (form c) — writes a
+   * manifest the `loadVirtualTools` registry consumes. Opt-in. */
+  readonly registerVirtual?: boolean;
+  /** Force re-synthesis even when the cache key matches; preserves
+   * USER-RECIPES / USER-NOTES blocks across rewrite. */
+  readonly regenerateCapabilities?: boolean;
+  /** Emit the prompts that WOULD be sent to the LLM, exit 0 without
+   * spending a token. */
+  readonly dryRunSynthesis?: boolean;
+  /** Combined Stage-1 + Stage-2 token cap for the synthesis pipeline.
+   * Defaults to 32_768 in U-FLAGS. */
+  readonly synthesisBudgetTokens?: number;
+  /** Overwrite an existing composite of the same name without
+   * prompting (FR-CMP-017). */
+  readonly forceOverwrite?: boolean;
+  /** Manual `--help` flag (P4 migrates Commander's auto-help to a
+   * manual flag so the composite branch can intercept). */
+  readonly help?: boolean;
 }
 
 /* ---------- Paths ---------- */
@@ -311,6 +363,43 @@ export function agentDotEnvPath(override?: string): string {
 
 export function agentCapabilitiesDir(): string {
   return path.join(agentToolAgentsDir(), 'capabilities');
+}
+
+/* ---------- Composite-tool paths (plan-006 P3) ----------
+ *
+ * Three new directories owned by the composite-intelligent-tools
+ * subsystem. All under the existing per-user agent dir so they inherit
+ * the same 0o700 / 0o600 mode discipline. Mirrors the existing
+ * `agentCapabilitiesDir` / `agentToolAgentsDir` pattern.
+ */
+
+/**
+ * Canonical schema-3 composite capability docs live here, one
+ * `<composite-id>.md` per registered composite. Mirror copies are
+ * additionally written into `agentCapabilitiesDir()` so the existing
+ * `composeCapabilitiesSystemPrompt` reader picks them up unchanged
+ * (ADR-CMP-12).
+ */
+export function agentCompositeCapabilitiesDir(): string {
+  return path.join(agentCapabilitiesDir(), 'composite');
+}
+
+/**
+ * Stage-1 per-member distillation cache. Filenames follow
+ * `<member>@<digest16>.json`; contents are `Stage1Distillation` JSON
+ * objects (see `src/agent/composite/types.ts`).
+ */
+export function agentCompositeDistillDir(): string {
+  return path.join(agentCompositeCapabilitiesDir(), '_distill');
+}
+
+/**
+ * Per-composite manifest + wrapper-shim folder root. Each registered
+ * composite owns its own `<composite-id>/` subdirectory inside this
+ * root.
+ */
+export function agentCompositesDir(): string {
+  return path.join(agentToolAgentsDir(), 'composites');
 }
 
 /** Reserved filename inside capabilitiesDir for the BASE system prompt.
@@ -353,6 +442,22 @@ export async function bootstrapAgentDir(
   const profilesDir = path.join(agentDir, 'profiles');
   await fsp.mkdir(profilesDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(profilesDir, 0o700); } catch { /* tolerated */ }
+
+  // Composite directories (plan-006 §14.F). Additive: directories only,
+  // never seeded. All at mode 0o700 so the per-user privacy invariant
+  // matches the existing capabilities/ tree. The order matters only
+  // because `<capabilities>/composite/_distill` is nested two levels
+  // deep — `recursive: true` already handles that — but we still call
+  // `mkdir` per-level to make the chmod calls explicit per directory.
+  const compositeCapabilitiesDir = path.join(capabilitiesDir, 'composite');
+  await fsp.mkdir(compositeCapabilitiesDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(compositeCapabilitiesDir, 0o700); } catch { /* tolerated */ }
+  const compositeDistillDir = path.join(compositeCapabilitiesDir, '_distill');
+  await fsp.mkdir(compositeDistillDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(compositeDistillDir, 0o700); } catch { /* tolerated */ }
+  const compositesDir = path.join(agentDir, 'composites');
+  await fsp.mkdir(compositesDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(compositesDir, 0o700); } catch { /* tolerated */ }
 
   if (seedToolPrompts) {
     await bootstrapToolPromptsDir(toolPromptsDir);
@@ -607,6 +712,13 @@ const OTHER_ENV_KEYS = [
   // Activates a named profile (equivalent to --profile <name>). CLI flag
   // wins over env (E12) via natural ?? precedence in `loadAgentConfig`.
   'CLI_AGENT_PROFILE',
+  // --- Composite intelligent tools (plan-006) ---
+  // Combined Stage-1 + Stage-2 token cap; numeric. Default applied in
+  // U-FLAGS (32_768).
+  'CLI_AGENT_COMPOSITE_BUDGET',
+  // Virtual-tool dispatch mode: `child-process` (default) or
+  // `in-process` (experimental). Consumed by U-VIRTUAL.
+  'CLI_AGENT_VIRTUAL_DISPATCH',
 ] as const;
 
 const ALL_ENV_KEYS = [...PROVIDER_ENV_KEYS, ...OTHER_ENV_KEYS] as const;
@@ -915,6 +1027,9 @@ export async function loadAgentConfig(
     agentDir,
     capabilitiesDir: path.join(agentDir, 'capabilities'),
     logsDir: path.join(agentDir, 'logs'),
+    compositeCapabilitiesDir: path.join(agentDir, 'capabilities', 'composite'),
+    compositeDistillDir: path.join(agentDir, 'capabilities', 'composite', '_distill'),
+    compositesDir: path.join(agentDir, 'composites'),
     providerEnv: buildProviderEnv(layered),
     tools,
     capabilities,

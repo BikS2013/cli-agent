@@ -2,6 +2,26 @@
 
 ## Pending
 
+### [LOW] Failed discovery may overwrite a composite mirror doc with a schema-1 placeholder
+- When `discoverTool` falls through to binary lookup for a composite (which only happens in pre-patch installs OR when the manifest is removed but the mirror remains), a schema-1 "binary not found" placeholder is written to `<capabilitiesDir>/<tool>.md` at `discover.ts:189-211`. This overwrites the composite mirror.
+- The patched `discoverTool` now short-circuits virtual composites (manifest + mirror present) BEFORE binary lookup, so this can no longer happen for healthy composites. But pre-existing placeholder docs from earlier failed runs persist on disk.
+- Recovery for affected users: re-run synthesis with `--regenerate-capabilities` to restore the real mirror doc.
+- Suggested follow-up: in `discoverTool` not-found path, do not overwrite an existing schema-3 mirror with a schema-1 placeholder. (Currently `writeCacheEntry` blindly writes; should refuse if the existing file's frontmatter declares `composite: true`.)
+
+### [LOW] plan-006 §14.P named cache-export rename (readCompositeCacheEntry / writeCompositeCacheEntry → readCompositeDoc / writeCompositeDoc)
+- Design §14.P names U-DOC's exports as `readCompositeCacheEntry` /
+  `writeCompositeCacheEntry`. The implementation chose
+  `readCompositeDoc` / `writeCompositeDoc` (no behavioural change — same
+  signature, same atomic write, same frontmatter parsing) and
+  `mirrorCompositeDocToCapabilities` matches §14.P verbatim.
+- Disposition: minor cosmetic deviation; implementation names better
+  reflect that the unit's payload is a parsed doc, not a generic cache
+  entry. The cache-key composition + invalidation contract from §14.L
+  is honoured (`computeMemberDocDigest`, `computeSyntheticDigest`,
+  `canonicaliseSyntheticInputs` are exported and exercised by tests).
+- Suggested follow-up: a one-line note in §14.P clarifying the
+  rename to keep doc and code in lockstep. No code change required.
+
 ### [MEDIUM] Pre-existing dependency-tree security & deprecation backlog
 - Surfaced by `dependency-validator` during plan-005 Phase 8. **None introduced by config-profiles** — all are pre-existing and could not be auto-fixed because remediation requires major-version migrations.
 - Full report: `docs/reference/dependency-validation-config-profiles.md`.

@@ -1,0 +1,8 @@
+{
+  "compositeName": "email-assistant",
+  "members": ["file-cli", "outlook-cli"],
+  "synthesisModel": "anthropic:claude-sonnet-4-6",
+  "cliAgentVersion": "0.3.0",
+  "activeProfile": null,
+  "nowIso": "2026-05-02T00:00:00.000Z"
+}

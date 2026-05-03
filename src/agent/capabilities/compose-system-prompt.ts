@@ -10,11 +10,40 @@
  * compact entry that keeps the synopsis, subcommand TOC, and the
  * manRef pointer + a recipes-availability hint so the agent always
  * knows where to look on demand.
+ *
+ * Schema-version policy (plan-006 P5 / §14.C):
+ *
+ *   The reader accepts BOTH schema-2 (per-tool capability docs from
+ *   plan-005) AND schema-3 (composite capability docs from plan-006)
+ *   transparently. Schema-3 docs reuse the same body markers
+ *   (`<!-- AUTO-GENERATED:START -->`, `<!-- USER-RECIPES:START -->`,
+ *   `<!-- USER-NOTES:START -->`) as schema-2; only the frontmatter
+ *   shape differs. Because this composer reads only the body markers,
+ *   the schema-3 doc is consumed verbatim. The
+ *   `mirrorCompositeDocToCapabilities` helper writes a mirror copy of
+ *   each composite doc into `<capabilitiesDir>/<id>.md` so the
+ *   existing per-tool lookup discovers it without any per-tool
+ *   special-case logic here. The exported
+ *   `SUPPORTED_READ_SCHEMA_VERSIONS` set documents the contract for
+ *   downstream tooling that wants to validate a doc's frontmatter
+ *   before passing it through.
  */
 
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { composeCompactEntry } from './composeMarkdown.js';
+import { composeCompactEntry, CAPABILITY_SCHEMA_VERSION } from './composeMarkdown.js';
+import { COMPOSITE_CAPABILITY_SCHEMA_VERSION } from '../composite/cache.js';
+
+/**
+ * Schema versions this composer can read. Schema-2 = per-tool docs
+ * (plan-005); schema-3 = composite docs (plan-006). The two coexist
+ * in the same `capabilitiesDir` namespace because composite docs are
+ * mirrored into it as `<id>.md` (ADR-CMP-12).
+ */
+export const SUPPORTED_READ_SCHEMA_VERSIONS: ReadonlySet<number> = new Set<number>([
+  CAPABILITY_SCHEMA_VERSION,
+  COMPOSITE_CAPABILITY_SCHEMA_VERSION,
+]);
 
 const AUTO_GEN_START = '<!-- AUTO-GENERATED:START';
 const AUTO_GEN_END = '<!-- AUTO-GENERATED:END -->';

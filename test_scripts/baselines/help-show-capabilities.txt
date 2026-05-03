@@ -1,0 +1,7 @@
+Usage: cli-agent show-capabilities [options]
+
+Print the cached capability document for a wrapped tool.
+
+Options:
+  --tool <name>  Tool name to show
+  -h, --help     display help for command

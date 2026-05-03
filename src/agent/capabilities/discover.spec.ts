@@ -31,6 +31,7 @@ vi.mock('./manref.js', () => ({
 function makeCfg(capabilitiesDir: string, overrides: Record<string, unknown> = {}) {
   return {
     capabilitiesDir,
+    compositesDir: path.join(capabilitiesDir, '..', 'composites'),
     capabilities: {
       depth: 2,
       maxBytesPerTool: 10240,
@@ -334,5 +335,102 @@ describe('discoverTool — doc-exists shortcut', () => {
 
     runHelpSpy.mockRestore();
     extractSpy.mockRestore();
+  });
+});
+
+describe('discoverTool — virtual-composite shortcut (plan-006 patch)', () => {
+  beforeEach(() => {
+    vi.mocked(invalidate.getBinaryInfo).mockClear();
+  });
+
+  it('returns "cached" without probing the binary when a virtual-composite manifest + mirror exist', async () => {
+    const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-vc-'));
+    const capabilitiesDir = path.join(tmpRoot, 'capabilities');
+    const compositesDir = path.join(tmpRoot, 'composites');
+    await fsp.mkdir(capabilitiesDir, { recursive: true });
+    await fsp.mkdir(path.join(compositesDir, 'email-assistant'), { recursive: true });
+
+    const schema3Mirror = [
+      '---',
+      'schemaVersion: 3',
+      'composite: true',
+      'compositeName: email-assistant',
+      '---',
+      '',
+      '# email-assistant',
+      'body bytes',
+    ].join('\n');
+    await fsp.writeFile(path.join(capabilitiesDir, 'email-assistant.md'), schema3Mirror, 'utf8');
+    await fsp.writeFile(
+      path.join(compositesDir, 'email-assistant', 'manifest.json'),
+      JSON.stringify({ schemaVersion: 1, compositeName: 'email-assistant' }),
+      'utf8',
+    );
+
+    const cfg = {
+      capabilitiesDir,
+      compositesDir,
+      capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, skipLlmBelowBytes: 4096 },
+    } as unknown as Parameters<typeof discoverTool>[1];
+
+    const events: string[] = [];
+    const result = await discoverTool(
+      'email-assistant',
+      cfg,
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      false,
+      Date.now() + 60000,
+      (e) => events.push(e.kind),
+    );
+
+    expect(result.status).toBe('cached');
+    expect(result.bytes).toBe(schema3Mirror.length);
+    expect(invalidate.getBinaryInfo).not.toHaveBeenCalled();
+    expect(events).toEqual(['start', 'cache_hit']);
+  });
+
+  it('falls through to binary probe when manifest exists but mirror is missing', async () => {
+    const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-vc-'));
+    const capabilitiesDir = path.join(tmpRoot, 'capabilities');
+    const compositesDir = path.join(tmpRoot, 'composites');
+    await fsp.mkdir(capabilitiesDir, { recursive: true });
+    await fsp.mkdir(path.join(compositesDir, 'orphan'), { recursive: true });
+    await fsp.writeFile(
+      path.join(compositesDir, 'orphan', 'manifest.json'),
+      JSON.stringify({ schemaVersion: 1 }),
+      'utf8',
+    );
+
+    const cfg = {
+      capabilitiesDir,
+      compositesDir,
+      capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, skipLlmBelowBytes: 4096 },
+    } as unknown as Parameters<typeof discoverTool>[1];
+
+    const result = await discoverTool('orphan', cfg, FAKE_MODEL, FAKE_LOGGER, false, Date.now() + 60000);
+
+    expect(invalidate.getBinaryInfo).toHaveBeenCalledOnce();
+    expect(result.status).toBe('not-found');
+  });
+
+  it('forceRefresh=true bypasses the virtual-composite shortcut', async () => {
+    const tmpRoot = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-vc-'));
+    const capabilitiesDir = path.join(tmpRoot, 'capabilities');
+    const compositesDir = path.join(tmpRoot, 'composites');
+    await fsp.mkdir(capabilitiesDir, { recursive: true });
+    await fsp.mkdir(path.join(compositesDir, 'forced'), { recursive: true });
+    await fsp.writeFile(path.join(capabilitiesDir, 'forced.md'), '---\nschemaVersion: 3\ncomposite: true\n---\nbody', 'utf8');
+    await fsp.writeFile(path.join(compositesDir, 'forced', 'manifest.json'), '{}', 'utf8');
+
+    const cfg = {
+      capabilitiesDir,
+      compositesDir,
+      capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, skipLlmBelowBytes: 4096 },
+    } as unknown as Parameters<typeof discoverTool>[1];
+
+    await discoverTool('forced', cfg, FAKE_MODEL, FAKE_LOGGER, true, Date.now() + 60000);
+
+    expect(invalidate.getBinaryInfo).toHaveBeenCalledOnce();
   });
 });

@@ -5,7 +5,19 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
-import { loadAgentConfig, SUPPORTED_PROVIDERS, AGENT_TOOL_NAME, resolveSystemPromptPath, SYSTEM_PROMPT_FILENAME, agentCapabilitiesDir } from './agent-config.js';
+import {
+  loadAgentConfig,
+  SUPPORTED_PROVIDERS,
+  AGENT_TOOL_NAME,
+  resolveSystemPromptPath,
+  SYSTEM_PROMPT_FILENAME,
+  agentCapabilitiesDir,
+  agentCompositeCapabilitiesDir,
+  agentCompositeDistillDir,
+  agentCompositesDir,
+  agentToolAgentsDir,
+  bootstrapAgentDir,
+} from './agent-config.js';
 
 // Prevent actual filesystem bootstrap during tests.
 // IMPORTANT: source code uses both `import fsp from 'node:fs/promises'` (default
@@ -322,6 +334,71 @@ describe('resolveSystemPromptPath', () => {
     // separator so we do not mis-resolve a Windows-style relative path
     // against capabilitiesDir.
     expect(resolveSystemPromptPath('sub\\x.md', '/caps', '/cwd')).toBe(path.resolve('/cwd', 'sub\\x.md'));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Composite tool paths + bootstrap (plan-006 P3)
+// ---------------------------------------------------------------------------
+
+describe('composite path helpers (plan-006 P3)', () => {
+  it('agentCompositeCapabilitiesDir → <agentDir>/capabilities/composite', () => {
+    expect(agentCompositeCapabilitiesDir()).toBe(
+      path.join(os.homedir(), '.tool-agents', AGENT_TOOL_NAME, 'capabilities', 'composite'),
+    );
+  });
+
+  it('agentCompositeDistillDir → <agentDir>/capabilities/composite/_distill', () => {
+    expect(agentCompositeDistillDir()).toBe(
+      path.join(os.homedir(), '.tool-agents', AGENT_TOOL_NAME, 'capabilities', 'composite', '_distill'),
+    );
+  });
+
+  it('agentCompositesDir → <agentDir>/composites', () => {
+    expect(agentCompositesDir()).toBe(
+      path.join(os.homedir(), '.tool-agents', AGENT_TOOL_NAME, 'composites'),
+    );
+  });
+
+  it('bootstrapAgentDir creates the three composite directories at mode 0o700', async () => {
+    const fsp = await import('node:fs/promises');
+    const mkdir = fsp.mkdir as unknown as ReturnType<typeof vi.fn>;
+    mkdir.mockClear();
+    const chmod = fsp.chmod as unknown as ReturnType<typeof vi.fn>;
+    chmod.mockClear();
+
+    const agentDir = agentToolAgentsDir();
+    await bootstrapAgentDir(agentDir);
+
+    const compositeCapabilities = path.join(agentDir, 'capabilities', 'composite');
+    const compositeDistill = path.join(agentDir, 'capabilities', 'composite', '_distill');
+    const compositesRoot = path.join(agentDir, 'composites');
+
+    const mkdirCalls = mkdir.mock.calls.map((c) => String(c[0]));
+    expect(mkdirCalls).toContain(compositeCapabilities);
+    expect(mkdirCalls).toContain(compositeDistill);
+    expect(mkdirCalls).toContain(compositesRoot);
+
+    // Each call carries the 0o700 mode flag (asserted on the second arg).
+    for (const targetDir of [compositeCapabilities, compositeDistill, compositesRoot]) {
+      const call = mkdir.mock.calls.find((c) => String(c[0]) === targetDir);
+      expect(call).toBeDefined();
+      expect(call![1]).toMatchObject({ recursive: true, mode: 0o700 });
+    }
+  });
+
+  it('loadAgentConfig populates compositeCapabilitiesDir / compositeDistillDir / compositesDir', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.compositeCapabilitiesDir).toBe(
+      path.join(agentCapabilitiesDir(), 'composite'),
+    );
+    expect(cfg.compositeDistillDir).toBe(
+      path.join(agentCapabilitiesDir(), 'composite', '_distill'),
+    );
+    expect(cfg.compositesDir).toBe(agentCompositesDir());
   });
 });
 

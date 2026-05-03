@@ -1,0 +1,67 @@
+{
+  "_format": "Per plan-006 §14.N fixture pattern. Keys are stage labels rather than prompt sha256s in this initial fixture; future iterations of test_scripts/lib/synthesisFixture.ts may rekey by prompt digest. Each value is the canned LLM response.",
+  "stage1.file-cli": {
+    "content": {
+      "synopsis": "file-cli is a small POSIX CLI that lists, reads, writes, and digests files on the local filesystem.",
+      "intents": ["list directory", "read file", "write file", "compute digest"],
+      "subcommands": [
+        { "name": "ls", "purpose": "list directory contents" },
+        { "name": "read", "purpose": "print file contents" },
+        { "name": "write", "purpose": "overwrite a file with given text" },
+        { "name": "digest", "purpose": "print the sha256 digest of a file" }
+      ],
+      "flags": [
+        { "name": "--long", "purpose": "long-listing format for ls" },
+        { "name": "--no-newline", "purpose": "omit trailing newline for read" },
+        { "name": "--mode", "purpose": "explicit POSIX mode for write" }
+      ],
+      "examples": [
+        { "command": "file-cli ls /tmp", "explanation": "list /tmp" },
+        { "command": "file-cli read README.md", "explanation": "print README" },
+        { "command": "file-cli write /tmp/x \"hi\"", "explanation": "write hi to /tmp/x" }
+      ],
+      "constraints": [
+        "no authentication required",
+        "refuses to overwrite files outside cfg.fileEdit.root when invoked via cli-agent"
+      ]
+    },
+    "usage": { "input_tokens": 480, "output_tokens": 220 }
+  },
+  "stage1.outlook-cli": {
+    "content": {
+      "synopsis": "outlook-cli wraps Microsoft Graph mail with auth, list, send, read subcommands.",
+      "intents": ["sign in", "send email", "list inbox", "read message"],
+      "subcommands": [
+        { "name": "auth", "purpose": "interactive device-code login" },
+        { "name": "send", "purpose": "send an email" },
+        { "name": "list", "purpose": "list inbox messages" },
+        { "name": "read", "purpose": "fetch full message body by id" }
+      ],
+      "flags": [
+        { "name": "--to", "purpose": "recipient address (repeatable)" },
+        { "name": "--subject", "purpose": "message subject" },
+        { "name": "--body-file", "purpose": "path to file whose contents become the body" },
+        { "name": "--folder", "purpose": "folder name to list/read; default Inbox" }
+      ],
+      "examples": [
+        { "command": "outlook-cli auth", "explanation": "sign in" },
+        { "command": "outlook-cli send --to a@b.c --subject hi --body-file note.txt", "explanation": "send a note" },
+        { "command": "outlook-cli list --top 10", "explanation": "list ten newest" }
+      ],
+      "constraints": [
+        "requires prior outlook-cli auth",
+        "subject to Microsoft Graph rate limits",
+        "cannot delete messages in v1"
+      ]
+    },
+    "usage": { "input_tokens": 510, "output_tokens": 250 }
+  },
+  "stage2.compose": {
+    "markdown": "## Synopsis\n\nThe `email-assistant` composite combines `file-cli` (filesystem read/write) with `outlook-cli` (Microsoft Graph email send/receive) so an agent can package files into outbound email and unpack inbound attachments to disk.\n\n## Cross-tool intents\n\n- email a file to a recipient\n- save an inbound message body to disk\n- compute a file digest and email it for verification\n- list inbox and dump matching messages to disk\n\n## Parameter glossary\n\n- `path` (file-cli): filesystem path the local CLI operates on.\n- `--to` (outlook-cli): recipient email address; repeatable for multi-recipient.\n- `--subject` (outlook-cli): subject line of an outbound email.\n- `--body-file` (outlook-cli): path on disk whose contents become the email body.\n- `--folder` (outlook-cli): name of the Outlook folder to list/read from.\n\n## Cross-tool recipes\n\n### Email a local file\n\nAttach a file's text body to an outbound email. Use `file-cli read` for arbitrary file types or pass `--body-file` directly when the file is already in the right shape.\n\n```sh\nfile-cli read <source-path> > /tmp/body.txt && outlook-cli send --to <recipient> --subject \"<subject>\" --body-file /tmp/body.txt\n```\n\n### Verify a file with its digest\n\nCompute the file's digest and email it as plain text so a human recipient can independently verify the same file.\n\n```sh\nfile-cli digest <source-path> > /tmp/digest.txt && outlook-cli send --to <recipient> --subject \"sha256 of <source-path>\" --body-file /tmp/digest.txt\n```\n\n### Save an inbound message body to disk\n\nFetch the full body of a message and persist it to a file. Useful for archiving important notifications.\n\n```sh\noutlook-cli read <message-id> > /tmp/msg.txt && file-cli write <archive-path> \"$(cat /tmp/msg.txt)\"\n```\n\n## Constraints and notes\n\n- `outlook-cli` requires a successful `auth` round-trip before any send/read; cache lives in `~/.tool-agents/outlook-cli/`.\n- `file-cli` write paths are restricted by `cfg.fileEdit.root` when invoked through cli-agent.\n- Microsoft Graph rate limits apply to bulk inbox iteration; throttle accordingly.\n- All examples use bracket-placeholders (`<source-path>`, `<recipient>`); the user supplies the real values at invocation time.\n",
+    "usage": {
+      "input_tokens": 1850,
+      "output_tokens": 720,
+      "input_token_details": { "cache_read": 1200, "cache_creation": 200 }
+    }
+  }
+}
