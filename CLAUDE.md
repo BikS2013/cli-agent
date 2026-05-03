@@ -60,3 +60,4 @@
 ## Tools
 
 - **cli-agent** — Generic LangGraph ReAct agent that wraps external CLI binaries, auto-introspects their `--help` trees to build capability documents, and exposes the full bash/file/web cross-cutting toolkit backed by all eight standard LLM providers. See `docs/tools/cli-agent.md`.
+Hello from Codespace
