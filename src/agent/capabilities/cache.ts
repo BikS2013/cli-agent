@@ -103,3 +103,30 @@ export async function writeCacheEntry(
 export function toolCapabilityPath(capabilitiesDir: string, tool: string): string {
   return path.join(capabilitiesDir, `${tool}.md`);
 }
+
+/**
+ * Read the raw on-disk capability doc for `tool`, **regardless of its
+ * schema version**. Returns `null` when the file does not exist.
+ *
+ * This is the preservation seam for user-curated sections (`USER-NOTES`,
+ * `USER-RECIPES`). `readCacheEntry` deliberately rejects mismatched
+ * schema versions so it can drive re-discovery, but at rewrite time we
+ * still need to keep the user's content — even if the doc on disk was
+ * authored against a different (older or composite) schema. Going
+ * through `readCacheEntry` for this loses those sections silently.
+ *
+ * Use this when composing a fresh capability doc, or before writing a
+ * "binary not found" placeholder.
+ */
+export async function readRawCapabilityDoc(
+  capabilitiesDir: string,
+  tool: string,
+): Promise<string | null> {
+  const filePath = path.join(capabilitiesDir, `${tool}.md`);
+  try {
+    return await fsp.readFile(filePath, 'utf8');
+  } catch (e) {
+    if ((e as { code?: string }).code === 'ENOENT') return null;
+    throw e;
+  }
+}
