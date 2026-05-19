@@ -14,8 +14,12 @@ import path from 'node:path';
 import fsp from 'node:fs/promises';
 import { runHelp } from './runHelp.js';
 import { extractSubcommands } from './extractSubcommands.js';
-import { composeCapabilityDoc } from './composeMarkdown.js';
-import { readCacheEntry, writeCacheEntry } from './cache.js';
+import {
+  composeCapabilityDoc,
+  extractUserNotes,
+  extractUserRecipes,
+} from './composeMarkdown.js';
+import { readCacheEntry, readRawCapabilityDoc, writeCacheEntry } from './cache.js';
 import { getBinaryInfo } from './invalidate.js';
 import { detectManRef } from './manref.js';
 import type { AgentConfig } from '../../config/agent-config.js';
@@ -223,7 +227,23 @@ export async function discoverTool(
     onPhase?.({ kind: 'not_found', tool });
     const msg = `Binary '${tool}' not found on PATH. Add it to PATH or check the tool name.`;
     process.stderr.write(`[cli-agent] WARNING: ${msg}\n`);
-    // Write placeholder doc
+    // Read any pre-existing doc so we preserve the user-curated
+    // `USER-NOTES` and `USER-RECIPES` sections. We use the raw-file
+    // helper instead of `readCacheEntry` so the preservation works
+    // across schema versions (a v1 / v3 doc must NOT lose its user
+    // content just because the binary momentarily disappeared from
+    // PATH — e.g. wrong shell, wrong container, missing dependency).
+    const existingRaw = await readRawCapabilityDoc(cfg.capabilitiesDir, tool);
+    const preservedNotes = existingRaw ? extractUserNotes(existingRaw) : '';
+    const preservedRecipes = existingRaw ? extractUserRecipes(existingRaw) : '';
+    const userNotesBlock = preservedNotes
+      || '<!-- USER-NOTES:START -->\n<!-- USER-NOTES:END -->';
+    const userRecipesBlock = preservedRecipes
+      || '<!-- USER-RECIPES:START -->\n<!-- USER-RECIPES:END -->';
+    // Schema version stays at the supported value (currently 2) — we
+    // do NOT downgrade to 1 just because discovery couldn't introspect
+    // the binary. A future read-back with the regular `readCacheEntry`
+    // path must continue to recognise the doc.
     const placeholder = [
       '---',
       `tool: ${tool}`,
@@ -234,7 +254,7 @@ export async function discoverTool(
       `introspectedAt: ${new Date().toISOString()}`,
       `introspectionDepth: 0`,
       `introspectionBytes: 0`,
-      `schemaVersion: 1`,
+      `schemaVersion: 2`,
       '---',
       '',
       `<!-- AUTO-GENERATED:START hash=not-found -->`,
@@ -243,9 +263,10 @@ export async function discoverTool(
       `The binary '${tool}' was not found on PATH when capability discovery ran.`,
       '<!-- AUTO-GENERATED:END -->',
       '',
-      '<!-- USER-NOTES:START -->',
-      '<!-- USER-NOTES:END -->',
-    ].join('\n');
+      userRecipesBlock,
+      '',
+      userNotesBlock,
+    ].join('\n') + '\n';
     await writeCacheEntry(cfg.capabilitiesDir, tool, placeholder);
     return { tool, status: 'not-found', message: msg, durationMs: Date.now() - start };
   }
@@ -258,12 +279,21 @@ export async function discoverTool(
   // composer omits both the frontmatter line and the inline section.
   const manRefResult = await detectManRef(tool, cfg.capabilities.timeoutMs);
 
-  // Read existing doc (only used here to preserve USER-NOTES across
-  // regeneration). The doc-exists shortcut above already returned early
-  // when a cached doc was acceptable, so reaching this line means we are
-  // either forcing a refresh or recovering from a binary-not-found
-  // placeholder; either way we still want to keep the user's notes.
-  const existing = await readCacheEntry(cfg.capabilitiesDir, tool);
+  // Read existing doc (only used here to preserve USER-NOTES +
+  // USER-RECIPES across regeneration). The doc-exists shortcut above
+  // already returned early when a cached doc was acceptable, so
+  // reaching this line means we are either forcing a refresh or
+  // recovering from a binary-not-found placeholder; either way we
+  // still want to keep the user's curated content.
+  //
+  // We deliberately use `readRawCapabilityDoc` here, not
+  // `readCacheEntry`. `readCacheEntry` returns `null` for any doc whose
+  // schema version does not match the current `SUPPORTED_SCHEMA_VERSION`
+  // (e.g. legacy schema-1 docs, or schema-3 composite mirrors that the
+  // user happens to have annotated). Going through that filter would
+  // silently drop the user's `USER-NOTES` / `USER-RECIPES` content on
+  // refresh — exactly what this preservation step exists to prevent.
+  const existingRawDoc = await readRawCapabilityDoc(cfg.capabilitiesDir, tool);
 
   // Introspect top-level help
   const helpStart = Date.now();
@@ -362,7 +392,7 @@ export async function discoverTool(
       manRef: manRefResult.manRef,
       manPagePath: manRefResult.manPagePath,
     },
-    existing?.fullContent,
+    existingRawDoc ?? undefined,
   );
 
   await writeCacheEntry(cfg.capabilitiesDir, tool, doc);

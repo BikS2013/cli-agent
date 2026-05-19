@@ -2,12 +2,6 @@
 
 ## Pending
 
-### [LOW] Failed discovery may overwrite a composite mirror doc with a schema-1 placeholder
-- When `discoverTool` falls through to binary lookup for a composite (which only happens in pre-patch installs OR when the manifest is removed but the mirror remains), a schema-1 "binary not found" placeholder is written to `<capabilitiesDir>/<tool>.md` at `discover.ts:189-211`. This overwrites the composite mirror.
-- The patched `discoverTool` now short-circuits virtual composites (manifest + mirror present) BEFORE binary lookup, so this can no longer happen for healthy composites. But pre-existing placeholder docs from earlier failed runs persist on disk.
-- Recovery for affected users: re-run synthesis with `--regenerate-capabilities` to restore the real mirror doc.
-- Suggested follow-up: in `discoverTool` not-found path, do not overwrite an existing schema-3 mirror with a schema-1 placeholder. (Currently `writeCacheEntry` blindly writes; should refuse if the existing file's frontmatter declares `composite: true`.)
-
 ### [LOW] plan-006 §14.P named cache-export rename (readCompositeCacheEntry / writeCompositeCacheEntry → readCompositeDoc / writeCompositeDoc)
 - Design §14.P names U-DOC's exports as `readCompositeCacheEntry` /
   `writeCompositeCacheEntry`. The implementation chose
@@ -129,6 +123,17 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — capability docs always preserve user-curated sections (USER-NOTES, USER-RECIPES)
+- **Symptom**: a previously curated capability doc could lose its `USER-NOTES` and/or `USER-RECIPES` content under two paths:
+  1. Binary not found on PATH → `discoverTool` wrote a fresh schema-1 "BINARY NOT FOUND" placeholder over any existing doc, dropping all user-curated content and omitting the `USER-RECIPES` markers entirely (which then broke `extract-recipes` for that tool).
+  2. Schema mismatch on forced refresh → `discoverTool` extracted the existing doc through `readCacheEntry`, which returns `null` for any doc whose `schemaVersion` differs from the supported value (schema-1 legacy docs, schema-3 composite mirrors), so the composer received `undefined` for `existingDoc` and silently dropped the user content.
+- **Fix**:
+  - `src/agent/capabilities/cache.ts` — added `readRawCapabilityDoc(capabilitiesDir, tool)` that returns the on-disk file contents regardless of schema version. This is the new preservation seam for user-curated sections.
+  - `src/agent/capabilities/discover.ts` — main compose path now reads the existing doc via `readRawCapabilityDoc` (so legacy schemas keep their notes/recipes through regeneration); binary-not-found placeholder reads existing user content and re-emits it inside the placeholder, always seeds both `USER-RECIPES` and `USER-NOTES` marker pairs, and stops downgrading `schemaVersion` to 1.
+  - `src/agent/capabilities/discover.spec.ts` — three new regression tests: schema-1 → re-introspect preserves notes; binary-not-found preserves notes + recipes from a v2 doc; fresh capabilities dir still seeds both marker pairs.
+- **Behaviour guarantee**: `discoverTool` never deletes a capability doc, and any rewrite preserves the `<!-- USER-NOTES … -->` and `<!-- USER-RECIPES … -->` blocks verbatim. Composite delete (`composite delete` / `composite/regen.ts`) is the only remaining path that removes a capability file, and that is user-initiated.
+- All 826 tests pass, including the 3 new regression tests.
 
 ### Done — plan-005 Phase 7 deferred items closed (AC-19, E9, AC-22)
 - **AC-19 / FR-PROF-007** — `profile_active` JSONL log event added.

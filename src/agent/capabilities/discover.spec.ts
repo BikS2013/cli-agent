@@ -338,6 +338,165 @@ describe('discoverTool — doc-exists shortcut', () => {
   });
 });
 
+describe('discoverTool — preserves user-curated sections', () => {
+  beforeEach(() => {
+    vi.mocked(invalidate.getBinaryInfo).mockClear();
+  });
+
+  it('preserves USER-NOTES when re-introspecting a schema-1 doc (forceRefresh)', async () => {
+    // A pre-existing schema-1 doc is a cache miss for `readCacheEntry`,
+    // so the previous code path passed `existing?.fullContent =
+    // undefined` to the composer and silently dropped the user's notes.
+    // The raw-file preservation path must keep them.
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
+    const v1Doc = [
+      '---',
+      'tool: git',
+      'binaryPath: /usr/bin/git',
+      'binaryMtimeMs: 1',
+      'versionString: ""',
+      'versionHash: x',
+      'introspectedAt: 2026-04-26T00:00:00Z',
+      'introspectionDepth: 2',
+      'introspectionBytes: 10',
+      'schemaVersion: 1',
+      '---',
+      '',
+      '<!-- AUTO-GENERATED:START hash=h -->',
+      '# git',
+      '<!-- AUTO-GENERATED:END -->',
+      '',
+      '<!-- USER-NOTES:START -->',
+      '- IMPORTANT: We use git switch not git checkout',
+      '- All pushes require --force-with-lease',
+      '<!-- USER-NOTES:END -->',
+    ].join('\n');
+    await fsp.writeFile(path.join(tmpDir, 'git.md'), v1Doc, 'utf8');
+
+    const runHelpMod = await import('./runHelp.js');
+    const extractMod = await import('./extractSubcommands.js');
+    const runHelpSpy = vi.spyOn(runHelpMod, 'runHelp').mockResolvedValue({
+      text: 'usage: git ...',
+      truncated: false,
+    } as unknown as Awaited<ReturnType<typeof runHelpMod.runHelp>>);
+    vi.spyOn(extractMod, 'extractSubcommands').mockResolvedValue([]);
+
+    vi.mocked(invalidate.getBinaryInfo).mockResolvedValueOnce({
+      resolvedPath: '/usr/bin/git',
+      mtimeMs: 1,
+      versionString: 'git 2.45',
+      versionHash: 'sha256:fake',
+    });
+
+    await discoverTool(
+      'git',
+      makeCfg(tmpDir, { skipLlmBelowBytes: 0 }),
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      true, // forceRefresh
+      Date.now() + 60000,
+    );
+
+    const written = await fsp.readFile(path.join(tmpDir, 'git.md'), 'utf8');
+    expect(written).toContain('IMPORTANT: We use git switch not git checkout');
+    expect(written).toContain('All pushes require --force-with-lease');
+    runHelpSpy.mockRestore();
+  });
+
+  it('preserves USER-NOTES + USER-RECIPES when binary becomes not-found', async () => {
+    // Originally, the binary-not-found placeholder write blew away any
+    // existing user content. A user who carefully curated notes/recipes
+    // for `git` should NOT lose them just because PATH is misconfigured
+    // for one invocation. The placeholder must keep them verbatim.
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
+    const existingDoc = [
+      '---',
+      'tool: git',
+      'binaryPath: /usr/bin/git',
+      'binaryMtimeMs: 1',
+      'versionString: "git 2.45"',
+      'versionHash: sha256:abc',
+      'introspectedAt: 2026-04-26T00:00:00Z',
+      'introspectionDepth: 2',
+      'introspectionBytes: 100',
+      'schemaVersion: 2',
+      '---',
+      '',
+      '<!-- AUTO-GENERATED:START hash=h -->',
+      '# git',
+      '<!-- AUTO-GENERATED:END -->',
+      '',
+      '<!-- USER-RECIPES:START -->',
+      '### Commit staged changes',
+      '```bash',
+      'git commit -m "<message>"',
+      '```',
+      '<!-- USER-RECIPES:END -->',
+      '',
+      '<!-- USER-NOTES:START -->',
+      '- IMPORTANT: never push --force without --force-with-lease',
+      '<!-- USER-NOTES:END -->',
+    ].join('\n');
+    await fsp.writeFile(path.join(tmpDir, 'git.md'), existingDoc, 'utf8');
+
+    // Binary not found on PATH.
+    vi.mocked(invalidate.getBinaryInfo).mockResolvedValueOnce(null);
+
+    const result = await discoverTool(
+      'git',
+      makeCfg(tmpDir),
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      true, // forceRefresh — bypass doc-exists shortcut to reach probe
+      Date.now() + 60000,
+    );
+
+    expect(result.status).toBe('not-found');
+    const written = await fsp.readFile(path.join(tmpDir, 'git.md'), 'utf8');
+    // Auto-gen block must be the not-found placeholder.
+    expect(written).toContain('BINARY NOT FOUND');
+    // ...but the user-curated sections must be preserved verbatim.
+    expect(written).toContain('### Commit staged changes');
+    expect(written).toContain('git commit -m "<message>"');
+    expect(written).toContain('IMPORTANT: never push --force without --force-with-lease');
+    // The placeholder must include the USER-RECIPES markers (the old
+    // version omitted them entirely, which broke `extract-recipes` on
+    // any tool that had ever been not-found).
+    expect(written).toContain('<!-- USER-RECIPES:START -->');
+    expect(written).toContain('<!-- USER-RECIPES:END -->');
+    // Schema must NOT downgrade to 1.
+    expect(written).toContain('schemaVersion: 2');
+  });
+
+  it('binary-not-found on a fresh capability dir still emits both marker pairs', async () => {
+    // Even when there is no pre-existing doc to preserve from, the
+    // placeholder must still seed both USER-RECIPES and USER-NOTES
+    // markers so subsequent `extract-recipes` calls work without a
+    // "missing markers" error.
+    const tmpDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cli-agent-cap-'));
+    vi.mocked(invalidate.getBinaryInfo).mockResolvedValueOnce(null);
+
+    await discoverTool(
+      'nonexistent-tool-xyz',
+      makeCfg(tmpDir),
+      FAKE_MODEL,
+      FAKE_LOGGER,
+      true,
+      Date.now() + 60000,
+    );
+
+    const written = await fsp.readFile(
+      path.join(tmpDir, 'nonexistent-tool-xyz.md'),
+      'utf8',
+    );
+    expect(written).toContain('<!-- USER-RECIPES:START -->');
+    expect(written).toContain('<!-- USER-RECIPES:END -->');
+    expect(written).toContain('<!-- USER-NOTES:START -->');
+    expect(written).toContain('<!-- USER-NOTES:END -->');
+    expect(written).toContain('schemaVersion: 2');
+  });
+});
+
 describe('discoverTool — virtual-composite shortcut (plan-006 patch)', () => {
   beforeEach(() => {
     vi.mocked(invalidate.getBinaryInfo).mockClear();
