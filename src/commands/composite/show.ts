@@ -1,8 +1,14 @@
 /**
- * `composite-show <name>` — print the cached schema-3 composite doc.
+ * `composite-show <name> [args...]` — print the cached schema-3 composite doc
+ * (default) or the resolved underlying command (`--command`).
  *
  * Default output: raw markdown body verbatim.
  * `--json` opts into a structured payload (frontmatter + bodies).
+ * `--command` opts into a "show what would run" mode that prints the
+ *   shell-pasteable command the composite would dispatch — without
+ *   executing it. Trailing positional args are folded into the resolved
+ *   argv exactly as `dispatchComposite` would pass them, so the user can
+ *   preview how invocation arguments alter the spawn.
  *
  * Spec: plan-006 §14.E; FR-CMP-022; AC-22.
  *
@@ -15,11 +21,28 @@
 
 import { agentCompositeCapabilitiesDir } from '../../config/agent-config.js';
 import { readCompositeDoc } from '../../agent/composite/cache.js';
+import {
+  buildCompositeArgv,
+  formatCompositeCommand,
+  resolveCliAgentBinPath,
+} from '../../agent/composite/dispatcher.js';
 import { ConfigurationError, UsageError } from '../../errors.js';
 import { canonicalDocPathFor, emitJson, validateCompositeName } from './shared.js';
 
 export interface CompositeShowOpts {
   readonly json?: boolean;
+  /** When true, print the resolved command (cli-agent + --tool flags +
+   * invocation args) the composite would dispatch, instead of the doc.
+   * Mutually compatible with `--json` (then prints a structured object
+   * carrying the same data). */
+  readonly command?: boolean;
+  /** Trailing positional args from the CLI, folded into the resolved
+   * argv after the `--tool <member>` flags. Empty when the user did not
+   * supply any. */
+  readonly invocationArgs?: readonly string[];
+  /** Test seam — overrides `resolveCliAgentBinPath()` so the snapshot
+   * is deterministic and the test never depends on the host's PATH. */
+  readonly cliAgentBinPathOverride?: string;
   /** Test seam — overrides the resolved composite-capabilities dir. */
   readonly compositeCapabilitiesDirOverride?: string;
 }
@@ -51,6 +74,28 @@ export async function runCompositeShow(
         details: r.details,
       },
     );
+  }
+
+  if (opts.command) {
+    const invocationArgs = opts.invocationArgs ?? [];
+    const binPath = opts.cliAgentBinPathOverride ?? resolveCliAgentBinPath();
+    const members = r.doc.frontmatter.members;
+    const argv = buildCompositeArgv(members, invocationArgs);
+    const commandLine = formatCompositeCommand(binPath, members, invocationArgs);
+
+    if (opts.json) {
+      emitJson({
+        compositeName: r.doc.frontmatter.compositeName,
+        members: [...members],
+        binPath,
+        invocationArgs: [...invocationArgs],
+        argv: [binPath, ...argv],
+        commandLine,
+      });
+      return;
+    }
+    process.stdout.write(commandLine + '\n');
+    return;
   }
 
   if (opts.json) {

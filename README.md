@@ -262,6 +262,9 @@ cli-agent [prompt]                            # one-shot or TUI when no prompt
 cli-agent --interactive                       # legacy readline REPL fallback
 cli-agent show-capabilities --tool <name>     # print cached capability doc
 cli-agent refresh-capabilities [--tool <name>]   # re-introspect one or all
+cli-agent composite-show <name>               # print the synthesised composite doc
+cli-agent composite-show <name> --command [args...]   # print the resolved underlying command
+                                              # (cli-agent + --tool flags + trailing args) WITHOUT executing it
 ```
 
 | Invocation | Mode |
