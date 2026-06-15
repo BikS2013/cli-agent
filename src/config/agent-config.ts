@@ -17,7 +17,7 @@ import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { ConfigurationError, ProviderNotSupportedError, UsageError } from '../errors.js';
-import { BUILTIN_DEFAULT_SYSTEM_PROMPT } from '../agent/system-prompt.js';
+import { BUILTIN_DEFAULT_SYSTEM_PROMPT, LEGACY_DEFAULT_SYSTEM_PROMPTS } from '../agent/system-prompt.js';
 import { BUILTIN_TOOL_PROMPTS } from '../agent/tools/tool-prompts-builtin.js';
 import {
   loadOverlayRegistry,
@@ -122,14 +122,42 @@ export interface AgentConfigFile {
       readonly patch?: boolean;
       readonly todoRead?: boolean;
       readonly todoWrite?: boolean;
+      readonly webSearch?: boolean;
+      readonly webFetch?: boolean;
+      /** First-party file wrappers (plan-012). Re-homed from the former
+       * built-in file_* tools; reuse the sandbox. read/list read-only,
+       * write/edit/append mutation-gated downstream. */
+      readonly fileRead?: boolean;
+      readonly fileList?: boolean;
+      readonly fileWrite?: boolean;
+      readonly fileEdit?: boolean;
+      readonly fileAppend?: boolean;
     };
   };
+  /** Tool-loading group toggles (plan-008). config.json tier of the uniform
+   * precedence chain CLI flag > env > config.json > profile > default(load).
+   * Each is OPTIONAL on the file shape — `undefined` defers to the next tier
+   * (profile → default load). Explicit user settings, NOT runtime fallbacks
+   * for missing required config.
+   *   composites   → load every virtual/composite tool (loadVirtualToolsSync)
+   *   builtinTools → load the cross-cutting toolkit (bash_*, tool_help; file_*
+   *                  and web_* moved to the agt_ pack — plan-011/plan-012) */
+  readonly composites?: boolean;
+  readonly builtinTools?: boolean;
   /** Optional override for the tool-prompt overlay directory. When unset
    * the resolver computes `<agentDir>/tool-prompts/`. Same path-resolution
    * rules as the system prompt: absolute path → verbatim; bare folder
    * name → joined onto `agentDir`; relative path with separators →
    * resolved against `process.cwd()`. */
   readonly toolPromptsDir?: string;
+  /** LLM I/O inspector (plan-007). All fields OPTIONAL on the file
+   * shape; resolution applies them in `loadAgentConfig`. `enabled`
+   * turns the capture channel on (config.json tier — lowest priority
+   * of the three explicit tiers). `redact: false` opts out of
+   * redaction for captures only. `dir` overrides the default capture
+   * directory (`<agentDir>/io-captures/`). These are explicit user
+   * settings, NOT runtime fallbacks for missing required config. */
+  readonly inspectIo?: { enabled?: boolean; redact?: boolean; dir?: string };
 }
 
 /** Frozen provider env snapshot — factories read only from this. */
@@ -177,6 +205,16 @@ export interface AgentConfig {
   /** Per-composite manifest + wrapper-shim folder root (plan-006
    * §14.F). Always populated. */
   readonly compositesDir: string;
+  /** Resolved view of the LLM I/O inspector switch (plan-007).
+   * `null` when the inspector is NOT requested — the normal disabled
+   * state, distinct from a misconfiguration. When requested, a fully
+   * populated object: `enabled` is always `true`, `redact` reflects
+   * the raw opt-out, and `dir` is the (created, writable) capture
+   * directory. NEVER silently defaulted: an explicitly-requested-but-
+   * uninitialisable inspector raises `ConfigurationError` in
+   * `loadAgentConfig` (FR-10), so this field is `null` ONLY when the
+   * switch is off, never as a fallback. */
+  readonly inspectIo: { enabled: boolean; redact: boolean; dir: string } | null;
   readonly providerEnv: ProviderEnvSnapshot;
   /** Merged tool list from config.json + CLI --tool flags (deduped). */
   readonly tools: ReadonlyArray<string>;
@@ -210,8 +248,30 @@ export interface AgentConfig {
       readonly patch: boolean;
       readonly todoRead: boolean;
       readonly todoWrite: boolean;
+      /** First-party web wrappers (plan-011). Read-only; default true. */
+      readonly webSearch: boolean;
+      readonly webFetch: boolean;
+      /** First-party file wrappers (plan-012). Re-homed from the former
+       * built-in file_* tools, reusing the sandbox. read/list read-only;
+       * write/edit/append default-on but mutation-gated in group-builder. */
+      readonly fileRead: boolean;
+      readonly fileList: boolean;
+      readonly fileWrite: boolean;
+      readonly fileEdit: boolean;
+      readonly fileAppend: boolean;
     };
   };
+  /** Resolved tool-loading group toggles (plan-008). ALWAYS present on the
+   * resolved config — the uniform precedence chain
+   * (CLI flag > env > config.json > profile > default(load)) applies the
+   * documented default `true` (load) at the end. The defaults are explicit
+   * starting values, NOT runtime fallbacks for missing required config.
+   *   composites   → when false, no virtual/composite tools are loaded.
+   *   builtinTools → when false, the cross-cutting toolkit
+   *                  (file_*, web_*, bash_*, tool_help) is not built. NOTE this
+   *                  also removes bash_run — the path used to run wrapped CLIs. */
+  readonly composites: boolean;
+  readonly builtinTools: boolean;
   /** Absolute path to the tool-prompt overlay directory. Always populated
    * by `loadAgentConfig` — resolved from config.json override or
    * `<agentDir>/tool-prompts/`. The directory is created during
@@ -300,8 +360,26 @@ export interface AgentCliFlags {
       readonly patch?: boolean;
       readonly todoRead?: boolean;
       readonly todoWrite?: boolean;
+      readonly webSearch?: boolean;
+      readonly webFetch?: boolean;
+      /** First-party file wrappers (plan-012). */
+      readonly fileRead?: boolean;
+      readonly fileList?: boolean;
+      readonly fileWrite?: boolean;
+      readonly fileEdit?: boolean;
+      readonly fileAppend?: boolean;
     };
   };
+  /** Tool-loading group toggles (plan-008) — CLI tier (highest priority).
+   * Tri-state: `true` loads the group, `false` suppresses it, `undefined`
+   * defers to the next tier (env → config.json → profile → default load).
+   * Commander maps `--composites` ⇒ `true`, `--no-composites` ⇒ `false`
+   * (and likewise for `--builtin-tools` / `--no-builtin-tools`).
+   *   composites   → every virtual/composite tool (loadVirtualToolsSync)
+   *   builtinTools → the cross-cutting toolkit (bash_*, tool_help; file_*
+   *                  and web_* moved to the agt_ pack — plan-011/plan-012) */
+  readonly composites?: boolean;
+  readonly builtinTools?: boolean;
   /** Activate a named configuration profile (plan-005). When set the
    * loader resolves `<agentDir>/profiles/<name>.{yaml|yml|json}` and
    * threads `cliParams` into the per-knob precedence chain at tier 5.
@@ -349,6 +427,24 @@ export interface AgentCliFlags {
   /** Manual `--help` flag (P4 migrates Commander's auto-help to a
    * manual flag so the composite branch can intercept). */
   readonly help?: boolean;
+  /* ---------- LLM I/O inspector flags (plan-007) ----------
+   *
+   * Diagnostic switch that captures the EXACT provider-normalized
+   * request (assembled system prompt + full in-thread memory + current
+   * user content + bound tool/function JSON schemas) and response
+   * (assistant text + parsed tool-calls + tool results) for every LLM
+   * turn to a tailable JSONL file. Both fields are tri-state: `true`
+   * forces on; `undefined` defers to env (`CLI_AGENT_INSPECT_IO` /
+   * `CLI_AGENT_INSPECT_IO_RAW`) → config.json (`inspectIo`) → off.
+   * Resolution is no-fallback: an explicitly-requested-but-
+   * uninitialisable inspector raises `ConfigurationError`, never a
+   * silent downgrade (FR-10). */
+  /** `--inspect-io` — enable the LLM I/O capture channel. */
+  readonly inspectIo?: boolean;
+  /** `--inspect-io-raw` — disable redaction for the capture channel
+   * only (prints a prominent stderr warning before any byte is
+   * written). */
+  readonly inspectIoRaw?: boolean;
 }
 
 /* ---------- Paths ---------- */
@@ -416,6 +512,14 @@ export function agentLogsDir(): string {
   return path.join(agentToolAgentsDir(), 'logs');
 }
 
+/** Default directory for LLM I/O inspector captures (plan-007).
+ * Mirrors `agentLogsDir()`. Created at mode 0o700 by
+ * `bootstrapAgentDir`; can be overridden per-run via
+ * `config.json` `inspectIo.dir`. */
+export function agentIoCapturesDir(): string {
+  return path.join(agentToolAgentsDir(), 'io-captures');
+}
+
 /* ---------- Bootstrap ---------- */
 
 export async function bootstrapAgentDir(
@@ -425,6 +529,7 @@ export async function bootstrapAgentDir(
   const agentDir = dir ?? agentToolAgentsDir();
   const envPath = path.join(agentDir, '.env');
   const logsDir = path.join(agentDir, 'logs');
+  const ioCapturesDir = path.join(agentDir, 'io-captures');
   const capabilitiesDir = path.join(agentDir, 'capabilities');
   const toolPromptsDir = opts.toolPromptsDir ?? path.join(agentDir, 'tool-prompts');
   const seedToolPrompts = opts.seedToolPrompts ?? true;
@@ -434,6 +539,12 @@ export async function bootstrapAgentDir(
 
   await fsp.mkdir(logsDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(logsDir, 0o700); } catch { /* tolerated */ }
+
+  // LLM I/O inspector capture directory (plan-007). Additive: directory
+  // only, never seeded. Mode 0o700 matches the logs/ privacy invariant
+  // — captures can contain the full system prompt + memory + tool args.
+  await fsp.mkdir(ioCapturesDir, { recursive: true, mode: 0o700 });
+  try { await fsp.chmod(ioCapturesDir, 0o700); } catch { /* tolerated */ }
 
   await fsp.mkdir(capabilitiesDir, { recursive: true, mode: 0o700 });
   try { await fsp.chmod(capabilitiesDir, 0o700); } catch { /* tolerated */ }
@@ -486,6 +597,25 @@ export async function bootstrapAgentDir(
       const code = (e as { code?: string }).code;
       if (code !== 'EEXIST') throw e;
     }
+  } else {
+    // In-place upgrade (plan-009): if the existing system-prompt.md is an
+    // UNMODIFIED prior default (byte-exactly equal to any entry in
+    // LEGACY_DEFAULT_SYSTEM_PROMPTS), overwrite it with the new slim
+    // BUILTIN_DEFAULT_SYSTEM_PROMPT so the built-in tool instructions move
+    // into the runtime conditional block. If it differs at all (user-
+    // customized, or already the new slim default) → leave it UNTOUCHED.
+    // This is NOT a runtime fallback; a missing/unreadable selected prompt
+    // still raises UsageError at load time. Never throw from the upgrade —
+    // a failed upgrade simply leaves the existing file in place.
+    try {
+      const existing = await fsp.readFile(systemPromptPath, 'utf8');
+      if (
+        existing !== BUILTIN_DEFAULT_SYSTEM_PROMPT &&
+        LEGACY_DEFAULT_SYSTEM_PROMPTS.includes(existing)
+      ) {
+        await fsp.writeFile(systemPromptPath, BUILTIN_DEFAULT_SYSTEM_PROMPT, { mode: 0o600 });
+      }
+    } catch { /* tolerated — leave the existing file untouched on any error */ }
   }
   try { await fsp.chmod(systemPromptPath, 0o600); } catch { /* tolerated */ }
 
@@ -551,6 +681,14 @@ export async function bootstrapAgentDir(
       '# --- System prompt selection ---',
       '# Absolute path, bare filename (resolved under capabilities/), or relative path.',
       '# CLI_AGENT_SYSTEM_PROMPT=',
+      '#',
+      '# --- LLM I/O inspector ---',
+      '# Enable to capture the exact provider request/response per LLM turn',
+      '# to ~/.tool-agents/cli-agent/io-captures/ (1/true/yes/on enables).',
+      '# CLI_AGENT_INSPECT_IO=',
+      '# Set truthy to DISABLE redaction for captures only — writes secrets',
+      '# in the system prompt / memory / tool args in PLAINTEXT. Use with care.',
+      '# CLI_AGENT_INSPECT_IO_RAW=',
       '',
     ].join('\n');
     try {
@@ -696,6 +834,14 @@ const OTHER_ENV_KEYS = [
   'WEB_SEARCH_URL', 'WEB_SEARCH_API_KEY',
   'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'BRAVE_API_KEY', 'WEB_SEARCH_MAX_REQUESTS',
   'CLI_AGENT_SYSTEM_PROMPT',
+  // --- Tool-loading group toggles (plan-008) ---
+  // Inverted-disable env tier (truthy = group OFF), matching the existing
+  // CLI_AGENT_DISABLE_AGENT_TOOLS convention. Tri-state parsing via
+  // parseAgentToolsBoolEnvVar; invalid value → ConfigurationError (no fallback).
+  //   CLI_AGENT_DISABLE_COMPOSITES     → suppress all virtual/composite tools
+  //   CLI_AGENT_DISABLE_BUILTIN_TOOLS  → suppress the cross-cutting toolkit
+  'CLI_AGENT_DISABLE_COMPOSITES',
+  'CLI_AGENT_DISABLE_BUILTIN_TOOLS',
   // --- Agent-tools pack ---
   // Umbrella: when truthy (1/true/yes/on), disables the whole pack regardless
   // of per-tool flags. Tri-state parsing via parseAgentToolsBoolEnvVar.
@@ -708,6 +854,15 @@ const OTHER_ENV_KEYS = [
   'CLI_AGENT_AGT_PATCH',
   'CLI_AGENT_AGT_TODO_READ',
   'CLI_AGENT_AGT_TODO_WRITE',
+  // First-party web wrappers (plan-011), same tri-state per-tool semantics.
+  'CLI_AGENT_AGT_WEB_SEARCH',
+  'CLI_AGENT_AGT_WEB_FETCH',
+  // First-party file wrappers (plan-012), same tri-state per-tool semantics.
+  'CLI_AGENT_AGT_FILE_READ',
+  'CLI_AGENT_AGT_FILE_LIST',
+  'CLI_AGENT_AGT_FILE_WRITE',
+  'CLI_AGENT_AGT_FILE_EDIT',
+  'CLI_AGENT_AGT_FILE_APPEND',
   // --- Configuration profiles (plan-005) ---
   // Activates a named profile (equivalent to --profile <name>). CLI flag
   // wins over env (E12) via natural ?? precedence in `loadAgentConfig`.
@@ -719,6 +874,13 @@ const OTHER_ENV_KEYS = [
   // Virtual-tool dispatch mode: `child-process` (default) or
   // `in-process` (experimental). Consumed by U-VIRTUAL.
   'CLI_AGENT_VIRTUAL_DISPATCH',
+  // --- LLM I/O inspector (plan-007) ---
+  // Enable the I/O capture channel (1/true/yes/on). Off by default;
+  // invalid (non-boolean) value raises ConfigurationError — no fallback.
+  'CLI_AGENT_INSPECT_IO',
+  // Disable redaction for captures only (truthy). Prints a stderr warning
+  // before any unredacted byte is written. Invalid value → ConfigurationError.
+  'CLI_AGENT_INSPECT_IO_RAW',
 ] as const;
 
 const ALL_ENV_KEYS = [...PROVIDER_ENV_KEYS, ...OTHER_ENV_KEYS] as const;
@@ -1017,6 +1179,15 @@ export async function loadAgentConfig(
   const toolPromptsDir = earlyToolPromptsDir;
   const toolPromptOverlays = await loadOverlayRegistry(toolPromptsDir);
 
+  // ---- LLM I/O inspector resolution (plan-007) ----
+  // Four-tier, no-fallback. "Requested?" follows the same early-return
+  // precedence idiom as resolveAgentTools: CLI flag (if defined) wins,
+  // else env (tri-state via parseAgentToolsBoolEnvVar — strict validation,
+  // unset → defer), else config.json `inspectIo.enabled`, else off.
+  // An explicitly-requested-but-uninitialisable inspector raises
+  // ConfigurationError (never a silent downgrade to null / NullIoCapture).
+  const inspectIo = await resolveInspectIo(flags, layered, configFile);
+
   return {
     provider,
     model,
@@ -1030,6 +1201,7 @@ export async function loadAgentConfig(
     compositeCapabilitiesDir: path.join(agentDir, 'capabilities', 'composite'),
     compositeDistillDir: path.join(agentDir, 'capabilities', 'composite', '_distill'),
     compositesDir: path.join(agentDir, 'composites'),
+    inspectIo,
     providerEnv: buildProviderEnv(layered),
     tools,
     capabilities,
@@ -1049,11 +1221,35 @@ export async function loadAgentConfig(
     systemAppendFile: flags.systemFile,
     toolPromptsDir,
     toolPromptOverlays,
-    // Agent-tools pack — fully resolved through the four-tier chain. The
-    // resolver applies explicit defaults (NOT fallbacks for missing
-    // required config) at the end. Downstream code (registry / catalog
-    // builder) relies on this field always being present.
-    agentTools: resolveAgentTools(flags.agentTools, layered, configFile),
+    // Agent-tools pack — fully resolved through the precedence chain
+    // (CLI > env > config.json > profile > default). The resolver applies
+    // explicit defaults (NOT fallbacks for missing required config) at the
+    // end. Downstream code (registry / catalog builder) relies on this field
+    // always being present.
+    agentTools: resolveAgentTools(
+      flags.agentTools,
+      layered,
+      configFile,
+      activeProfileData?.tools?.agentTools,
+    ),
+    // Tool-loading group toggles (plan-008) — resolved through the uniform
+    // chain CLI flag > env(CLI_AGENT_DISABLE_*) > config.json > profile >
+    // default(load). Always present; the default `true` is a documented
+    // optional-toggle starting value, NOT a runtime fallback.
+    composites: resolveToolGroupToggle(
+      flags.composites,
+      'CLI_AGENT_DISABLE_COMPOSITES',
+      layered,
+      configFile?.composites,
+      activeProfileData?.tools?.composites,
+    ),
+    builtinTools: resolveToolGroupToggle(
+      flags.builtinTools,
+      'CLI_AGENT_DISABLE_BUILTIN_TOOLS',
+      layered,
+      configFile?.builtinTools,
+      activeProfileData?.tools?.builtin,
+    ),
     activeProfile,
     activeProfileData,
   };
@@ -1126,13 +1322,17 @@ function resolveAgentTools(
   flags: AgentCliFlags['agentTools'] | undefined,
   layered: Record<string, string | undefined>,
   configFile: AgentConfigFile | null,
+  profileEnabled: boolean | undefined,
 ): AgentConfig['agentTools'] {
   const cfgPack = configFile?.agentTools;
   const cfgTools = cfgPack?.tools;
 
-  // Umbrella: CLI flag > env (CLI_AGENT_DISABLE_AGENT_TOOLS) > config.json > default(true)
+  // Umbrella: CLI flag > env (CLI_AGENT_DISABLE_AGENT_TOOLS) > config.json
+  //           > profile (tools.agentTools) > default(true)
   // Note the env semantics: CLI_AGENT_DISABLE_AGENT_TOOLS=truthy means
-  // umbrella=false. We invert when consulting that env var.
+  // umbrella=false. We invert when consulting that env var. The profile
+  // tier (plan-008) sits just above the default, mirroring the uniform
+  // chain applied to the composites / builtinTools toggles.
   let enabled: boolean;
   if (flags?.enabled !== undefined) {
     enabled = flags.enabled;
@@ -1145,6 +1345,8 @@ function resolveAgentTools(
       enabled = !envDisable;
     } else if (cfgPack?.enabled !== undefined) {
       enabled = cfgPack.enabled;
+    } else if (profileEnabled !== undefined) {
+      enabled = profileEnabled;
     } else {
       enabled = true; // default starting value
     }
@@ -1162,7 +1364,14 @@ function resolveAgentTools(
       | 'CLI_AGENT_AGT_MULTIEDIT'
       | 'CLI_AGENT_AGT_PATCH'
       | 'CLI_AGENT_AGT_TODO_READ'
-      | 'CLI_AGENT_AGT_TODO_WRITE',
+      | 'CLI_AGENT_AGT_TODO_WRITE'
+      | 'CLI_AGENT_AGT_WEB_SEARCH'
+      | 'CLI_AGENT_AGT_WEB_FETCH'
+      | 'CLI_AGENT_AGT_FILE_READ'
+      | 'CLI_AGENT_AGT_FILE_LIST'
+      | 'CLI_AGENT_AGT_FILE_WRITE'
+      | 'CLI_AGENT_AGT_FILE_EDIT'
+      | 'CLI_AGENT_AGT_FILE_APPEND',
     cfgVal: boolean | undefined,
     defaultVal: boolean,
   ): boolean => {
@@ -1181,12 +1390,148 @@ function resolveAgentTools(
     patch: resolveOne(flagTools?.patch, 'CLI_AGENT_AGT_PATCH', cfgTools?.patch, true),
     todoRead: resolveOne(flagTools?.todoRead, 'CLI_AGENT_AGT_TODO_READ', cfgTools?.todoRead, false),
     todoWrite: resolveOne(flagTools?.todoWrite, 'CLI_AGENT_AGT_TODO_WRITE', cfgTools?.todoWrite, false),
+    // First-party web wrappers (plan-011) — read-only, default ON.
+    webSearch: resolveOne(flagTools?.webSearch, 'CLI_AGENT_AGT_WEB_SEARCH', cfgTools?.webSearch, true),
+    webFetch: resolveOne(flagTools?.webFetch, 'CLI_AGENT_AGT_WEB_FETCH', cfgTools?.webFetch, true),
+    // First-party file wrappers (plan-012) — all default ON; read/list are
+    // read-only, write/edit/append are mutation-gated DOWNSTREAM in the
+    // catalog builder (group-builder.ts), not here.
+    fileRead: resolveOne(flagTools?.fileRead, 'CLI_AGENT_AGT_FILE_READ', cfgTools?.fileRead, true),
+    fileList: resolveOne(flagTools?.fileList, 'CLI_AGENT_AGT_FILE_LIST', cfgTools?.fileList, true),
+    fileWrite: resolveOne(flagTools?.fileWrite, 'CLI_AGENT_AGT_FILE_WRITE', cfgTools?.fileWrite, true),
+    fileEdit: resolveOne(flagTools?.fileEdit, 'CLI_AGENT_AGT_FILE_EDIT', cfgTools?.fileEdit, true),
+    fileAppend: resolveOne(flagTools?.fileAppend, 'CLI_AGENT_AGT_FILE_APPEND', cfgTools?.fileAppend, true),
   };
 
   return Object.freeze({
     enabled,
     tools: Object.freeze(tools),
   });
+}
+
+/**
+ * Resolve a tool-loading group toggle (plan-008) through the uniform
+ * precedence chain:
+ *
+ *   CLI flag  >  env (inverted-disable)  >  config.json  >  profile  >  default(true)
+ *
+ * Mirrors the umbrella logic in {@link resolveAgentTools}. The env tier
+ * follows the inverted-disable convention shared with
+ * `CLI_AGENT_DISABLE_AGENT_TOOLS`: a truthy `CLI_AGENT_DISABLE_*` value
+ * means the group is OFF, so the parsed boolean is negated. Env values are
+ * strict-validated via `parseAgentToolsBoolEnvVar` (an invalid value throws
+ * `ConfigurationError` — no fallback).
+ *
+ * The default (load = `true`) is a documented optional-toggle starting
+ * value, NOT a runtime fallback for a missing *required* setting, so the
+ * project's no-fallback rule is not triggered (no new required config).
+ *
+ * @param flagVal      CLI-flag value (tri-state; `undefined` defers).
+ * @param disableEnvKey Name of the `CLI_AGENT_DISABLE_*` env var to consult.
+ * @param layered      Layered env snapshot (shell > agent-dir .env > local .env).
+ * @param configVal    config.json value (tri-state; `undefined` defers).
+ * @param profileVal   Active-profile value (tri-state; `undefined` defers).
+ */
+function resolveToolGroupToggle(
+  flagVal: boolean | undefined,
+  disableEnvKey: string,
+  layered: Record<string, string | undefined>,
+  configVal: boolean | undefined,
+  profileVal: boolean | undefined,
+): boolean {
+  if (flagVal !== undefined) return flagVal;
+  const envDisable = parseAgentToolsBoolEnvVar(layered[disableEnvKey], disableEnvKey);
+  if (envDisable !== undefined) return !envDisable;
+  if (configVal !== undefined) return configVal;
+  if (profileVal !== undefined) return profileVal;
+  return true; // default starting value: load
+}
+
+/**
+ * Resolve the LLM I/O inspector switch (plan-007) through the four-tier
+ * precedence chain with NO fallback for a requested-but-uninitialisable
+ * state.
+ *
+ * "Requested?" precedence (highest priority first, mirroring the
+ * `resolveOne` early-return idiom in `resolveAgentTools`):
+ *   1. CLI flag `flags.inspectIo` (if defined)
+ *   2. env `CLI_AGENT_INSPECT_IO` (tri-state; unset → defer, invalid → throw)
+ *   3. config.json `inspectIo.enabled`
+ *   4. (none) → off
+ *
+ * When NOT requested → returns `null` (the normal disabled state).
+ * When requested → returns `{ enabled: true, redact, dir }` where:
+ *   - `redact = !(flags.inspectIoRaw || truthy CLI_AGENT_INSPECT_IO_RAW
+ *      || config.inspectIo.redact === false)` — redaction ON by default.
+ *   - `dir = config.inspectIo.dir ?? agentIoCapturesDir()`.
+ * The resolved `dir` is created at mode 0o700 and verified writable; on
+ * any failure a `ConfigurationError` is raised (NEVER a downgrade to
+ * `null` / a default mode — hard project rule, FR-10). Invalid
+ * `CLI_AGENT_INSPECT_IO` / `CLI_AGENT_INSPECT_IO_RAW` boolean values
+ * raise `ConfigurationError` via `parseAgentToolsBoolEnvVar`.
+ */
+async function resolveInspectIo(
+  flags: AgentCliFlags,
+  layered: Record<string, string | undefined>,
+  configFile: AgentConfigFile | null,
+): Promise<AgentConfig['inspectIo']> {
+  const cfgInspect = configFile?.inspectIo;
+
+  // Tier resolution for "requested?" — CLI flag > env > config.json > off.
+  let requested: boolean;
+  if (flags.inspectIo !== undefined) {
+    requested = flags.inspectIo;
+  } else {
+    const envEnabled = parseAgentToolsBoolEnvVar(
+      layered['CLI_AGENT_INSPECT_IO'],
+      'CLI_AGENT_INSPECT_IO',
+    );
+    if (envEnabled !== undefined) {
+      requested = envEnabled;
+    } else if (cfgInspect?.enabled !== undefined) {
+      requested = cfgInspect.enabled;
+    } else {
+      requested = false;
+    }
+  }
+
+  if (!requested) return null;
+
+  // Redaction is ON by default; opt out only via the raw flag, a truthy
+  // CLI_AGENT_INSPECT_IO_RAW, or config.json `inspectIo.redact === false`.
+  // The env read is strict-validated (invalid value → ConfigurationError).
+  const envRaw = parseAgentToolsBoolEnvVar(
+    layered['CLI_AGENT_INSPECT_IO_RAW'],
+    'CLI_AGENT_INSPECT_IO_RAW',
+  );
+  const redact = !(
+    flags.inspectIoRaw === true ||
+    envRaw === true ||
+    cfgInspect?.redact === false
+  );
+
+  const dir =
+    cfgInspect?.dir && cfgInspect.dir.length > 0
+      ? cfgInspect.dir
+      : agentIoCapturesDir();
+
+  // No-fallback: the inspector was explicitly requested, so the capture
+  // dir MUST be creatable AND writable. Any failure is a configuration
+  // error — never a silent downgrade to disabled.
+  try {
+    await fsp.mkdir(dir, { recursive: true, mode: 0o700 });
+    try { await fsp.chmod(dir, 0o700); } catch { /* tolerated on Windows */ }
+    await fsp.access(dir, fs.constants.W_OK);
+  } catch (e) {
+    throw new ConfigurationError('inspectIo.dir', [
+      `--inspect-io / CLI_AGENT_INSPECT_IO / config.json inspectIo.enabled`,
+    ], {
+      resolvedDir: dir,
+      cause: (e as { message?: string }).message ?? String(e),
+    });
+  }
+
+  return { enabled: true, redact, dir };
 }
 
 function defaultModelForProvider(provider: ProviderName): string | undefined {

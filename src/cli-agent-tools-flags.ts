@@ -67,7 +67,10 @@ export function mapAgentToolFlags(opts: Record<string, unknown>): AgentCliFlags[
   }
 
   // ---- Per-tool conflict detection + value extraction ----
-  type ToolKey = 'glob' | 'grep' | 'multiedit' | 'patch' | 'todoRead' | 'todoWrite';
+  type ToolKey =
+    | 'glob' | 'grep' | 'multiedit' | 'patch' | 'todoRead' | 'todoWrite'
+    | 'webSearch' | 'webFetch'
+    | 'fileRead' | 'fileList' | 'fileWrite' | 'fileEdit' | 'fileAppend';
   const pairs: Array<{
     key: ToolKey;
     enableOpt: string;
@@ -81,6 +84,13 @@ export function mapAgentToolFlags(opts: Record<string, unknown>): AgentCliFlags[
     { key: 'patch',     enableOpt: 'enableAgtPatch',     disableOpt: 'disableAgtPatch',     enableFlag: '--enable-agt-patch',     disableFlag: '--disable-agt-patch' },
     { key: 'todoRead',  enableOpt: 'enableAgtTodoRead',  disableOpt: 'disableAgtTodoRead',  enableFlag: '--enable-agt-todo-read', disableFlag: '--disable-agt-todo-read' },
     { key: 'todoWrite', enableOpt: 'enableAgtTodoWrite', disableOpt: 'disableAgtTodoWrite', enableFlag: '--enable-agt-todo-write', disableFlag: '--disable-agt-todo-write' },
+    { key: 'webSearch', enableOpt: 'enableAgtWebSearch', disableOpt: 'disableAgtWebSearch', enableFlag: '--enable-agt-web-search', disableFlag: '--disable-agt-web-search' },
+    { key: 'webFetch',  enableOpt: 'enableAgtWebFetch',  disableOpt: 'disableAgtWebFetch',  enableFlag: '--enable-agt-web-fetch', disableFlag: '--disable-agt-web-fetch' },
+    { key: 'fileRead',   enableOpt: 'enableAgtFileRead',   disableOpt: 'disableAgtFileRead',   enableFlag: '--enable-agt-file-read',   disableFlag: '--disable-agt-file-read' },
+    { key: 'fileList',   enableOpt: 'enableAgtFileList',   disableOpt: 'disableAgtFileList',   enableFlag: '--enable-agt-file-list',   disableFlag: '--disable-agt-file-list' },
+    { key: 'fileWrite',  enableOpt: 'enableAgtFileWrite',  disableOpt: 'disableAgtFileWrite',  enableFlag: '--enable-agt-file-write',  disableFlag: '--disable-agt-file-write' },
+    { key: 'fileEdit',   enableOpt: 'enableAgtFileEdit',   disableOpt: 'disableAgtFileEdit',   enableFlag: '--enable-agt-file-edit',   disableFlag: '--disable-agt-file-edit' },
+    { key: 'fileAppend', enableOpt: 'enableAgtFileAppend', disableOpt: 'disableAgtFileAppend', enableFlag: '--enable-agt-file-append', disableFlag: '--disable-agt-file-append' },
   ];
 
   const tools: Partial<Record<ToolKey, boolean>> = {};

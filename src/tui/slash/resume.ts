@@ -67,7 +67,7 @@ const resumeCmd: SlashCommand = {
       c.cfg.tools,
       c.cfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection, agentToolsMeta);
+    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection, agentToolsMeta, tools);
     const newGraph = buildAgentGraph(llm, tools, systemPrompt, c.cfg.maxSteps, c.cfg);
 
     const ok = await loadCheckpoint(target, newGraph.checkpointer);

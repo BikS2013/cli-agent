@@ -166,8 +166,6 @@ describe('mergeProfileToolArgs', () => {
       'file_write',
       'file_edit',
       'file_append',
-      'web_search',
-      'web_fetch',
       'tool_help',
       'agt_glob',
       'agt_grep',
@@ -175,6 +173,9 @@ describe('mergeProfileToolArgs', () => {
       'agt_patch',
       'agt_todo_read',
       'agt_todo_write',
+      // plan-011: web is now in the agt_* pack.
+      'agt_web_search',
+      'agt_web_fetch',
     ];
     for (const name of TOOL_NAMES) {
       const configurable = {

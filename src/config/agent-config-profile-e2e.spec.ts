@@ -261,6 +261,9 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
   });
 
   it('profile allow scoping propagates from loadAgentConfig to buildToolCatalog catalog', async () => {
+    // plan-011/plan-012: both web and file ops are now first-party agt_* tools.
+    // Allow two agt_* tools (agt_file_read + agt_web_search) so the scoping
+    // covers both — and proves file ops are name-scopable like any agt_ tool.
     await placeProfileFile(
       'allow-two.yaml',
       [
@@ -270,8 +273,8 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
         '  provider: openai',
         'tools:',
         '  allow:',
-        '    - file_read',
-        '    - web_search',
+        '    - agt_file_read',
+        '    - agt_web_search',
         '',
       ].join('\n'),
     );
@@ -284,15 +287,18 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names).toContain('file_read');
-    expect(names).toContain('web_search');
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('agt_web_search');
     // All other standard tools must be absent after allow scoping
-    expect(names).not.toContain('file_list');
+    expect(names).not.toContain('agt_file_list');
     expect(names).not.toContain('bash_list_allowed');
     expect(names).not.toContain('bash_which');
-    expect(names).not.toContain('web_fetch');
+    expect(names).not.toContain('agt_web_fetch');
     expect(names).not.toContain('tool_help');
-    expect(names.every((n: string) => !n.startsWith('agt_'))).toBe(true);
+    // Only agt_file_read + agt_web_search survive — no other agt_* tool.
+    expect(names).toHaveLength(2);
+    expect(names).not.toContain('agt_glob');
+    expect(names).not.toContain('agt_grep');
   });
 
   it('profile deny scoping: denied tool absent from catalog', async () => {
@@ -319,9 +325,9 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
     expect(names).not.toContain('tool_help');
-    // Other standard tools survive
-    expect(names).toContain('file_read');
-    expect(names).toContain('file_list');
+    // Other standard tools survive (file ops are now agt_file_*).
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('agt_file_list');
   });
 
   it('profile order scoping: ordered tools come first in catalog', async () => {
@@ -334,8 +340,8 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
         '  provider: openai',
         'tools:',
         '  order:',
-        '    - web_search',
-        '    - file_read',
+        '    - agt_web_search',
+        '    - agt_file_read',
         '',
       ].join('\n'),
     );
@@ -348,8 +354,9 @@ describe('E2E profile flow: AgentConfig → buildToolCatalog (tool scoping)', ()
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names[0]).toBe('web_search');
-    expect(names[1]).toBe('file_read');
+    // plan-011/plan-012: web is agt_web_search, file_read is agt_file_read.
+    expect(names[0]).toBe('agt_web_search');
+    expect(names[1]).toBe('agt_file_read');
   });
 });
 

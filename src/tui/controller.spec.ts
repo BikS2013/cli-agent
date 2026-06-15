@@ -33,6 +33,7 @@ vi.mock('../agent/graph.js', async (importOriginal) => {
 });
 
 import { TuiController, formatToolCallArgs } from './controller.js';
+import { NullIoCapture } from '../agent/io-capture.js';
 
 let tmpHome: string;
 let savedHome: string | undefined;
@@ -74,6 +75,7 @@ describe('TuiController.runTurn', () => {
         flush: vi.fn().mockResolvedValue(undefined),
         close: vi.fn().mockResolvedValue(undefined),
       } as any,
+      ioCapture: new NullIoCapture(),
       stdout: stdout as unknown as NodeJS.WriteStream,
       stderr: stderr as unknown as NodeJS.WriteStream,
     });

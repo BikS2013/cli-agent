@@ -36,6 +36,17 @@ export const ProfileToolsSchema = z
     allow: z.array(z.string()).min(1).optional(), // E6: empty array rejected.
     deny: z.array(z.string()).optional(),
     order: z.array(z.string()).optional(),
+    // Tool-loading group toggles (plan-008). Profile tier of the uniform
+    // precedence chain CLI flag > env > config.json > profile > default(load).
+    // Each is an OPTIONAL boolean; `undefined` defers to the built-in default
+    // (load). These are explicit user settings, NOT runtime fallbacks for
+    // missing required config.
+    //   composites → every virtual/composite tool (loadVirtualToolsSync)
+    //   builtin    → the cross-cutting toolkit (file_*/web_*/bash_*/tool_help)
+    //   agentTools → the agent-tools pack umbrella (agt_*)
+    composites: z.boolean().optional(),
+    builtin: z.boolean().optional(),
+    agentTools: z.boolean().optional(),
   })
   .strict();
 

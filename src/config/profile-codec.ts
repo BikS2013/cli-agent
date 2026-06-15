@@ -152,7 +152,7 @@ export function createProfileStub(name: string): string {
     `# Uncomment to set default arguments for specific tools.`,
     `#`,
     `# toolArgs:`,
-    `#   web_search:`,
+    `#   agt_web_search:`,
     `#     maxResults: 10`,
     ``,
   ].join('\n');

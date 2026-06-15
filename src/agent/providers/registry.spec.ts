@@ -24,12 +24,18 @@ function makeBaseConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     compositeCapabilitiesDir: '/tmp/.tool-agents/cli-agent/capabilities/composite',
     compositeDistillDir: '/tmp/.tool-agents/cli-agent/capabilities/composite/_distill',
     compositesDir: '/tmp/.tool-agents/cli-agent/composites',
+    inspectIo: null,
     tools: [],
     capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, subcommandExtractor: '', skipLlmBelowBytes: 4096 },
     bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH', 'HOME', 'LANG', 'TERM'], timeoutMs: 30000, maxOutputBytes: 1048576 },
     webSearch: { backend: 'tavily' },
     fileEdit: { root: '/tmp', allowPaths: [] },
-    agentTools: { enabled: true, tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: false, todoWrite: false } },
+    agentTools: { enabled: true, tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: false, todoWrite: false, webSearch: true, webFetch: true, fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true } },
+    // plan-008 tool-loading group toggles — required on AgentConfig; both
+    // set to the documented default (load) so the fixture matches a default
+    // resolved config.
+    composites: true,
+    builtinTools: true,
     perToolBudgetBytes: 8192,
     baseUrl: undefined,
     webSearchBackend: 'tavily',

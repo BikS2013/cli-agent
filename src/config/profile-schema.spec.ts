@@ -104,6 +104,59 @@ describe('ProfileSchema', () => {
   });
 });
 
+describe('ProfileSchema — tools group toggles (plan-008)', () => {
+  it('accepts tools.composites / tools.builtin / tools.agentTools booleans', () => {
+    const result = ProfileSchema.safeParse({
+      schemaVersion: 1,
+      tools: { composites: false, builtin: false, agentTools: true },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.tools?.composites).toBe(false);
+      expect(result.data.tools?.builtin).toBe(false);
+      expect(result.data.tools?.agentTools).toBe(true);
+    }
+  });
+
+  it('accepts the toggles alongside allow/deny/order', () => {
+    const result = ProfileSchema.safeParse({
+      schemaVersion: 1,
+      tools: {
+        allow: ['file_read'],
+        deny: ['file_write'],
+        order: ['file_read'],
+        composites: true,
+        builtin: true,
+        agentTools: false,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it.each(['composites', 'builtin', 'agentTools'])(
+    'rejects a non-boolean tools.%s',
+    (key) => {
+      const result = ProfileSchema.safeParse({
+        schemaVersion: 1,
+        tools: { [key]: 'yes' },
+      });
+      expect(result.success).toBe(false);
+    },
+  );
+
+  it('still rejects an unknown key under tools (.strict())', () => {
+    const result = ProfileSchema.safeParse({
+      schemaVersion: 1,
+      tools: { composites: true, mysteryToggle: true },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      const paths = result.error.issues.map((i) => i.path.join('.'));
+      expect(paths.some((p) => p.startsWith('tools'))).toBe(true);
+    }
+  });
+});
+
 describe('KNOWN_CLI_PARAMS', () => {
   it('includes the eight tier-5 pinnable knobs', () => {
     for (const knob of [

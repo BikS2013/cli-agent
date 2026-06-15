@@ -44,7 +44,7 @@ async function rebuildGraph(c: import('../controller.js').TuiController): Promis
     newCfg.tools,
     newCfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta);
+  const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta, tools);
   c.cfg = newCfg;
   c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps, newCfg);
 }

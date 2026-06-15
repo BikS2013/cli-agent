@@ -60,6 +60,62 @@ export {
   type AgtTodoWriteDeps,
 } from './agt-todo-write.js';
 
+// First-party web wrappers (plan-011) — the only non-vendored members of the
+// agt_* pack. They reuse the existing cli-agent web backend
+// (`../web/backends/`); the backend was not moved or duplicated.
+export {
+  AGT_WEB_SEARCH_NAME,
+  AGT_WEB_SEARCH_DESCRIPTION,
+  buildAgtWebSearchTool,
+  type AgtWebSearchDeps,
+} from './agt-web-search.js';
+
+export {
+  AGT_WEB_FETCH_NAME,
+  AGT_WEB_FETCH_DESCRIPTION,
+  buildAgtWebFetchTool,
+  type AgtWebFetchDeps,
+} from './agt-web-fetch.js';
+
+// First-party file wrappers (plan-012) — like agt_web_* above, these are
+// NON-vendored members of the agt_ pack. They re-home the former built-in
+// file tools (file_read/list/write/edit/append) and reuse cli-agent's own
+// sandbox (`../file/sandbox.js`); the sandbox was not moved or duplicated.
+export {
+  AGT_FILE_READ_NAME,
+  AGT_FILE_READ_DESCRIPTION,
+  buildAgtFileReadTool,
+  type AgtFileReadDeps,
+} from './agt-file-read.js';
+
+export {
+  AGT_FILE_LIST_NAME,
+  AGT_FILE_LIST_DESCRIPTION,
+  buildAgtFileListTool,
+  type AgtFileListDeps,
+} from './agt-file-list.js';
+
+export {
+  AGT_FILE_WRITE_NAME,
+  AGT_FILE_WRITE_DESCRIPTION,
+  buildAgtFileWriteTool,
+  type AgtFileWriteDeps,
+} from './agt-file-write.js';
+
+export {
+  AGT_FILE_EDIT_NAME,
+  AGT_FILE_EDIT_DESCRIPTION,
+  buildAgtFileEditTool,
+  type AgtFileEditDeps,
+} from './agt-file-edit.js';
+
+export {
+  AGT_FILE_APPEND_NAME,
+  AGT_FILE_APPEND_DESCRIPTION,
+  buildAgtFileAppendTool,
+  type AgtFileAppendDeps,
+} from './agt-file-append.js';
+
 // ---------------------------------------------------------------------------
 // Configurable + session types (re-exported from ./types.js)
 // ---------------------------------------------------------------------------

@@ -147,9 +147,10 @@ export function cliAgentPermissionPolicy(cfg: AgentConfig): PermissionPolicy {
     },
 
     /**
-     * Mirrors the fs-write gate shared by `file/write-tool.ts`,
-     * `file/edit-tool.ts`, and `file/append-tool.ts` via
-     * `file/sandbox.ts:resolveSandboxPath`:
+     * Mirrors the fs-write gate shared by the agt_file_* mutating wrappers
+     * (`agt-file-write.ts`, `agt-file-edit.ts`, `agt-file-append.ts`) via
+     * `file/sandbox.ts:resolveSandboxPath` (plan-012 re-homed these from the
+     * former `file/{write,edit,append}-tool.ts` into the agt_ pack):
      *  1. Reject ALL writes when `cfg.allowMutations !== true`.
      *  2. Resolve the target with `realpath` when the file exists,
      *     otherwise resolve the parent (the create-new-file case);

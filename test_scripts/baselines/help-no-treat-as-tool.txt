@@ -20,6 +20,8 @@ Options:
   --system-prompt <path-or-name>                  Select the BASE system prompt file. Resolution: absolute path → verbatim; bare filename → joined onto <capabilitiesDir>; relative path with separators → joined onto cwd. Omit to use the seeded default at <capabilitiesDir>/system-prompt.md.
   --system <text>                                 Append text to system prompt
   --system-file <path>                            Append file contents to system prompt
+  --inspect-io                                    Enable LLM I/O capture (writes provider-normalized request/response JSONL to ~/.tool-agents/cli-agent/io-captures/)
+  --inspect-io-raw                                Disable redaction for I/O captures only (use with caution; prints a warning)
   --per-tool-budget <bytes>                       Per-tool result byte budget
   --allow-mutations                               Enable mutating tools (file_write, file_edit, file_append) (default: false)
   --bash-allow <csv>                              Extra bash allowlist entries (csv or argv-regex:)
@@ -33,6 +35,10 @@ Options:
   --introspect-skip-llm-below-bytes <n>           Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)
   --refresh-capabilities                          Force regenerate cached capability docs (default: false)
   --verbose                                       Emit structured debug logs to stderr (default: false)
+  --composites                                    Load composite (virtual) tools (default; rarely needed)
+  --no-composites                                 Do NOT load any composite (virtual) tools
+  --builtin-tools                                 Load the built-in cross-cutting toolkit: bash_*, tool_help (default). File ops are now in the agt_ pack (agt_file_*).
+  --no-builtin-tools                              Do NOT load the built-in cross-cutting toolkit (bash_*, tool_help). NOTE: this also removes bash_run, the path used to run wrapped CLIs. Does NOT affect file ops; use --no-agent-tools / --disable-agt-file-* for those.
   --agent-tools                                   Enable the agent-tools pack umbrella (default; rarely needed)
   --no-agent-tools                                Disable the agent-tools pack umbrella (no agt_* tools registered)
   --enable-agt-glob                               Enable agt_glob (default-on)
@@ -47,6 +53,20 @@ Options:
   --disable-agt-todo-read                         Disable agt_todo_read
   --enable-agt-todo-write                         Enable agt_todo_write (default-off)
   --disable-agt-todo-write                        Disable agt_todo_write
+  --enable-agt-web-search                         Enable agt_web_search (default-on; read-only)
+  --disable-agt-web-search                        Disable agt_web_search
+  --enable-agt-web-fetch                          Enable agt_web_fetch (default-on; read-only)
+  --disable-agt-web-fetch                         Disable agt_web_fetch
+  --enable-agt-file-read                          Enable agt_file_read (default-on; read-only)
+  --disable-agt-file-read                         Disable agt_file_read
+  --enable-agt-file-list                          Enable agt_file_list (default-on; read-only)
+  --disable-agt-file-list                         Disable agt_file_list
+  --enable-agt-file-write                         Enable agt_file_write (default-on; mutation-gated)
+  --disable-agt-file-write                        Disable agt_file_write
+  --enable-agt-file-edit                          Enable agt_file_edit (default-on; mutation-gated)
+  --disable-agt-file-edit                         Disable agt_file_edit
+  --enable-agt-file-append                        Enable agt_file_append (default-on; mutation-gated)
+  --disable-agt-file-append                       Disable agt_file_append
   --profile <name>                                Activate a named configuration profile (env: CLI_AGENT_PROFILE)
   --treat-as-tool                                 Treat this cli-agent invocation as a composite tool (synthesise a single capability doc from the --tool members)
   --composite-name <id>                           Explicit composite id; matches /^[a-z][a-z0-9_-]{0,62}$/. Omit to derive from member list

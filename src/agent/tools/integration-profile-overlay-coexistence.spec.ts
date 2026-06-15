@@ -83,6 +83,10 @@ function makeCfg(
     activeProfileData: Record<string, unknown>;
     toolPromptOverlays: OverlayRegistry | undefined;
     allowMutations: boolean;
+    /** plan-012: enable the agt_ umbrella so agt_file_* can register. */
+    agentToolsEnabled: boolean;
+    /** plan-012: per-tool flag overrides merged onto the all-false default. */
+    agentToolFlags: Record<string, boolean>;
   }> = {},
 ): AgentConfig {
   return {
@@ -102,7 +106,7 @@ function makeCfg(
     webSearch: { backend: 'tavily' },
     webSearchBackend: 'tavily',
     agentTools: {
-      enabled: false,
+      enabled: overrides.agentToolsEnabled ?? false,
       tools: {
         glob: false,
         grep: false,
@@ -110,6 +114,14 @@ function makeCfg(
         patch: false,
         todoRead: false,
         todoWrite: false,
+        webSearch: false,
+        webFetch: false,
+        fileRead: false,
+        fileList: false,
+        fileWrite: false,
+        fileEdit: false,
+        fileAppend: false,
+        ...(overrides.agentToolFlags ?? {}),
       },
     },
     provider: 'openai',
@@ -174,26 +186,26 @@ describe('AC-18: overlay-aware catalog × deny scoping', () => {
   it('tool excluded via deny is absent from the survivor list', () => {
     const OVERLAY_TEXT = 'OVERLAY: run a bash command.';
     const catalog = [
-      fakeTool('file_read', 'Built-in file_read description.'),
+      fakeTool('agt_file_read', 'Built-in file_read description.'),
       fakeTool('bash_run', OVERLAY_TEXT),    // overlay would have been applied here
-      fakeTool('web_search', 'Built-in web_search.'),
+      fakeTool('agt_web_search', 'Built-in web_search.'),
     ];
 
     const result = applyProfileToolScoping(catalog, { deny: ['bash_run'] });
 
     const names = result.tools.map((t) => t.name);
     expect(names).not.toContain('bash_run');
-    expect(names).toContain('file_read');
-    expect(names).toContain('web_search');
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('agt_web_search');
     expect(result.warnings).toEqual([]);
   });
 
   it('denied tool overlay text does NOT appear in any surviving tool description', () => {
     const OVERLAY_TEXT = 'OVERLAY: run a bash command.';
     const catalog = [
-      fakeTool('file_read', 'Built-in file_read description.'),
+      fakeTool('agt_file_read', 'Built-in file_read description.'),
       fakeTool('bash_run', OVERLAY_TEXT),
-      fakeTool('web_search', 'Built-in web_search.'),
+      fakeTool('agt_web_search', 'Built-in web_search.'),
     ];
 
     const result = applyProfileToolScoping(catalog, { deny: ['bash_run'] });
@@ -211,15 +223,15 @@ describe('AC-18: overlay-aware catalog × deny scoping', () => {
   it('allowed tool retains its overlay-applied description', () => {
     const OVERLAY_DESC = 'OVERLAY: read a file.';
     const catalog = [
-      fakeTool('file_read', OVERLAY_DESC),
+      fakeTool('agt_file_read', OVERLAY_DESC),
       fakeTool('bash_run', 'Built-in bash_run.'),
-      fakeTool('web_search', 'Built-in web_search.'),
+      fakeTool('agt_web_search', 'Built-in web_search.'),
     ];
 
-    const result = applyProfileToolScoping(catalog, { allow: ['file_read'] });
+    const result = applyProfileToolScoping(catalog, { allow: ['agt_file_read'] });
 
     expect(result.tools).toHaveLength(1);
-    expect(result.tools[0]).toMatchObject({ name: 'file_read', description: OVERLAY_DESC });
+    expect(result.tools[0]).toMatchObject({ name: 'agt_file_read', description: OVERLAY_DESC });
   });
 });
 
@@ -230,15 +242,15 @@ describe('AC-18: overlay-aware catalog × deny scoping', () => {
 describe('AC-18: getToolDescription not called for excluded tools', () => {
   it('overlay registry is consulted only for surviving tools (allow subset)', () => {
     const overlayReg = makeOverlayRegistry({
-      file_read: { description: 'OVERLAY: read a file.' },
+      agt_file_read: { description: 'OVERLAY: read a file.' },
       bash_run: { description: 'OVERLAY: run bash.' },  // should never be consulted
     });
 
     // Simulate the "surviving" catalog after allow scoping (only file_read survives)
-    const survivingTools = ['file_read'];
+    const survivingTools = ['agt_file_read'];
 
     // Verify overlay is correctly applied for file_read
-    const desc = getToolDescription(overlayReg, 'file_read', 'BUILTIN-FILE-READ');
+    const desc = getToolDescription(overlayReg, 'agt_file_read', 'BUILTIN-FILE-READ');
     expect(desc).toBe('OVERLAY: read a file.');
 
     // bash_run was excluded — simulate that its description is never read
@@ -253,11 +265,11 @@ describe('AC-18: getToolDescription not called for excluded tools', () => {
 
   it('getToolDescription falls back to built-in for a tool not in the overlay registry', () => {
     const overlayReg = makeOverlayRegistry({
-      file_read: { description: 'OVERLAY: read a file.' },
+      agt_file_read: { description: 'OVERLAY: read a file.' },
     });
 
     // web_search has no overlay — must return built-in fallback
-    const desc = getToolDescription(overlayReg, 'web_search', 'BUILTIN-WEB-SEARCH');
+    const desc = getToolDescription(overlayReg, 'agt_web_search', 'BUILTIN-WEB-SEARCH');
     expect(desc).toBe('BUILTIN-WEB-SEARCH');
   });
 });
@@ -275,67 +287,74 @@ describe('AC-18: buildToolCatalog sequencing — overlays apply before scoping',
    *
    * In this test we use a profile that:
    *   - DENIES `bash_run` (which has no bash.allow so it would not appear anyway)
-   *   - ALLOWS only `file_read` and `web_search`
+   *   - ALLOWS only `file_read` and `tool_help`
+   *
+   * (plan-011: web is no longer a built-in tool; the agent-tools umbrella is
+   * off in this fixture, so two built-in read-only tools are used to prove
+   * the allow-scoping subset.)
    *
    * We verify the catalog:
-   *   - does not contain any tool other than file_read and web_search
+   *   - does not contain any tool other than file_read and tool_help
    *   - the agentToolsMeta registered list is empty (agt_* tools off)
    */
-  it('allow-scoped catalog contains only the allowed tools (no agt_* tools)', () => {
+  it('allow-scoped catalog contains only the allowed tools (one agt_file_* + one built-in)', () => {
+    // plan-012: allow one agt_file_* tool and one built-in; everything else is
+    // scoped away. agt_file_read is registered because the umbrella + its flag
+    // are on.
     const cfg = makeCfg({
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true },
       activeProfileData: {
-        tools: { allow: ['file_read', 'web_search'] },
+        tools: { allow: ['agt_file_read', 'tool_help'] },
       },
     });
 
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names).toContain('file_read');
-    expect(names).toContain('web_search');
-    // All other standard tools must be absent
-    expect(names).not.toContain('file_list');
-    expect(names).not.toContain('bash_run');
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('tool_help');
+    // All other tools must be absent after allow scoping.
+    expect(names).not.toContain('agt_file_list');
     expect(names).not.toContain('bash_list_allowed');
     expect(names).not.toContain('bash_which');
-    expect(names).not.toContain('web_fetch');
-    expect(names).not.toContain('tool_help');
+    expect(names).toHaveLength(2);
   });
 
-  it('deny-scoped catalog: bash_run overlay for excluded tool does not affect survivors', () => {
+  it('deny-scoped catalog: denied agt_file_* tool absent; siblings + built-ins survive', () => {
     /**
-     * Profile denies file_list. We verify file_list is absent and
-     * all other standard read-only tools survive. The overlay for file_list
-     * (were it registered) would never surface in any survivor's description.
+     * Profile denies agt_file_list. We verify it is absent and that its sibling
+     * agt_file_read plus the built-in bash/tool_help tools survive. The overlay
+     * for the denied tool (were it registered) would never surface.
      */
     const cfg = makeCfg({
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true },
       activeProfileData: {
-        tools: { deny: ['file_list'] },
+        tools: { deny: ['agt_file_list'] },
       },
     });
 
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names).not.toContain('file_list');
-    // All other standard read-only tools must survive
-    expect(names).toContain('file_read');
+    expect(names).not.toContain('agt_file_list');
+    // Sibling agt_file_read + the built-in read-only tools survive.
+    expect(names).toContain('agt_file_read');
     expect(names).toContain('bash_list_allowed');
     expect(names).toContain('bash_which');
-    expect(names).toContain('web_search');
-    expect(names).toContain('web_fetch');
     expect(names).toContain('tool_help');
   });
 
   it('agentToolsMeta stays in lockstep with survivors after scoping', () => {
     /**
-     * With agentTools disabled and allow scoping applied, the agentToolsMeta
-     * registered list should be empty and match the (also empty) agt_* subset
-     * of the survivor catalog.
+     * With agentTools disabled and allow scoping applied to a built-in, the
+     * agentToolsMeta registered list should be empty and match the (also empty)
+     * agt_* subset of the survivor catalog.
      */
     const cfg = makeCfg({
       activeProfileData: {
-        tools: { allow: ['file_read'] },
+        tools: { allow: ['tool_help'] },
       },
     });
 
@@ -364,7 +383,7 @@ describe('AC-18: buildToolCatalog sequencing — overlays apply before scoping',
     // These are the tool factory outputs WITH overlays applied (as they
     // would be after the tool factory runs with cfg.toolPromptOverlays set).
     const catalog = [
-      fakeTool('file_read', ALLOWED_OVERLAY),
+      fakeTool('agt_file_read', ALLOWED_OVERLAY),
       fakeTool('bash_run', EXCLUDED_OVERLAY),
     ];
 
@@ -383,25 +402,25 @@ describe('AC-18: buildToolCatalog sequencing — overlays apply before scoping',
 
   it('order pass does not alter tool descriptions (overlays are unaffected by reordering)', () => {
     const catalog = [
-      fakeTool('file_read', 'OVERLAY-FILE-READ'),
-      fakeTool('web_search', 'OVERLAY-WEB-SEARCH'),
+      fakeTool('agt_file_read', 'OVERLAY-FILE-READ'),
+      fakeTool('agt_web_search', 'OVERLAY-WEB-SEARCH'),
       fakeTool('tool_help', 'BUILTIN-TOOL-HELP'),
     ];
 
     const result = applyProfileToolScoping(catalog, {
-      order: ['web_search', 'file_read'],
+      order: ['agt_web_search', 'agt_file_read'],
     });
 
     // Check order
     expect(result.tools.map((t) => t.name)).toEqual([
-      'web_search',
-      'file_read',
+      'agt_web_search',
+      'agt_file_read',
       'tool_help',
     ]);
     // Check descriptions are untouched
     const byName = Object.fromEntries(result.tools.map((t) => [t.name, t.description]));
-    expect(byName['file_read']).toBe('OVERLAY-FILE-READ');
-    expect(byName['web_search']).toBe('OVERLAY-WEB-SEARCH');
+    expect(byName['agt_file_read']).toBe('OVERLAY-FILE-READ');
+    expect(byName['agt_web_search']).toBe('OVERLAY-WEB-SEARCH');
     expect(byName['tool_help']).toBe('BUILTIN-TOOL-HELP');
   });
 });
@@ -411,40 +430,47 @@ describe('AC-18: buildToolCatalog sequencing — overlays apply before scoping',
 // ---------------------------------------------------------------------------
 
 describe('AC-18 / E19: allowMutations profile flag makes mutation tools visible', () => {
-  it('profile allowMutations=true (via cfg.allowMutations) causes mutating tools to appear', () => {
+  it('profile allowMutations=true (via cfg.allowMutations) causes agt_file_* mutators to appear', () => {
     /**
-     * When the active profile sets allowMutations: true (which was already merged
-     * into cfg.allowMutations by loadAgentConfig's tier-5 resolution), buildToolCatalog
-     * must include mutating file tools and overlay-aware descriptions remain intact.
+     * When the active profile sets allowMutations: true (already merged into
+     * cfg.allowMutations by loadAgentConfig's tier-5 resolution), buildToolCatalog
+     * must include the mutating agt_file_* tools (plan-012) and overlay-aware
+     * descriptions remain intact. The umbrella + per-tool flags must be on too.
      */
-    const cfg = makeCfg({ allowMutations: true });
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileWrite: true, fileEdit: true, fileAppend: true },
+    });
 
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names).toContain('file_write');
-    expect(names).toContain('file_edit');
-    expect(names).toContain('file_append');
+    expect(names).toContain('agt_file_write');
+    expect(names).toContain('agt_file_edit');
+    expect(names).toContain('agt_file_append');
   });
 
-  it('profile with allowMutations=true + deny=[file_write]: file_write absent, others present', () => {
+  it('profile with allowMutations=true + deny=[agt_file_write]: that mutator absent, others present', () => {
     /**
      * Verify that profile-based scoping (deny) works on top of the mutation-gated
      * catalog — i.e., even mutation tools can be individually denied by a profile.
      */
     const cfg = makeCfg({
       allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileWrite: true, fileEdit: true, fileAppend: true },
       activeProfileData: {
-        tools: { deny: ['file_write'] },
+        tools: { deny: ['agt_file_write'] },
       },
     });
 
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = catalog.tools.map((t: { name: string }) => t.name);
 
-    expect(names).not.toContain('file_write');
-    expect(names).toContain('file_edit');
-    expect(names).toContain('file_append');
-    expect(names).toContain('file_read');
+    expect(names).not.toContain('agt_file_write');
+    expect(names).toContain('agt_file_edit');
+    expect(names).toContain('agt_file_append');
+    expect(names).toContain('agt_file_read');
   });
 });

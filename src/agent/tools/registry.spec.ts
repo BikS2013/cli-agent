@@ -35,6 +35,8 @@ import {
   AGT_PATCH_NAME,
   AGT_TODO_READ_NAME,
   AGT_TODO_WRITE_NAME,
+  AGT_WEB_SEARCH_NAME,
+  AGT_WEB_FETCH_NAME,
 } from './agent-tools/index.js';
 
 // ---------------------------------------------------------------------------
@@ -77,6 +79,13 @@ interface MakeCfgOpts {
     patch?: boolean;
     todoRead?: boolean;
     todoWrite?: boolean;
+    webSearch?: boolean;
+    webFetch?: boolean;
+    fileRead?: boolean;
+    fileList?: boolean;
+    fileWrite?: boolean;
+    fileEdit?: boolean;
+    fileAppend?: boolean;
   };
   /** When truthy, adds 'git' to bash.allow so bash_run is included. */
   withBashAllow?: boolean;
@@ -118,6 +127,10 @@ function makeCfg(opts: MakeCfgOpts = {}): AgentConfig {
     webSearchBackend: 'tavily',
 
     // --- agent-tools pack ---
+    // web search/fetch AND the plan-012 file wrappers default to OFF in this
+    // fixture (like every other per-tool flag) so existing agt-count
+    // assertions stay valid; the dedicated agt_web_* / agt_file_* tests enable
+    // them explicitly.
     agentTools: {
       enabled: agentToolsEnabled,
       tools: {
@@ -127,6 +140,13 @@ function makeCfg(opts: MakeCfgOpts = {}): AgentConfig {
         patch: agentToolFlags.patch ?? false,
         todoRead: agentToolFlags.todoRead ?? false,
         todoWrite: agentToolFlags.todoWrite ?? false,
+        webSearch: agentToolFlags.webSearch ?? false,
+        webFetch: agentToolFlags.webFetch ?? false,
+        fileRead: agentToolFlags.fileRead ?? false,
+        fileList: agentToolFlags.fileList ?? false,
+        fileWrite: agentToolFlags.fileWrite ?? false,
+        fileEdit: agentToolFlags.fileEdit ?? false,
+        fileAppend: agentToolFlags.fileAppend ?? false,
       },
     },
 
@@ -185,26 +205,25 @@ function toolNames(catalog: ReturnType<typeof buildToolCatalog>): string[] {
 
 // ---------------------------------------------------------------------------
 // Standard read-only tool names — used in regression tests.
-// Must match the readOnly[] array in registry.ts exactly.
+// Must match the readOnly[] array in registry.ts exactly. Web search/fetch
+// moved to the agt_ pack (plan-011); file_read/file_list moved to the agt_
+// pack as agt_file_read / agt_file_list (plan-012). The built-in toolkit is
+// therefore now exactly these three (bash inspection + tool_help); bash_run
+// is added only when the allowlist is non-empty.
 // ---------------------------------------------------------------------------
 const STANDARD_READONLY_NAMES = [
-  'file_read',
-  'file_list',
   'bash_list_allowed',
   'bash_which',
-  'web_search',
-  'web_fetch',
   'tool_help',
 ] as const;
 
 // ---------------------------------------------------------------------------
-// Standard mutating tool names — only present when allowMutations=true.
+// agt_file_* tool names (plan-012). read/list are read-only; write/edit/append
+// are mutation-gated (require cfg.allowMutations). NOTE: there are NO built-in
+// mutating tools anymore — file mutation lives entirely in the agt_ pack.
 // ---------------------------------------------------------------------------
-const STANDARD_MUTATING_NAMES = [
-  'file_write',
-  'file_edit',
-  'file_append',
-] as const;
+const AGT_FILE_READONLY_NAMES = ['agt_file_read', 'agt_file_list'] as const;
+const AGT_FILE_MUTATING_NAMES = ['agt_file_write', 'agt_file_edit', 'agt_file_append'] as const;
 
 // ---------------------------------------------------------------------------
 // Describe blocks
@@ -284,12 +303,16 @@ describe('buildToolCatalog — integration: allowMutations=true', () => {
     expect(names).toContain(AGT_PATCH_NAME);
   });
 
-  it('allowMutations=true → standard mutating file tools are also included', () => {
-    const cfg = makeCfg({ allowMutations: true, agentToolsEnabled: false });
+  it('allowMutations=true + file mutator flags on → agt_file_write/edit/append are included', () => {
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileWrite: true, fileEdit: true, fileAppend: true },
+    });
     const catalog = buildToolCatalog(cfg, nullLogger);
     const names = toolNames(catalog);
 
-    for (const name of STANDARD_MUTATING_NAMES) {
+    for (const name of AGT_FILE_MUTATING_NAMES) {
       expect(names).toContain(name);
     }
   });
@@ -312,7 +335,7 @@ describe('buildToolCatalog — integration: allowMutations=true', () => {
       AGT_TODO_WRITE_NAME,
     ]);
     expect(catalog.tools).toHaveLength(
-      STANDARD_READONLY_NAMES.length + STANDARD_MUTATING_NAMES.length + 6,
+      STANDARD_READONLY_NAMES.length + 6,
     );
   });
 
@@ -455,6 +478,177 @@ describe('buildToolCatalog — integration: selective per-tool flags', () => {
   });
 });
 
+describe('buildToolCatalog — integration: agt_web_* (plan-011)', () => {
+  /**
+   * Web search/fetch are no longer built-in. They are first-party members of
+   * the agt_* pack: present when the umbrella is on AND their per-tool flags
+   * are on (read-only — no allowMutations gate), and never under the legacy
+   * built-in `web_search` / `web_fetch` names.
+   */
+  it('built-in read-only catalog no longer contains web_search / web_fetch', () => {
+    const cfg = makeCfg({ agentToolsEnabled: false }); // built-ins only
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    expect(names).not.toContain('web_search');
+    expect(names).not.toContain('web_fetch');
+  });
+
+  it('umbrella on + webSearch/webFetch flags on → agt_web_search and agt_web_fetch register (read-only)', () => {
+    const cfg = makeCfg({
+      allowMutations: false, // read-only: still registers
+      agentToolsEnabled: true,
+      agentToolFlags: { webSearch: true, webFetch: true },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    expect(names).toContain(AGT_WEB_SEARCH_NAME);
+    expect(names).toContain(AGT_WEB_FETCH_NAME);
+    // And never the legacy built-in names.
+    expect(names).not.toContain('web_search');
+    expect(names).not.toContain('web_fetch');
+  });
+
+  it('agt_web_* register in canonical order (after grep) and mirror meta', () => {
+    const cfg = makeCfg({
+      agentToolsEnabled: true,
+      agentToolFlags: { glob: true, grep: true, webSearch: true, webFetch: true },
+    });
+    const catalog = buildToolCatalog(cfg, nullLogger);
+    const metaNames = catalog.agentToolsMeta.registered.map((e: { name: string }) => e.name);
+    expect(metaNames).toEqual([
+      AGT_GLOB_NAME,
+      AGT_GREP_NAME,
+      AGT_WEB_SEARCH_NAME,
+      AGT_WEB_FETCH_NAME,
+    ]);
+    const agtTools = toolNames(catalog).filter((n) => n.startsWith('agt_'));
+    expect(agtTools).toEqual(metaNames);
+  });
+
+  it('umbrella OFF → agt_web_search / agt_web_fetch are gone even with their flags on', () => {
+    const cfg = makeCfg({
+      agentToolsEnabled: false,
+      agentToolFlags: { webSearch: true, webFetch: true },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    expect(names).not.toContain(AGT_WEB_SEARCH_NAME);
+    expect(names).not.toContain(AGT_WEB_FETCH_NAME);
+  });
+
+  it('per-tool: webSearch on, webFetch off → only agt_web_search registers', () => {
+    const cfg = makeCfg({
+      agentToolsEnabled: true,
+      agentToolFlags: { webSearch: true, webFetch: false },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    expect(names).toContain(AGT_WEB_SEARCH_NAME);
+    expect(names).not.toContain(AGT_WEB_FETCH_NAME);
+  });
+});
+
+describe('buildToolCatalog — integration: agt_file_* (plan-012)', () => {
+  /**
+   * File operations are no longer built-in. They are first-party members of
+   * the agt_* pack: read/list are read-only (present when the umbrella + their
+   * flags are on), write/edit/append are mutation-gated (also require
+   * allowMutations), and the legacy built-in `file_*` names never appear.
+   */
+  it('AC1: built-in catalog (umbrella off) contains ONLY bash + tool_help — no file_* and no agt_file_*', () => {
+    const cfg = makeCfg({ allowMutations: true, agentToolsEnabled: false });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    // Exactly the three built-in read-only tools (no bash allow → no bash_run).
+    expect(names.sort()).toEqual([...STANDARD_READONLY_NAMES].sort());
+    // No legacy built-in file names.
+    for (const legacy of ['file_read', 'file_list', 'file_write', 'file_edit', 'file_append']) {
+      expect(names).not.toContain(legacy);
+    }
+    // No agt_file_* either (umbrella off).
+    for (const n of [...AGT_FILE_READONLY_NAMES, ...AGT_FILE_MUTATING_NAMES]) {
+      expect(names).not.toContain(n);
+    }
+  });
+
+  it('AC2/AC3: defaults (umbrella on, file flags on, no allowMutations) → agt_file_read+list present, mutators absent', () => {
+    const cfg = makeCfg({
+      allowMutations: false,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    for (const n of AGT_FILE_READONLY_NAMES) expect(names).toContain(n);
+    for (const n of AGT_FILE_MUTATING_NAMES) expect(names).not.toContain(n);
+  });
+
+  it('AC3: with --allow-mutations the three agt_file_* mutators additionally appear', () => {
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    for (const n of [...AGT_FILE_READONLY_NAMES, ...AGT_FILE_MUTATING_NAMES]) {
+      expect(names).toContain(n);
+    }
+  });
+
+  it('mutator flag ON but allowMutations=false → that agt_file_* mutator is dropped (meta omitted too)', () => {
+    const cfg = makeCfg({
+      allowMutations: false,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileWrite: true },
+    });
+    const catalog = buildToolCatalog(cfg, nullLogger);
+    expect(toolNames(catalog)).not.toContain('agt_file_write');
+    expect(catalog.agentToolsMeta.registered.map((e: { name: string }) => e.name)).not.toContain('agt_file_write');
+  });
+
+  it('AC4: --no-builtin-tools removes bash + tool_help only; agt_file_* still present', () => {
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true, fileWrite: true },
+    });
+    (cfg as unknown as Record<string, unknown>)['builtinTools'] = false;
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    // Built-in toolkit suppressed.
+    expect(names).not.toContain('bash_list_allowed');
+    expect(names).not.toContain('bash_which');
+    expect(names).not.toContain('tool_help');
+    // File ops survive — they are governed by agent-tools, not builtin-tools.
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('agt_file_list');
+    expect(names).toContain('agt_file_write');
+  });
+
+  it('AC5: --no-agent-tools removes all agt_file_*; bash + tool_help remain', () => {
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: false,
+      agentToolFlags: { fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true },
+    });
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    for (const n of [...AGT_FILE_READONLY_NAMES, ...AGT_FILE_MUTATING_NAMES]) {
+      expect(names).not.toContain(n);
+    }
+    expect(names).toContain('bash_list_allowed');
+    expect(names).toContain('tool_help');
+  });
+
+  it('AC6: profile tools.deny: [agt_file_write] removes it via name-based scoping', () => {
+    const cfg = makeCfg({
+      allowMutations: true,
+      agentToolsEnabled: true,
+      agentToolFlags: { fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true },
+    });
+    (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
+      tools: { deny: ['agt_file_write'] },
+    };
+    const names = toolNames(buildToolCatalog(cfg, nullLogger));
+    expect(names).not.toContain('agt_file_write');
+    // siblings survive
+    expect(names).toContain('agt_file_read');
+    expect(names).toContain('agt_file_edit');
+  });
+});
+
 describe('buildToolCatalog — integration: agentToolsMeta lockstep invariant', () => {
   it('tools[i].name === agentToolsMeta.registered[i].name for all i', () => {
     const cfg = makeCfg({
@@ -505,10 +699,11 @@ describe('buildToolCatalog — regression: baseline standard tool count', () => 
   /**
    * Regression guard: when all agent-tools flags are off and bash allow is
    * empty and allowMutations is false, the catalog must contain exactly
-   * the 7 read-only standard tools. This test fails if a new standard tool
-   * is added without being reflected here — an intentional tripwire.
+   * the 5 read-only standard tools (web moved to the agt_* pack, plan-011).
+   * This test fails if a new standard tool is added without being reflected
+   * here — an intentional tripwire.
    */
-  it('all agt_* flags off + allowMutations=false + no bash allow → exactly 7 standard tools', () => {
+  it('all agt_* flags off + allowMutations=false + no bash allow → exactly the standard read-only tools', () => {
     const cfg = makeCfg({
       allowMutations: false,
       agentToolsEnabled: true,
@@ -530,7 +725,7 @@ describe('buildToolCatalog — regression: baseline standard tool count', () => 
     }
   });
 
-  it('umbrella OFF + allowMutations=false + no bash allow → still exactly 7 standard tools', () => {
+  it('umbrella OFF + allowMutations=false + no bash allow → still exactly the standard read-only tools', () => {
     const cfg = makeCfg({
       allowMutations: false,
       agentToolsEnabled: false,
@@ -586,11 +781,13 @@ describe('buildToolCatalog — integration: profile toolArgs dead-reference warn
    */
   it('toolArgs key referencing an excluded tool emits stderr warning', () => {
     const cfg = makeCfg({ allowMutations: false, agentToolsEnabled: false });
-    // Inject activeProfileData with a deny that drops file_read AND a
-    // toolArgs entry that references the now-dropped name.
+    // Inject activeProfileData with a deny that drops the built-in tool_help
+    // AND a toolArgs entry that references the now-dropped name. (file_read is
+    // no longer a built-in catalog name after plan-012, so a built-in that
+    // actually survives-then-is-denied is used to exercise the exclusion path.)
     (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
-      tools: { deny: ['file_read'] },
-      toolArgs: { file_read: { maxBytes: 1024 } },
+      tools: { deny: ['tool_help'] },
+      toolArgs: { tool_help: { section: 'full' } },
     };
 
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
@@ -603,7 +800,7 @@ describe('buildToolCatalog — integration: profile toolArgs dead-reference warn
     }
 
     const warning = calls.find((s) =>
-      s.includes("profile toolArgs references tool 'file_read'"),
+      s.includes("profile toolArgs references tool 'tool_help'"),
     );
     expect(warning).toBeDefined();
     expect(warning).toContain('not in the active catalog');
@@ -633,7 +830,7 @@ describe('buildToolCatalog — integration: profile toolArgs dead-reference warn
   it('toolArgs key matching a surviving tool produces no warning', () => {
     const cfg = makeCfg({ allowMutations: false, agentToolsEnabled: false });
     (cfg as unknown as Record<string, unknown>)['activeProfileData'] = {
-      toolArgs: { file_read: { maxBytes: 1024 } },
+      toolArgs: { tool_help: { section: 'full' } },
     };
 
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);

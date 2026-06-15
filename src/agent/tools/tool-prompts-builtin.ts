@@ -45,9 +45,16 @@ export interface BuiltinToolPrompt {
 
 export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt } = Object.freeze({
   // -------------------------------------------------------------------------
-  // file_*
+  // agt_file_* — first-party file wrappers (plan-012).
+  //
+  // These were the former built-in `file_*` tools, re-homed into the agt_
+  // pack as FIRST-PARTY members (like agt_web_* in plan-011). Unlike the
+  // vendored agt_glob / agt_grep / agt_multiedit / agt_patch below, they are
+  // NOT vendored from upstream `agent-tools` — they reuse cli-agent's own
+  // sandbox (`src/agent/tools/file/sandbox.ts`). The description/parameter
+  // text is copied verbatim from the former file_* entries.
   // -------------------------------------------------------------------------
-  file_read: Object.freeze({
+  agt_file_read: Object.freeze({
     description: 'Read the contents of a plain-text file on disk inside the allowed file root.',
     parameters: Object.freeze({
       path: 'Path to the file to read (relative to file root or absolute).',
@@ -55,14 +62,14 @@ export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt 
       binary: 'If true, return content as base64. Default: false (utf8).',
     }),
   }),
-  file_list: Object.freeze({
+  agt_file_list: Object.freeze({
     description: 'List files in a directory inside the allowed file root.',
     parameters: Object.freeze({
       path: 'Directory path to list (relative to file root or absolute).',
       glob: 'Optional glob pattern to filter files (e.g. "*.ts").',
     }),
   }),
-  file_write: Object.freeze({
+  agt_file_write: Object.freeze({
     description: '[MUTATING] Overwrite a file with new content. Requires confirmed: true.',
     parameters: Object.freeze({
       path: 'Path to write (relative to file root or absolute).',
@@ -70,7 +77,7 @@ export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt 
       confirmed: 'Must be true to proceed with the write.',
     }),
   }),
-  file_edit: Object.freeze({
+  agt_file_edit: Object.freeze({
     description: '[MUTATING] Find and replace text in a file. Requires confirmed: true.',
     parameters: Object.freeze({
       path: 'File path to edit.',
@@ -81,36 +88,12 @@ export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt 
       confirmed: 'Must be true to proceed.',
     }),
   }),
-  file_append: Object.freeze({
+  agt_file_append: Object.freeze({
     description: '[MUTATING] Append content to an existing file. Requires confirmed: true.',
     parameters: Object.freeze({
       path: 'File path to append to.',
       content: 'Content to append.',
       confirmed: 'Must be true to proceed.',
-    }),
-  }),
-
-  // -------------------------------------------------------------------------
-  // web_*
-  // -------------------------------------------------------------------------
-  web_search: Object.freeze({
-    description:
-      'Search the public internet and return a list of results with titles, URLs, and snippets. ' +
-      'Never fabricate URLs — only use URLs returned by this tool.',
-    parameters: Object.freeze({
-      query: 'Search query string.',
-      top_k: 'Number of results to return (default 5).',
-      site: 'Restrict search to this domain (e.g. "docs.python.org").',
-      time_range: 'Time range filter, e.g. "day", "week", "month".',
-    }),
-  }),
-  web_fetch: Object.freeze({
-    description:
-      'Fetch a URL and return its content as readable text. HTML is stripped to plain text. ' +
-      'Never fabricate URLs.',
-    parameters: Object.freeze({
-      url: 'URL to fetch. HTML is converted to readable text.',
-      max_bytes: 'Maximum response size in bytes (default 1 MiB).',
     }),
   }),
 
@@ -263,6 +246,32 @@ export const BUILTIN_TOOL_PROMPTS: { readonly [tool: string]: BuiltinToolPrompt 
       todos:
         'The complete updated todo list. Replaces any previously stored list ' +
         'in full. Pass an empty array to clear all todos.',
+    }),
+  }),
+
+  // agt_web_* — first-party web wrappers (plan-011). The ONLY non-vendored
+  // members of the agt_* pack. Descriptions/params are verbatim copies of
+  // the former built-in web_search / web_fetch entries (incl. the "Never
+  // fabricate URLs" guidance); the AGT_WEB_*_DESCRIPTION constants alias
+  // these so there is exactly one literal per tool.
+  agt_web_search: Object.freeze({
+    description:
+      'Search the public internet and return a list of results with titles, URLs, and snippets. ' +
+      'Never fabricate URLs — only use URLs returned by this tool.',
+    parameters: Object.freeze({
+      query: 'Search query string.',
+      top_k: 'Number of results to return (default 5).',
+      site: 'Restrict search to this domain (e.g. "docs.python.org").',
+      time_range: 'Time range filter, e.g. "day", "week", "month".',
+    }),
+  }),
+  agt_web_fetch: Object.freeze({
+    description:
+      'Fetch a URL and return its content as readable text. HTML is stripped to plain text. ' +
+      'Never fabricate URLs.',
+    parameters: Object.freeze({
+      url: 'URL to fetch. HTML is converted to readable text.',
+      max_bytes: 'Maximum response size in bytes (default 1 MiB).',
     }),
   }),
 });

@@ -12,6 +12,7 @@ import type { AgentConfig } from '../config/agent-config.js';
 import type { Logger } from '../agent/logging.js';
 import type { AgentGraph, AgentStreamEvent } from '../agent/graph.js';
 import { streamOneShot } from '../agent/graph.js';
+import type { IoCapture } from '../agent/io-capture.js';
 import { createSpinner, type Spinner } from './spinner.js';
 import { CLEAR_LINE, BOLD, CYAN, DIM, GREEN, RED, RESET, YELLOW } from './ansi.js';
 import {
@@ -87,12 +88,22 @@ export interface TuiControllerOptions {
   readonly logger: Logger;
   readonly stdout?: NodeJS.WriteStream;
   readonly stderr?: NodeJS.WriteStream;
+  /**
+   * LLM I/O capture channel. REQUIRED — pass `NullIoCapture` when the
+   * `--inspect-io` switch is off (the off-state instance does nothing). The
+   * controller stores it as a field, injects it into `runTurn`'s
+   * `streamOneShot` opts, and exposes it to the `/inspect` slash command via
+   * `makeSlashContext` (`ctx.controller.ioCapture`).
+   */
+  readonly ioCapture: IoCapture;
 }
 
 export class TuiController {
   public cfg: AgentConfig;
   public agentGraph: AgentGraph;
   public logger: Logger;
+  /** Parallel LLM I/O capture channel (NullIoCapture when --inspect-io is off). */
+  public readonly ioCapture: IoCapture;
   public threadId: string;
   public threadStartedAt: Date;
   public messages: TuiMessage[] = [];
@@ -108,6 +119,7 @@ export class TuiController {
     this.cfg = opts.cfg;
     this.agentGraph = opts.agentGraph;
     this.logger = opts.logger;
+    this.ioCapture = opts.ioCapture;
     this.stdout = opts.stdout ?? (process.stdout as NodeJS.WriteStream);
     this.stderr = opts.stderr ?? (process.stderr as NodeJS.WriteStream);
     this.threadId = randomUUID();
@@ -232,6 +244,7 @@ export class TuiController {
         logger: this.logger,
         sessionId: this.logger.currentSessionId,
         abortSignal: abort.signal,
+        ioCapture: this.ioCapture,
       });
       while (true) {
         if (abort.signal.aborted) break;

@@ -10,9 +10,12 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import type { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import type { DynamicStructuredTool } from '@langchain/core/tools';
+import type { AIMessage, AIMessageChunk, BaseMessage } from '@langchain/core/messages';
 import type { Logger } from './logging.js';
 import type { AgentConfig } from '../config/agent-config.js';
 import type { AgentToolsSession } from './tools/agent-tools/index.js';
+import type { IoCapture } from './io-capture.js';
+import { extractStartMessages, toCaptureMessage } from './io-capture.js';
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyGraph = ReturnType<typeof createReactAgent>;
@@ -94,7 +97,11 @@ export async function runOneShot(
   prompt: string,
   threadId: string,
   maxSteps: number,
+  captureOpts: { ioCapture?: IoCapture; sessionId?: string } = {},
 ): Promise<string> {
+  // Minted once per invoke for correlation across the request/response/
+  // tool-result records emitted on the non-streaming path (plan-007).
+  const turnId = randomUUID();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const invokeOptions: Record<string, any> = {
     configurable: {
@@ -119,6 +126,21 @@ export async function runOneShot(
   );
 
   const messages = result['messages'] as Array<{ content: unknown }>;
+
+  // Invoke-path capture (plan-007, FR-4). `graph.invoke` emits NO streamEvents,
+  // so the request/response are reconstructed from the final ordered message
+  // list `result['messages']` (system + memory + human + ai + tool + ai…).
+  // Guarded by `captureOpts.ioCapture` so the off path is byte-identical.
+  const ioCapture = captureOpts.ioCapture;
+  if (ioCapture) {
+    const sessionId = captureOpts.sessionId ?? ioCapture.currentSessionId;
+    captureInvokePath(ioCapture, messages as unknown as BaseMessage[], {
+      sessionId,
+      threadId,
+      turnId,
+    });
+  }
+
   const lastMessage = messages[messages.length - 1];
   if (!lastMessage) return '';
 
@@ -133,12 +155,141 @@ export async function runOneShot(
   return JSON.stringify(content);
 }
 
+/**
+ * Reconstruct the request/response/tool-result capture records for the
+ * non-streaming (`graph.invoke`) path from the final ordered message list
+ * (plan-007, FR-4; research Q3 non-streaming block).
+ *
+ * Emits:
+ *   - ONE `captureRequest` for the turn: every message up to and including the
+ *     last human message (the request context the model received), with the
+ *     bound tool schemas denormalized on (`stepIndex: 0`).
+ *   - per AI message carrying non-empty `tool_calls`: a `captureResponse`
+ *     (incrementing `stepIndex`), followed by a `captureToolResult` for each of
+ *     the immediately-following `tool` messages that answer those calls.
+ *   - a final `captureResponse` for the terminal AI text (the model's answer).
+ *
+ * Reads `_getType()` / `tool_calls` / `tool_call_id` through a permissive view
+ * (the same surface `toCaptureMessage` reads); `tool_calls.args` is the parsed
+ * object the adapter produced (research pitfall 3).
+ */
+function captureInvokePath(
+  ioCapture: IoCapture,
+  messages: BaseMessage[],
+  envelope: { sessionId: string; threadId: string; turnId: string },
+): void {
+  const { sessionId, threadId, turnId } = envelope;
+  const typeOf = (m: BaseMessage): string => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mm = m as any;
+    return mm._getType?.() ?? mm.role ?? 'msg';
+  };
+
+  // Request context = messages up to AND including the last human message.
+  let lastHumanIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (typeOf(messages[i] as BaseMessage) === 'human') {
+      lastHumanIdx = i;
+      break;
+    }
+  }
+  const requestMessages = (lastHumanIdx >= 0 ? messages.slice(0, lastHumanIdx + 1) : messages).map(
+    toCaptureMessage,
+  );
+  ioCapture.captureRequest({
+    sessionId,
+    threadId,
+    turnId,
+    stepIndex: 0,
+    ts: new Date().toISOString(),
+    messages: requestMessages,
+    boundTools: [...ioCapture.boundToolSchemas],
+  });
+
+  // Walk the post-request messages, emitting a response per tool-calling AI
+  // message plus the paired tool results, and a terminal response for the
+  // final AI text.
+  const tail = lastHumanIdx >= 0 ? messages.slice(lastHumanIdx + 1) : [];
+  let stepIndex = 1;
+  for (let i = 0; i < tail.length; i += 1) {
+    const m = tail[i] as BaseMessage;
+    if (typeOf(m) !== 'ai') continue;
+    const ai = m as AIMessage;
+    const toolCalls = (ai.tool_calls ?? []).map((tc) => ({
+      id: tc.id,
+      name: tc.name,
+      args: tc.args,
+    }));
+    if (toolCalls.length === 0) continue;
+    ioCapture.captureResponse({
+      sessionId,
+      threadId,
+      turnId,
+      stepIndex,
+      ts: new Date().toISOString(),
+      finalText: normalizeContent(ai.content),
+      toolCalls,
+    });
+    // Pair the immediately-following `tool` messages with this AI step.
+    for (let j = i + 1; j < tail.length && typeOf(tail[j] as BaseMessage) === 'tool'; j += 1) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const tm = tail[j] as any;
+      ioCapture.captureToolResult({
+        sessionId,
+        threadId,
+        turnId,
+        stepIndex,
+        ts: new Date().toISOString(),
+        toolName: tm.name ?? 'unknown',
+        ok: true,
+        durationMs: 0,
+        result: tm.content,
+      });
+    }
+    stepIndex += 1;
+  }
+
+  // Terminal AI text (the model's final answer for the turn).
+  const last = messages[messages.length - 1] as BaseMessage | undefined;
+  if (last && typeOf(last) === 'ai') {
+    const ai = last as AIMessage;
+    const terminalToolCalls = (ai.tool_calls ?? []).map((tc) => ({
+      id: tc.id,
+      name: tc.name,
+      args: tc.args,
+    }));
+    // Only emit a terminal record when the last AI message is NOT one already
+    // captured above as a tool-calling step (avoids a duplicate record when the
+    // turn ends on a tool request rather than a text answer).
+    if (terminalToolCalls.length === 0) {
+      ioCapture.captureResponse({
+        sessionId,
+        threadId,
+        turnId,
+        stepIndex,
+        ts: new Date().toISOString(),
+        finalText: normalizeContent(ai.content),
+        toolCalls: [],
+      });
+    }
+  }
+}
+
 /* ---------- Streaming path used by the TUI ---------- */
 
 interface StreamOneShotOptions {
   readonly logger?: Logger;
   readonly sessionId?: string;
   readonly abortSignal?: AbortSignal;
+  /**
+   * Optional parallel LLM-I/O capture channel (plan-007). When provided,
+   * `streamOneShot` records the provider-normalized request on
+   * `on_chat_model_start`, the response on `on_chat_model_end`, and tool
+   * results on `on_tool_end`. ADDITIVE — when undefined, the off path is
+   * byte-identical to before (NFR-1): no yielded `AgentStreamEvent`, no
+   * `logger.log` call, and no `assembledText` value changes.
+   */
+  readonly ioCapture?: IoCapture;
 }
 
 /**
@@ -167,9 +318,14 @@ export async function* streamOneShot(
   const turnId = randomUUID();
   const sessionId = opts.sessionId ?? opts.logger?.currentSessionId ?? 'streaming';
   const logger = opts.logger;
+  const ioCapture = opts.ioCapture;
 
   let assembledText = '';
   let toolCallsObserved: Array<{ name: string; args: unknown }> = [];
+  // Distinguishes the N ReAct model calls within this single turn (FR-4c).
+  // Incremented after each `on_chat_model_end` capture; the bound-tool schema
+  // snapshot is denormalized onto the first request (stepIndex === 0) only.
+  let stepIndex = 0;
   // toolName -> startTs (ms)
   const toolTimings = new Map<string, number>();
 
@@ -210,6 +366,26 @@ export async function* streamOneShot(
       }
 
       switch (event.event) {
+        case 'on_chat_model_start': {
+          // Request capture (plan-007, FR-3). The start-event input is the
+          // authoritative provider-normalized snapshot: it already contains
+          // the SystemMessage, the full in-thread memory, and the current
+          // user content in one literal array (research §"Deviation from scan
+          // 2"). Bound tool schemas are denormalized onto the first request
+          // of the turn only (research best-practice 4).
+          if (ioCapture) {
+            ioCapture.captureRequest({
+              sessionId,
+              threadId,
+              turnId,
+              stepIndex,
+              ts: new Date().toISOString(),
+              messages: extractStartMessages(event.data?.input).map(toCaptureMessage),
+              boundTools: stepIndex === 0 ? [...ioCapture.boundToolSchemas] : undefined,
+            });
+          }
+          break;
+        }
         case 'on_chat_model_stream': {
           const raw = event.data?.chunk?.content;
           const text = normalizeContent(raw);
@@ -246,6 +422,31 @@ export async function* streamOneShot(
               toolCallsObserved,
             });
           }
+          // Response capture (plan-007, FR-4). Read tool_calls EXCLUSIVELY from
+          // the aggregated end-event output (`AIMessageChunk.tool_calls`, a
+          // parsed-object array) — NEVER from mid-stream chunks, whose
+          // `tool_calls` is empty/partial (research pitfalls 2/3). `finalText`
+          // reuses the same `normalizeContent` the streaming path uses, falling
+          // back to the assembled text when the output is absent.
+          if (ioCapture) {
+            const out = event.data?.output as AIMessageChunk | undefined;
+            const finalText = out ? normalizeContent(out.content) : assembledText;
+            const toolCalls = (out?.tool_calls ?? []).map((tc) => ({
+              id: tc.id,
+              name: tc.name,
+              args: tc.args,
+            }));
+            ioCapture.captureResponse({
+              sessionId,
+              threadId,
+              turnId,
+              stepIndex,
+              ts: new Date().toISOString(),
+              finalText,
+              toolCalls,
+            });
+          }
+          stepIndex += 1;
           break;
         }
         case 'on_tool_start': {
@@ -261,6 +462,22 @@ export async function* streamOneShot(
           const start = toolTimings.get(toolName) ?? Date.now();
           const durationMs = Date.now() - start;
           toolTimings.delete(toolName);
+          // Tool-result capture (plan-007, FR-4c) so the request→tool-result
+          // chain is inspectable. The `stepIndex` here is the value AFTER the
+          // model call that requested the tool (incremented in
+          // `on_chat_model_end`), correlating the result with its turn.
+          if (ioCapture) {
+            ioCapture.captureToolResult({
+              sessionId,
+              threadId,
+              turnId,
+              stepIndex,
+              ts: new Date().toISOString(),
+              toolName,
+              ok: true,
+              durationMs,
+            });
+          }
           yield { kind: 'tool_call_end', toolName, durationMs, ok: true };
           break;
         }

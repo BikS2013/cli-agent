@@ -1,8 +1,1 @@
-cf2c14fa0e75878943ff23ba61de65aeb35b4bc683cb46e1a9a78bd8ede9391c  help-no-treat-as-tool.txt
-# Captured: 2026-05-02 (cli-agent v0.3.0)
-# Purpose: NFR-CMP-001 byte-stability invariant for `cli-agent --help`
-#          (no `--treat-as-tool`).
-# To regenerate after an intentional drift:
-#   node dist/cli.js --help > test_scripts/baselines/help-no-treat-as-tool.txt
-#   shasum -a 256 test_scripts/baselines/help-no-treat-as-tool.txt > \
-#     test_scripts/baselines/help-no-treat-as-tool.sha256
+75ef36238709b7e6c56685c2ba1f396f0c588e391567e061efe8bfba0afac486

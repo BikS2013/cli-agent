@@ -50,6 +50,27 @@ import {
   AGT_TODO_WRITE_NAME,
   AGT_TODO_WRITE_DESCRIPTION,
   buildAgtTodoWriteTool,
+  AGT_WEB_SEARCH_NAME,
+  AGT_WEB_SEARCH_DESCRIPTION,
+  buildAgtWebSearchTool,
+  AGT_WEB_FETCH_NAME,
+  AGT_WEB_FETCH_DESCRIPTION,
+  buildAgtWebFetchTool,
+  AGT_FILE_READ_NAME,
+  AGT_FILE_READ_DESCRIPTION,
+  buildAgtFileReadTool,
+  AGT_FILE_LIST_NAME,
+  AGT_FILE_LIST_DESCRIPTION,
+  buildAgtFileListTool,
+  AGT_FILE_WRITE_NAME,
+  AGT_FILE_WRITE_DESCRIPTION,
+  buildAgtFileWriteTool,
+  AGT_FILE_EDIT_NAME,
+  AGT_FILE_EDIT_DESCRIPTION,
+  buildAgtFileEditTool,
+  AGT_FILE_APPEND_NAME,
+  AGT_FILE_APPEND_DESCRIPTION,
+  buildAgtFileAppendTool,
 } from './index.js';
 import type { PermissionPolicy } from '../agent-tools-vendored/upstream/src/types.js';
 import { getToolDescription } from '../tool-prompt-overlay.js';
@@ -134,6 +155,12 @@ export function buildAgentToolsGroup(
   // overlay is registered).
   const overlays = cfg.toolPromptOverlays;
 
+  // Per-session web request budget, shared by agt_web_search + agt_web_fetch
+  // (plan-011). Mirrors the budget the former built-in web tools owned in
+  // registry.ts (WEB_SEARCH_MAX_REQUESTS, default 50). Constructed ONCE so a
+  // single decrementing counter spans both tools for the whole session.
+  const requestBudget = { remaining: parseInt(process.env['WEB_SEARCH_MAX_REQUESTS'] ?? '50', 10) };
+
   if (flags.glob) {
     tools.push(buildAgtGlobTool({ permissions: policy, overlays }));
     registered.push({
@@ -146,6 +173,67 @@ export function buildAgentToolsGroup(
     registered.push({
       name: AGT_GREP_NAME,
       description: getToolDescription(overlays, AGT_GREP_NAME, AGT_GREP_DESCRIPTION),
+    });
+  }
+  // First-party web wrappers (plan-011). Read-only — NO allowMutations gate.
+  // They reuse the shared per-session requestBudget built above. Registered
+  // here (after grep) so the agt_* catalog order is stable; the prompt block
+  // is a pure projection of `registered`.
+  if (flags.webSearch) {
+    tools.push(buildAgtWebSearchTool({ cfg, requestBudget, overlays }));
+    registered.push({
+      name: AGT_WEB_SEARCH_NAME,
+      description: getToolDescription(overlays, AGT_WEB_SEARCH_NAME, AGT_WEB_SEARCH_DESCRIPTION),
+    });
+  }
+  if (flags.webFetch) {
+    tools.push(buildAgtWebFetchTool({ cfg, requestBudget, overlays }));
+    registered.push({
+      name: AGT_WEB_FETCH_NAME,
+      description: getToolDescription(overlays, AGT_WEB_FETCH_NAME, AGT_WEB_FETCH_DESCRIPTION),
+    });
+  }
+  // First-party file wrappers (plan-012). Re-homed from the former built-in
+  // file tools; reuse the cli-agent sandbox. agt_file_read / agt_file_list
+  // are read-only (NO allowMutations gate). agt_file_write / agt_file_edit /
+  // agt_file_append are MUTATING: registered only when BOTH the per-tool flag
+  // AND cfg.allowMutations are true (mirrors the former native mutatingFile
+  // gating in registry.ts and the agt_multiedit / agt_patch pattern). Kept
+  // contiguous so the agt_file_* catalog order is stable; the prompt block is
+  // a pure projection of `registered`.
+  if (flags.fileRead) {
+    tools.push(buildAgtFileReadTool({ cfg, overlays }));
+    registered.push({
+      name: AGT_FILE_READ_NAME,
+      description: getToolDescription(overlays, AGT_FILE_READ_NAME, AGT_FILE_READ_DESCRIPTION),
+    });
+  }
+  if (flags.fileList) {
+    tools.push(buildAgtFileListTool({ cfg, overlays }));
+    registered.push({
+      name: AGT_FILE_LIST_NAME,
+      description: getToolDescription(overlays, AGT_FILE_LIST_NAME, AGT_FILE_LIST_DESCRIPTION),
+    });
+  }
+  if (flags.fileWrite && cfg.allowMutations) {
+    tools.push(buildAgtFileWriteTool({ cfg, overlays }));
+    registered.push({
+      name: AGT_FILE_WRITE_NAME,
+      description: getToolDescription(overlays, AGT_FILE_WRITE_NAME, AGT_FILE_WRITE_DESCRIPTION),
+    });
+  }
+  if (flags.fileEdit && cfg.allowMutations) {
+    tools.push(buildAgtFileEditTool({ cfg, overlays }));
+    registered.push({
+      name: AGT_FILE_EDIT_NAME,
+      description: getToolDescription(overlays, AGT_FILE_EDIT_NAME, AGT_FILE_EDIT_DESCRIPTION),
+    });
+  }
+  if (flags.fileAppend && cfg.allowMutations) {
+    tools.push(buildAgtFileAppendTool({ cfg, overlays }));
+    registered.push({
+      name: AGT_FILE_APPEND_NAME,
+      description: getToolDescription(overlays, AGT_FILE_APPEND_NAME, AGT_FILE_APPEND_DESCRIPTION),
     });
   }
   // Mutating wrappers: BOTH the per-tool flag AND cfg.allowMutations must

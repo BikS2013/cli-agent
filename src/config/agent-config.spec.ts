@@ -18,6 +18,10 @@ import {
   agentToolAgentsDir,
   bootstrapAgentDir,
 } from './agent-config.js';
+import {
+  BUILTIN_DEFAULT_SYSTEM_PROMPT,
+  LEGACY_DEFAULT_SYSTEM_PROMPTS,
+} from '../agent/system-prompt.js';
 
 // Prevent actual filesystem bootstrap during tests.
 // IMPORTANT: source code uses both `import fsp from 'node:fs/promises'` (default
@@ -403,6 +407,89 @@ describe('composite path helpers (plan-006 P3)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// bootstrapAgentDir — in-place system-prompt.md migration (plan-009)
+//
+// When system-prompt.md already exists, bootstrap upgrades it ONLY if its
+// bytes byte-exactly equal a prior default (an entry in
+// LEGACY_DEFAULT_SYSTEM_PROMPTS) — overwriting with the new slim
+// BUILTIN_DEFAULT_SYSTEM_PROMPT. A user-modified or already-slim file is
+// left byte-unchanged. This is NOT a runtime fallback.
+//
+// Harness: the system-prompt.md bytes are registered via getTestFiles()
+// (the shared fileContents map the fs/promises mock reads through). The
+// migration's writeFile call is observed on the writeFile mock's call list.
+// ---------------------------------------------------------------------------
+
+describe('bootstrapAgentDir — system-prompt.md migration (plan-009)', () => {
+  const agentDir = agentToolAgentsDir();
+  const systemPromptPath = path.join(agentDir, 'capabilities', SYSTEM_PROMPT_FILENAME);
+
+  beforeEach(async () => {
+    const files = await getTestFiles();
+    files.delete(systemPromptPath);
+    const fsp = await import('node:fs/promises');
+    (fsp.writeFile as unknown as ReturnType<typeof vi.fn>).mockClear();
+    (fsp.readFile as unknown as ReturnType<typeof vi.fn>).mockClear();
+  });
+
+  afterEach(async () => {
+    const files = await getTestFiles();
+    files.delete(systemPromptPath);
+  });
+
+  /** All writeFile calls whose first arg is the system-prompt.md path. */
+  async function systemPromptWrites(): Promise<Array<[string, string, unknown]>> {
+    const fsp = await import('node:fs/promises');
+    const writeFile = fsp.writeFile as unknown as ReturnType<typeof vi.fn>;
+    return writeFile.mock.calls
+      .filter((c) => String(c[0]) === systemPromptPath)
+      .map((c) => [String(c[0]), String(c[1]), c[2]] as [string, string, unknown]);
+  }
+
+  it('upgrades an unmodified legacy default (bytes === LEGACY_DEFAULT_SYSTEM_PROMPTS[0]) to the slim default', async () => {
+    const legacy = LEGACY_DEFAULT_SYSTEM_PROMPTS[0];
+    if (legacy === undefined) throw new Error('LEGACY_DEFAULT_SYSTEM_PROMPTS[0] must exist');
+    const files = await getTestFiles();
+    files.set(systemPromptPath, Buffer.from(legacy, 'utf8'));
+
+    await bootstrapAgentDir(agentDir);
+
+    const writes = await systemPromptWrites();
+    // Exactly one write to system-prompt.md: the migration overwrite.
+    expect(writes.length).toBe(1);
+    const write = writes[0];
+    if (write === undefined) throw new Error('expected a migration write');
+    expect(write[1]).toBe(BUILTIN_DEFAULT_SYSTEM_PROMPT);
+    // Overwrite carries mode 0o600 (NOT flag:'wx' — that is the seed path).
+    expect(write[2]).toMatchObject({ mode: 0o600 });
+  });
+
+  it('leaves a user-modified system-prompt.md byte-unchanged (no overwrite)', async () => {
+    const userText = 'You are MY custom cli-agent. Do exactly what I say.\n';
+    const files = await getTestFiles();
+    files.set(systemPromptPath, Buffer.from(userText, 'utf8'));
+
+    await bootstrapAgentDir(agentDir);
+
+    const writes = await systemPromptWrites();
+    expect(writes.length).toBe(0);
+    // The registered bytes are still the user's text.
+    expect(files.get(systemPromptPath)!.toString('utf8')).toBe(userText);
+  });
+
+  it('leaves an already-slim default system-prompt.md unchanged (no re-write)', async () => {
+    const files = await getTestFiles();
+    files.set(systemPromptPath, Buffer.from(BUILTIN_DEFAULT_SYSTEM_PROMPT, 'utf8'));
+
+    await bootstrapAgentDir(agentDir);
+
+    const writes = await systemPromptWrites();
+    expect(writes.length).toBe(0);
+    expect(files.get(systemPromptPath)!.toString('utf8')).toBe(BUILTIN_DEFAULT_SYSTEM_PROMPT);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Agent-tools pack — config surface (U4)
 // ---------------------------------------------------------------------------
 
@@ -421,6 +508,16 @@ describe('loadAgentConfig — agentTools defaults', () => {
         patch: true,
         todoRead: false,
         todoWrite: false,
+        // plan-011: first-party web wrappers default ON (read-only).
+        webSearch: true,
+        webFetch: true,
+        // plan-012: first-party file wrappers default ON (read/list read-only,
+        // write/edit/append mutation-gated downstream in group-builder).
+        fileRead: true,
+        fileList: true,
+        fileWrite: true,
+        fileEdit: true,
+        fileAppend: true,
       },
     });
   });
@@ -460,6 +557,46 @@ describe('loadAgentConfig — agentTools env vars', () => {
       { shellEnv: { CLI_AGENT_AGT_TODO_READ: '1' }, cwd: '/tmp' },
     );
     expect(cfg.agentTools.tools.todoRead).toBe(true);
+  });
+
+  it('CLI_AGENT_AGT_WEB_SEARCH=0 disables the default-on web-search tool (plan-011)', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_AGT_WEB_SEARCH: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.webSearch).toBe(false);
+  });
+
+  it('CLI_AGENT_AGT_WEB_FETCH=off disables the default-on web-fetch tool (plan-011)', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_AGT_WEB_FETCH: 'off' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.webFetch).toBe(false);
+  });
+
+  // plan-012: the five first-party file wrappers default ON and each is
+  // governed by its own CLI_AGENT_AGT_FILE_* env key (same tri-state parsing).
+  it.each([
+    ['CLI_AGENT_AGT_FILE_READ', 'fileRead'],
+    ['CLI_AGENT_AGT_FILE_LIST', 'fileList'],
+    ['CLI_AGENT_AGT_FILE_WRITE', 'fileWrite'],
+    ['CLI_AGENT_AGT_FILE_EDIT', 'fileEdit'],
+    ['CLI_AGENT_AGT_FILE_APPEND', 'fileAppend'],
+  ] as const)('%s=0 disables the default-on %s tool (plan-012)', async (envKey, key) => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { [envKey]: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools[key]).toBe(false);
+  });
+
+  it('CLI_AGENT_AGT_FILE_WRITE=1 keeps the default-on file-write flag set (plan-012)', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_AGT_FILE_WRITE: '1' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.fileWrite).toBe(true);
   });
 
   it('throws ConfigurationError when an agent-tools env var is set but unparseable', async () => {
@@ -532,6 +669,53 @@ describe('loadAgentConfig — agentTools precedence (CLI > env > default)', () =
     expect(cfg.agentTools.tools.multiedit).toBe(true);
     expect(cfg.agentTools.tools.todoRead).toBe(false);
   });
+
+  it('web per-tool: CLI flag wins over env var (plan-011)', async () => {
+    // CLI says webSearch=true; env says webSearch=false. CLI must win.
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', agentTools: { tools: { webSearch: true } } },
+      { shellEnv: { CLI_AGENT_AGT_WEB_SEARCH: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.webSearch).toBe(true);
+  });
+
+  it('web per-tool: env wins over the default-on starting value (plan-011)', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_AGT_WEB_FETCH: 'false' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.webFetch).toBe(false);
+  });
+
+  // plan-012 / AC10 / OQ-3: the five CLI_AGENT_AGT_FILE_* keys participate in
+  // the precedence chain (CLI flag > env > config.json > default). The first
+  // arg to loadAgentConfig is the CLI tier; shellEnv is the env tier.
+  it('file per-tool: CLI flag wins over env var (plan-012)', async () => {
+    // CLI says fileWrite=true; env says fileWrite=false. CLI must win.
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', agentTools: { tools: { fileWrite: true } } },
+      { shellEnv: { CLI_AGENT_AGT_FILE_WRITE: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.fileWrite).toBe(true);
+  });
+
+  it('file per-tool: CLI flag (false) wins over env var (true) (plan-012)', async () => {
+    // CLI says fileRead=false; env says fileRead=true. CLI must win.
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', agentTools: { tools: { fileRead: false } } },
+      { shellEnv: { CLI_AGENT_AGT_FILE_READ: '1' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.fileRead).toBe(false);
+  });
+
+  it('file per-tool: env wins over the default-on starting value (plan-012)', async () => {
+    // No CLI tier set; env disables the otherwise default-on tool.
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: { CLI_AGENT_AGT_FILE_APPEND: 'false' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.tools.fileAppend).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -584,6 +768,19 @@ describe('mapAgentToolFlags — CLI conflict detection', () => {
     process.argv = ['node', 'cli.js', '--enable-agt-todo-read', '--disable-agt-grep'];
     const out = mapAgentToolFlags({ enableAgtTodoRead: true, disableAgtGrep: true });
     expect(out).toEqual({ tools: { todoRead: true, grep: false } });
+  });
+
+  it('maps --disable-agt-web-search / --enable-agt-web-fetch into the partial shape (plan-011)', () => {
+    process.argv = ['node', 'cli.js', '--disable-agt-web-search', '--enable-agt-web-fetch'];
+    const out = mapAgentToolFlags({ disableAgtWebSearch: true, enableAgtWebFetch: true });
+    expect(out).toEqual({ tools: { webSearch: false, webFetch: true } });
+  });
+
+  it('throws UsageError when --enable-agt-web-search and --disable-agt-web-search are both passed (plan-011)', () => {
+    process.argv = ['node', 'cli.js', '--enable-agt-web-search', '--disable-agt-web-search'];
+    expect(() =>
+      mapAgentToolFlags({ enableAgtWebSearch: true, disableAgtWebSearch: true }),
+    ).toThrow(/--enable-agt-web-search and --disable-agt-web-search cannot be used together/);
   });
 
   it('UsageError carries E_USAGE code (exit 2)', () => {
@@ -866,5 +1063,186 @@ describe('loadAgentConfig — profile activation (plan-005)', () => {
     expect(cfg.activeProfile?.path).toBe(abs);
     expect(cfg.activeProfile?.schemaVersion).toBe(1);
     expect(cfg.activeProfile?.digest).toMatch(/^[0-9a-f]{16}$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool-loading group toggles (plan-008) — composites + builtinTools.
+// Uniform precedence: CLI flag > env(CLI_AGENT_DISABLE_*) > config.json >
+// profile(tools.*) > default(load=true). Also covers the new agentTools
+// profile tier added to resolveAgentTools.
+// ---------------------------------------------------------------------------
+
+async function placeConfigJson(body: Record<string, unknown>): Promise<void> {
+  const abs = path.join(AGENT_DIR_FOR_TESTS, 'config.json');
+  const files = await getTestFiles();
+  files.set(abs, Buffer.from(JSON.stringify(body), 'utf8'));
+}
+
+async function clearConfigJson(): Promise<void> {
+  const files = await getTestFiles();
+  for (const k of [...files.keys()]) {
+    if (k.endsWith('config.json')) files.delete(k);
+  }
+}
+
+describe('loadAgentConfig — tool-loading group toggles defaults (plan-008)', () => {
+  beforeEach(async () => {
+    await clearProfiles();
+    await clearConfigJson();
+  });
+
+  it('composites + builtinTools default to true (load) when nothing is set', async () => {
+    const cfg = await loadAgentConfig(
+      { provider: 'openai' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.composites).toBe(true);
+    expect(cfg.builtinTools).toBe(true);
+  });
+});
+
+describe('loadAgentConfig — composites toggle precedence (plan-008)', () => {
+  beforeEach(async () => {
+    await clearProfiles();
+    await clearConfigJson();
+  });
+
+  it('CLI flag wins over env + config.json + profile', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
+    await placeConfigJson({ schemaVersion: 1, composites: true });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p', composites: false },
+      { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.composites).toBe(false);
+  });
+
+  it('env (CLI_AGENT_DISABLE_COMPOSITES=1) wins over config.json + profile', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
+    await placeConfigJson({ schemaVersion: 1, composites: true });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: '1' }, cwd: '/tmp' },
+    );
+    expect(cfg.composites).toBe(false);
+  });
+
+  it('config.json wins over profile when CLI + env are silent', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
+    await placeConfigJson({ schemaVersion: 1, composites: false });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.composites).toBe(false);
+  });
+
+  it('profile(tools.composites) wins over the default when nothing higher is set', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: false\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.composites).toBe(false);
+  });
+
+  it('throws ConfigurationError when CLI_AGENT_DISABLE_COMPOSITES is unparseable', async () => {
+    await expect(
+      loadAgentConfig(
+        { provider: 'openai' },
+        { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: 'maybe' }, cwd: '/tmp' },
+      ),
+    ).rejects.toMatchObject({ code: 'E_CONFIG_MISSING' });
+  });
+});
+
+describe('loadAgentConfig — builtinTools toggle precedence (plan-008)', () => {
+  beforeEach(async () => {
+    await clearProfiles();
+    await clearConfigJson();
+  });
+
+  it('CLI flag wins over env + config.json + profile', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
+    await placeConfigJson({ schemaVersion: 1, builtinTools: true });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p', builtinTools: false },
+      { shellEnv: { CLI_AGENT_DISABLE_BUILTIN_TOOLS: '0' }, cwd: '/tmp' },
+    );
+    expect(cfg.builtinTools).toBe(false);
+  });
+
+  it('env (CLI_AGENT_DISABLE_BUILTIN_TOOLS=1) wins over config.json + profile', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
+    await placeConfigJson({ schemaVersion: 1, builtinTools: true });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: { CLI_AGENT_DISABLE_BUILTIN_TOOLS: '1' }, cwd: '/tmp' },
+    );
+    expect(cfg.builtinTools).toBe(false);
+  });
+
+  it('config.json wins over profile when CLI + env are silent', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
+    await placeConfigJson({ schemaVersion: 1, builtinTools: false });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.builtinTools).toBe(false);
+  });
+
+  it('profile(tools.builtin) wins over the default when nothing higher is set', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: false\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.builtinTools).toBe(false);
+  });
+});
+
+describe('loadAgentConfig — agentTools profile tier (plan-008)', () => {
+  beforeEach(async () => {
+    await clearProfiles();
+    await clearConfigJson();
+  });
+
+  it('profile(tools.agentTools=false) disables the umbrella when nothing higher is set', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: false\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.enabled).toBe(false);
+  });
+
+  it('config.json agentTools.enabled wins over the profile tier', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: false\n');
+    await placeConfigJson({ schemaVersion: 1, agentTools: { enabled: true } });
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.enabled).toBe(true);
+  });
+
+  it('env (CLI_AGENT_DISABLE_AGENT_TOOLS) wins over the profile tier', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: true\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p' },
+      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '1' }, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.enabled).toBe(false);
+  });
+
+  it('CLI flag wins over the profile tier', async () => {
+    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: true\n');
+    const cfg = await loadAgentConfig(
+      { provider: 'openai', profile: 'p', agentTools: { enabled: false } },
+      { shellEnv: {}, cwd: '/tmp' },
+    );
+    expect(cfg.agentTools.enabled).toBe(false);
   });
 });

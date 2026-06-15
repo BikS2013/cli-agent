@@ -11,6 +11,8 @@ import { buildToolCatalog } from './tools/registry.js';
 import { buildSystemPromptForCfg } from './system-prompt.js';
 import { buildAgentGraph, runOneShot, streamOneShot, type AgentStreamEvent, type AgentGraph } from './graph.js';
 import { createLogger, CLI_VERSION } from './logging.js';
+import { createIoCapture } from './io-capture.js';
+import type { IoCapture } from './io-capture.js';
 import { discoverAllTools, defaultDiscoveryReporter } from './capabilities/discover.js';
 import { composeCapabilitiesSystemPrompt } from './capabilities/compose-system-prompt.js';
 import { redactString } from '../util/redact.js';
@@ -28,6 +30,11 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
   const llm = createLLM(cfg);
   const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
+  // Parallel LLM-I/O capture channel (plan-007). `NullIoCapture` (no-op) when
+  // `cfg.inspectIo === null`; a `FileIoCapture` when `--inspect-io` is set. A
+  // dir/file that cannot be created raises `ConfigurationError` (no fallback).
+  const ioCapture = createIoCapture(cfg, sessionId, tools);
+
   // Capability discovery
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
@@ -41,7 +48,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
     cfg.capabilities.maxBytesPerTool,
   );
 
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
 
   logger.log({
     kind: 'session_start',
@@ -85,7 +92,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
   let answer: string;
   let terminatedByError = false;
   try {
-    answer = await runOneShot(agentGraph, prompt, threadId, cfg.maxSteps);
+    answer = await runOneShot(agentGraph, prompt, threadId, cfg.maxSteps, { ioCapture, sessionId });
   } catch (e) {
     terminatedByError = true;
     logger.log({
@@ -104,6 +111,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
       reason: terminatedByError ? 'crash' : 'quit',
     });
     await logger.close();
+    await ioCapture.close();
   }
 
   return answer;
@@ -137,6 +145,9 @@ export async function* streamOneShotAgent(
   const llm = createLLM(cfg);
   const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
+  // Parallel LLM-I/O capture channel (plan-007); `NullIoCapture` when off.
+  const ioCapture = createIoCapture(cfg, sessionId, tools);
+
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
@@ -146,7 +157,7 @@ export async function* streamOneShotAgent(
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
 
   logger.log({
     kind: 'session_start',
@@ -190,9 +201,15 @@ export async function* streamOneShotAgent(
   let assembled = '';
   let terminatedByError = false;
   try {
-    const opts: { logger: typeof logger; sessionId: string; abortSignal?: AbortSignal } = {
+    const opts: {
+      logger: typeof logger;
+      sessionId: string;
+      ioCapture: IoCapture;
+      abortSignal?: AbortSignal;
+    } = {
       logger,
       sessionId,
+      ioCapture,
     };
     if (abortSignal) opts.abortSignal = abortSignal;
     const it = streamOneShot(agentGraph, prompt, threadId, cfg.maxSteps, opts);
@@ -222,6 +239,7 @@ export async function* streamOneShotAgent(
       reason: terminatedByError ? 'crash' : 'quit',
     });
     await logger.close();
+    await ioCapture.close();
   }
 
   return assembled;
@@ -236,6 +254,12 @@ export interface TuiAgentRuntime {
   agentGraph: AgentGraph;
   logger: ReturnType<typeof createLogger>;
   sessionId: string;
+  /**
+   * Parallel LLM-I/O capture channel (plan-007). `NullIoCapture` (no-op) when
+   * `cfg.inspectIo === null`; a `FileIoCapture` when `--inspect-io` is set. The
+   * TUI controller owns the close on session end (it is NOT closed here).
+   */
+  ioCapture: IoCapture;
 }
 
 export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRuntime> {
@@ -249,6 +273,10 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
   const llm = createLLM(cfg);
   const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
 
+  // Parallel LLM-I/O capture channel (plan-007); `NullIoCapture` when off. The
+  // TUI controller owns the close on session end (returned as a 4th member).
+  const ioCapture = createIoCapture(cfg, sessionId, tools);
+
   if (cfg.tools.length > 0) {
     await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
   }
@@ -258,7 +286,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
 
   logger.log({
     kind: 'session_start',
@@ -284,7 +312,7 @@ export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRu
   }
 
   const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
-  return { agentGraph, logger, sessionId };
+  return { agentGraph, logger, sessionId, ioCapture };
 }
 
 export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
@@ -309,7 +337,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     cfg.tools,
     cfg.capabilities.maxBytesPerTool,
   );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta);
+  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
 
   logger.log({
     kind: 'session_start',

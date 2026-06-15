@@ -27,6 +27,7 @@ import './slash/history.js';
 import './slash/last.js';
 import './slash/copy.js';
 import './slash/memory.js';
+import './slash/inspect.js';
 import './slash/model.js';
 import './slash/provider.js';
 import './slash/tools.js';
@@ -149,6 +150,7 @@ export async function startTui(cfg: AgentConfig, opts: StartTuiOptions = {}): Pr
     cfg,
     agentGraph: runtime.agentGraph,
     logger: runtime.logger,
+    ioCapture: runtime.ioCapture,
     stdout,
     stderr,
   });

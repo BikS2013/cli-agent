@@ -2,6 +2,47 @@
 
 ## Pending
 
+### [HIGH] Project `AGENTS.md` is not in sync with the current user-level Structure & Conventions chapter
+- Surfaced during the 2026-06-14 project evaluation (`docs/reference/project-evaluation.md`).
+- The current project `AGENTS.md` starts with a shorter/older `Structure & Conventions` chapter and does not include the current user-level request-refinement, investigation/research, codebase-scanning, and dependency-vetting rules.
+- Impact: future agents working only from the project file may skip required refinement/scanning phases or dependency-vetting steps, producing workflow drift from the user-level instructions.
+- Suggested fix: replace the leading `Structure & Conventions` chapter in `AGENTS.md` with the current user-level chapter, then verify the `Tools` section still remains concise and points to `docs/tools/cli-agent.md`.
+
+### [HIGH] Web search backend ignores layered `.env` values for backend credentials
+- Surfaced during the 2026-06-15 architecture review (`docs/reference/architecture-review-2026-06-15.md`).
+- `bootstrapAgentDir` seeds `TAVILY_API_KEY`, `SERPAPI_API_KEY`, `BRAVE_API_KEY`, `WEB_SEARCH_URL`, `WEB_SEARCH_API_KEY`, and `WEB_SEARCH_MAX_REQUESTS` into `~/.tool-agents/cli-agent/.env`, and `loadAgentConfig` reads those keys into its layered env snapshot. However, `src/agent/tools/web/backends/registry.ts` and the `agt_web_*` wrappers read `process.env` directly, so values supplied only by the agent `.env` or local `.env` are not visible to the web backend.
+- Impact: documented configuration sources do not work for web search unless the variables are exported in the shell; this violates the central configuration-resolution architecture and produces misleading `E_SEARCH_API_KEY_MISSING` errors.
+- Suggested fix: add a resolved `webSearch` configuration snapshot to `AgentConfig` that carries backend credentials and `maxRequests` from the layered env resolver, then make `getWebBackend`, `agt_web_search`, and `agt_web_fetch` consume only that snapshot.
+
+### [MEDIUM] Project design and requirements still describe pre-plan-011/012 tool catalog and old capability invalidation
+- Surfaced during the 2026-06-15 architecture review (`docs/reference/architecture-review-2026-06-15.md`).
+- `docs/design/project-design.md` still describes `file_read`, `file_list`, and mutating `file_*` tools as standard built-ins, while the current implementation has moved file operations into the agent-tools pack as `agt_file_*`. The same design and `docs/design/project-functions.md` also describe automatic capability-cache invalidation by binary path, mtime, and version hash, while `src/agent/capabilities/discover.ts` now intentionally trusts an existing capability document until explicit refresh.
+- Impact: future design, implementation, and review work may reintroduce old assumptions, especially around `--no-builtin-tools`, file-tool availability, and startup cache freshness.
+- Suggested fix: update `project-design.md` and `project-functions.md` to make the current contracts explicit: built-in toolkit is `bash_*` plus `tool_help`; file/web live in `agt_*`; normal startup uses the doc-exists shortcut; explicit refresh performs full rediscovery.
+
+### [LOW] Partial-toolset fabrication hardening (defense-in-depth follow-up)
+- The toolless-session fix (see Completed: "Toolless session fabricated tool output") injects the no-tools / anti-fabrication notice only when the catalog is **completely empty** (`registeredTools.length === 0`). In **partial** states — e.g. `--no-builtin-tools` with only `agt_glob`/`agt_grep` enabled — a user request that needs a missing capability (e.g. "run `git status`" when no bash tool is bound) could still be answered with fabricated output, because the always-empty tool blocks no longer carry the per-tool "X is not available" guidance for the *missing* tools.
+- Mitigation already partly present: when `builtinTools` is on but `bash_run` is unbound, the built-in block says "command execution is not available"; the agt blocks describe what IS present. The gap is the cross-product of "tool group off + user asks for that capability".
+- Suggested fix: add a single always-present CORE RULE — "Only report the output of a tool you actually called this turn; never fabricate or simulate results for a capability you do not have" — to the general rules (not gated on any toggle), so the anti-fabrication guidance survives every tool combination. Keep the dedicated empty-toolset notice as the strong explicit case.
+
+### [LOW] Pre-existing duplicate `case` clause in src/tui/input/line-editor.ts (bundler warning only)
+- Surfaced (not introduced) during the plan-007 integration-verification full-suite run: the Vite/esbuild transform emits `warning: This case clause will never be evaluated because it duplicates an earlier case clause` at `src/tui/input/line-editor.ts:641` (a `case 'unknown':` / `case 'enter':` / `case 'newline':` group that duplicates an earlier `case` in the same `switch`).
+- Impact: cosmetic only — it is a build-time bundler lint warning, NOT a TypeScript error (`npm run typecheck` is clean) and NOT a test failure (suite is 954/954, exit 0). The duplicated branch is dead code; behaviour is unchanged because the earlier matching clause already handles those labels.
+- Unrelated to the LLM I/O inspector (no `src/tui/input/` files were touched by plan-007). Pre-existing.
+- Suggested fix: remove the redundant `case` labels at line 641 (or consolidate the two switch arms) so the bundler warning clears. No functional change.
+
+### [LOW] LLM I/O inspector — minor as-built deviations from design-007 (informational)
+- `src/agent/graph.ts`: invoke-path capture factored into a module-private `captureInvokePath(...)`; terminal `captureResponse` de-duplicated when a turn ends on an already-captured tool-calling step; `runInteractiveAgent`'s legacy 4-arg `runOneShot` call left uninstrumented (capture is wired via `runOneShotAgent`/`streamOneShotAgent`/`buildTuiAgentRuntime`).
+- `src/agent/io-capture.ts`: `FIELD_TRUNCATE_BYTES` (64 KiB) replicated as a local const (logging.ts keeps it module-private); truncation is a recursive deep-walk; `tool_result.result` routed through `redactObject`. The deep-walk emits `_orig_size_bytes` as an object map (dotted field-path → original byte size) rather than a scalar — RECONCILED in Phase-7 review: design-007 "Field-cap & redaction markers" and `project-design.md` now document the object-map shape (richer implementation retained; `docs/tools/cli-agent.md` was already accurate).
+- `src/tui/slash/inspect.ts`: `/inspect show` clips each rendered block at a 4000-char `RENDER_BLOCK_MAX` (presentation-only; on-disk JSONL retains the 64 KiB-capped field) with a visible `… [truncated]` marker; `/inspect-io` registered as an alias.
+- Out-of-ownership minimal typecheck fixes (required-field propagation, documented): `inspectIo: null` added to the `AgentConfig` fixture in `src/agent/providers/registry.spec.ts` (Unit A); `ioCapture: new NullIoCapture()` added to the `TuiController` fixture in `src/tui/controller.spec.ts` (Unit D).
+- Disposition: all design-faithful; no action required. Listed for traceability.
+
+### [LOW] Pre-existing flaky test: composite synthesizer.spec.ts temp-dir cleanup race
+- During the plan-007 full-suite run, `src/agent/composite/synthesizer.spec.ts > … (E-5)` failed once with `ENOTEMPTY: directory not empty, rmdir '…/capabilities/composite/_distill'`. Re-running the spec in isolation passes 11/11. Unrelated to the LLM I/O inspector (no `src/agent/composite/` files were touched; capture is off by default).
+- Root cause: a temp-dir cleanup race under vitest parallel execution (afterEach `rmdir`/`rm` on a directory still being written). Pre-existing flakiness.
+- Suggested fix: make the synthesizer spec's temp-dir teardown hermetic (`fs.rm(dir, { recursive: true, force: true })` and/or unique per-test dirs; await all async writes before cleanup).
+
 ### [LOW] plan-006 §14.P named cache-export rename (readCompositeCacheEntry / writeCompositeCacheEntry → readCompositeDoc / writeCompositeDoc)
 - Design §14.P names U-DOC's exports as `readCompositeCacheEntry` /
   `writeCompositeCacheEntry`. The implementation chose
@@ -25,6 +66,7 @@
   - **uuid override decision** for the langgraph dependency chain.
   - Two additional minor advisories detailed in the report.
 - Suggested approach: dedicated upgrade tasks per item; do not bundle with feature work.
+- **Update (plan-007 validation, 2026-06-13):** Re-confirmed the LLM I/O inspector added NO dependencies (report: `docs/reference/dependency-validation-llm-io-inspector.md`). Changes since plan-005: (a) the `vitest` advisory severity escalated to **CRITICAL (CVSS 9.8)** and a new `langsmith` high advisory (CVSS 7.1) was published upstream — both pre-existing in the tree, not introduced here; (b) `@langchain/anthropic@1.4.1` and `@langchain/langgraph@1.4.2` resolved their advisories upstream WITHIN the existing caret ranges, so a plain `npm update` would close two CVEs with no manifest edit. NOT applied here — deliberately not bundled with feature work, and `@langchain/langgraph` powers the new `streamEvents` capture hooks, so that bump must be validated on its own.
 
 ### [MEDIUM] plan-005 E10 load-time toolArgs schema validation — defer to v2
 - **E10**: `validateToolArgsAgainstTool(name, args, schema?)` was originally named in plan-005 §6 / project-design §12.D so profile load could Zod-validate `toolArgs` entries against each tool's input schema (`.partial()`) and surface a hard `ConfigurationError` at load time for malformed presets against known schemas.
@@ -123,6 +165,24 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — Toolless session fabricated tool output (hallucinated a directory listing with no tools loaded)
+- **Symptom**: Running `cli-agent --no-builtin-tools --no-composites --no-agent-tools` (every tool group disabled — the documented "plain conversational LLM" state) and asking "list files in current folder" produced a fabricated `ls -la`-style directory listing (root-owned `main.py` / `README.md` / `data/` / `scripts/`). `/inspect show` confirmed the response carried **zero tool calls** — pure hallucination presented as real filesystem output. The agent also claimed *"I can run commands and use CLI tools on your machine"* despite having none.
+- **Root cause**: When all tool groups are off, `buildToolCatalog` returns an empty `tools` array (correct) and `buildSystemPrompt`'s built-in + agent-tools blocks both render `''`. The assembled system prompt collapsed to the slim base identity alone — *"You are cli-agent... by invoking external CLI tools on their local machine"* — which asserts the agent is a tool-user, while **no tools are bound and nothing told the model it was toolless**. Every anti-fabrication line ("treat command output as read-only evidence", "never fabricate URLs") lived inside the now-empty tool blocks, so they vanished too. Result: the model role-played a tool-user with no tools and invented output. The `buildToolCatalog` empty-toolset warning existed only on **stderr (to the user)**, never in the **prompt (to the model)**.
+- **Fix** (root cause, at the prompt-assembly layer):
+  - `src/agent/system-prompt.ts` — added a `NO_TOOLS_BLOCK` constant (a "## No tools are available this session" notice: states the agent cannot run commands / read-write files / list dirs / access the internet, and **forbids fabricating, guessing, or role-playing** command output, directory listings, file contents, or URLs; tells the user how to re-enable tools). `buildSystemPrompt` gained a `noToolsAvailable = false` param that injects the block right after the base identity. `buildSystemPromptForCfg` computes `noToolsAvailable = registeredTools.length === 0` and passes it — mirroring the existing catalog stderr warning into the prompt the model sees.
+  - All entry points already pass `buildToolCatalog(...).tools` as `registeredTools` (`run.ts:31` + the TUI slash rebuilders), so the guard fires automatically whenever the catalog is empty (all groups off, or a profile scopes the catalog to nothing).
+- **Tests**: 5 new tests in `src/agent/system-prompt.spec.ts` (pure-composer injects/omits the notice by flag; `buildSystemPromptForCfg` injects on empty catalog and omits when a tool is present). AC-2 byte-equivalence test updated to pass a registered tool (so it isolates the "no built-in block" contract without tripping the new toolless guard). Plus `test_scripts/verify-no-tools-notice.ts` — an end-to-end repro that loads the real toolless config, asserts 0 tools, and confirms the notice is in the assembled prompt. Full suite 1112 → **1117 green**; typecheck + build clean.
+- **Follow-up logged below** (LOW): partial-toolset fabrication hardening.
+
+### Done — `--builtin-tools` / `--no-builtin-tools` help text still listed `web_*` after web moved to the agent-tools pack (plan-011)
+- **Symptom**: The CLI help for `--builtin-tools` and `--no-builtin-tools` described the built-in cross-cutting toolkit as `file_*, web_*, bash_*, tool_help`. After plan-011 web is NO LONGER built-in — it moved to the agent-tools pack as `agt_web_search` / `agt_web_fetch` — so the help wrongly implied `--no-builtin-tools` drops web. Web is now governed by `--no-agent-tools` / `--disable-agt-web-search` / `--disable-agt-web-fetch`.
+- **Root cause**: plan-011 §6 cleaned the live system-prompt built-in block (`buildBuiltinToolsPromptBlock`) and `BUILTIN_TOOL_PROMPTS` (no `web_*` keys remain) and added the `agt_web_*` flags, but the two Commander `.option(...)` help strings for the built-in-tools toggle were left referencing `web_*`. The captured `--help` baseline carried the same stale text.
+- **Fix**:
+  - `src/cli.ts:112-113` — both help strings now read `file_*, bash_*, tool_help` (web removed).
+  - `test_scripts/baselines/help-no-treat-as-tool.txt:40-41` — baseline re-recorded to match.
+  - Rebuilt `dist/` so the compiled binary matches; `src/cli-help-baseline.spec.ts` (NFR-CMP-001 byte-stability) passes 2/2.
+- **Investigated but intentionally left as-is (NOT a bug)**: `LEGACY_DEFAULT_SYSTEM_PROMPTS[0]` in `src/agent/system-prompt.ts` still contains `web_search`/`web_fetch` text. That array is a deliberately frozen historical snapshot used by `bootstrapAgentDir` for byte-exact detection of unmodified seeded `system-prompt.md` files; editing it would break upgrade-in-place detection. The live prompt path already omits web per plan-011.
 
 ### Done — capability docs always preserve user-curated sections (USER-NOTES, USER-RECIPES)
 - **Symptom**: a previously curated capability doc could lose its `USER-NOTES` and/or `USER-RECIPES` content under two paths:

@@ -12,16 +12,9 @@
 import type { AgentConfig } from '../../config/agent-config.js';
 import type { Logger } from '../logging.js';
 import { parseAllowlistEntries } from './bash/allowlist.js';
-import { createFileReadTool } from './file/read-tool.js';
-import { createFileListTool } from './file/list-tool.js';
-import { createFileWriteTool } from './file/write-tool.js';
-import { createFileEditTool } from './file/edit-tool.js';
-import { createFileAppendTool } from './file/append-tool.js';
 import { createBashRunTool } from './bash/run-tool.js';
 import { createBashListAllowedTool } from './bash/list-allowed-tool.js';
 import { createBashWhichTool } from './bash/which-tool.js';
-import { createWebSearchTool } from './web/search-tool.js';
-import { createWebFetchTool } from './web/fetch-tool.js';
 import { createToolHelpTool } from './tool-help-tool.js';
 import { cliAgentPermissionPolicy } from './agent-tools/index.js';
 import {
@@ -50,55 +43,63 @@ export function buildToolCatalog(
   cfg: AgentConfig,
   logger: Logger,
 ): ToolCatalog {
-  const maxRequests = parseInt(process.env['WEB_SEARCH_MAX_REQUESTS'] ?? '50', 10);
-  const requestBudget = { remaining: maxRequests };
+  // Built-in cross-cutting toolkit (plan-008 toggle). When
+  // `cfg.builtinTools === false` the whole toolkit — bash_*/tool_help (i.e.
+  // readOnly + bashRunTools) — is suppressed: the tools are not even
+  // constructed. Otherwise (the default, including `undefined`) the toolkit is
+  // built exactly as before. NOTE: suppressing this group also removes
+  // bash_run, the path the agent uses to run wrapped CLIs (documented in
+  // --no-builtin-tools). File operations are NO LONGER part of this group
+  // (plan-012): they moved to the agent-tools pack as agt_file_read /
+  // agt_file_list / agt_file_write / agt_file_edit / agt_file_append, governed
+  // by --agent-tools + their per-tool flags (write/edit/append also need
+  // --allow-mutations). Web search/fetch moved earlier the same way (plan-011)
+  // as agt_web_search / agt_web_fetch. The built-in toolkit is now exactly
+  // bash_run (allowlist-gated) + bash_list_allowed + bash_which + tool_help.
+  const builtinEnabled = cfg.builtinTools !== false;
 
-  const readOnly: AnyTool[] = [
-    createFileReadTool(cfg),
-    createFileListTool(cfg),
-    createBashListAllowedTool(cfg),
-    createBashWhichTool(cfg),
-    createWebSearchTool(cfg, requestBudget),
-    createWebFetchTool(cfg, requestBudget),
-    createToolHelpTool(cfg),
-  ];
-
-  const mutatingFile: AnyTool[] = cfg.allowMutations
+  const readOnly: AnyTool[] = builtinEnabled
     ? [
-        createFileWriteTool(cfg),
-        createFileEditTool(cfg),
-        createFileAppendTool(cfg),
+        createBashListAllowedTool(cfg),
+        createBashWhichTool(cfg),
+        createToolHelpTool(cfg),
       ]
     : [];
 
   const allowlistEntries = parseAllowlistEntries([...cfg.bash.allow]);
-  const bashRunTools: AnyTool[] = allowlistEntries.length > 0
+  const bashRunTools: AnyTool[] = builtinEnabled && allowlistEntries.length > 0
     ? [createBashRunTool(cfg, logger, cfg.allowMutations)]
     : [];
 
-  // Agent-tools pack (U2/U3/U5). Build the permission policy ONCE per
-  // catalog assembly and pass the same instance to every wrapper so
-  // their security decisions remain identical.
+  // Agent-tools pack (U2/U3/U5). Independent of the built-in toolkit toggle
+  // — gated only by its own umbrella (`cfg.agentTools.enabled`, evaluated
+  // inside buildAgentToolsGroup). Build the permission policy ONCE per
+  // catalog assembly and pass the same instance to every wrapper so their
+  // security decisions remain identical.
   const policy = cliAgentPermissionPolicy(cfg);
   const agentToolsGroup = buildAgentToolsGroup(cfg, policy);
 
   const assembled: AnyTool[] = [
     ...readOnly,
-    ...mutatingFile,
     ...bashRunTools,
     ...agentToolsGroup.tools,
   ];
 
-  // Virtual tools (composites — plan-006 U-VIRTUAL). Loaded BEFORE
-  // profile scoping so a profile's `tools.allow/deny/order` can include
-  // or exclude a composite by id, exactly like a native tool (§14.O).
+  // Virtual tools (composites — plan-006 U-VIRTUAL; gated by the plan-008
+  // composites toggle). Loaded BEFORE profile scoping so a profile's
+  // `tools.allow/deny/order` can include or exclude a composite by id,
+  // exactly like a native tool (§14.O). When `cfg.composites === false`
+  // the loader is skipped entirely — no virtual handles are pushed.
+  // Otherwise (the default, including `undefined`) behaviour is unchanged.
   // The recursion guard at register-time is enforced inside
   // `loadVirtualToolsSync`; the dispatch-time guard is enforced inside
   // `dispatchComposite` via the `CLI_AGENT_VIRTUAL_DISPATCH_RECURSION_GUARD`
   // env sentinel (read by `loadVirtualToolsSync` on subsequent boots).
-  const virtualHandles = loadVirtualToolsSync(cfg, logger);
-  for (const handle of virtualHandles) {
-    assembled.push(handle.langchainTool);
+  if (cfg.composites !== false) {
+    const virtualHandles = loadVirtualToolsSync(cfg, logger);
+    for (const handle of virtualHandles) {
+      assembled.push(handle.langchainTool);
+    }
   }
 
   // Profile tool scoping (plan-005 U-SCOPE). Runs AFTER the catalog is
@@ -112,6 +113,17 @@ export function buildToolCatalog(
   );
   for (const w of warnings) {
     process.stderr.write(`[cli-agent] warning: ${w}\n`);
+  }
+
+  // Empty-toolset notice (plan-008). When every tool group is disabled (or
+  // scoped away) the agent runs as a plain conversational LLM with no tools.
+  // This is a PERMITTED state (distinct from profile-scoping's empty-survivor
+  // error E7, which still applies to allow/deny) — emit ONE stderr notice and
+  // proceed; do NOT throw.
+  if (scopedTools.length === 0) {
+    process.stderr.write(
+      '[cli-agent] note: no tools are loaded for this session (all tool groups disabled); the agent will run as a plain conversational LLM with no tools.\n',
+    );
   }
 
   // E9 (plan-005): warn when `profile.toolArgs` references a tool that is

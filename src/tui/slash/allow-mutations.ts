@@ -29,7 +29,7 @@ const allowMutCmd: SlashCommand = {
       newCfg.tools,
       newCfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta);
+    const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta, tools);
     c.cfg = newCfg;
     c.sessionAllowMutations = newCfg.allowMutations;
     c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps, newCfg);

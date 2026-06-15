@@ -44,7 +44,7 @@ function makeMaximalCfg(): AgentConfig {
     webSearchBackend: 'tavily',
     agentTools: {
       enabled: true,
-      tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: true, todoWrite: true },
+      tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: true, todoWrite: true, webSearch: true, webFetch: true, fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true },
     },
     provider: 'openai',
     model: 'gpt-4o',
@@ -102,12 +102,16 @@ describe('BUILTIN_TOOL_PROMPTS — registry-completeness', () => {
   });
 
   it('contains exactly the 17 documented tools', () => {
+    // plan-011: web_search / web_fetch left the built-in set and re-entered as
+    // the first-party agt_web_search / agt_web_fetch members of the agt_* pack.
+    // plan-012: file_read/list/write/edit/append likewise re-entered as the
+    // first-party agt_file_* members. Count stays 17 (5 renamed in place).
     const expected = [
-      'file_read', 'file_list', 'file_write', 'file_edit', 'file_append',
-      'web_search', 'web_fetch',
+      'agt_file_read', 'agt_file_list', 'agt_file_write', 'agt_file_edit', 'agt_file_append',
       'bash_run', 'bash_list_allowed', 'bash_which',
       'tool_help',
       'agt_glob', 'agt_grep', 'agt_multiedit', 'agt_patch', 'agt_todo_read', 'agt_todo_write',
+      'agt_web_search', 'agt_web_fetch',
     ].sort();
     const actual = Object.keys(BUILTIN_TOOL_PROMPTS).sort();
     expect(actual).toEqual(expected);

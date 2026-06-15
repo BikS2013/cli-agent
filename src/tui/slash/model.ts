@@ -57,7 +57,7 @@ const modelCmd: SlashCommand = {
         newCfg.tools,
         newCfg.capabilities.maxBytesPerTool,
       );
-      const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta);
+      const systemPrompt = await buildSystemPromptForCfg(newCfg, capSection, agentToolsMeta, tools);
       const newGraph = buildAgentGraph(llm, tools, systemPrompt, newCfg.maxSteps, newCfg);
       c.cfg = newCfg;
       c.agentGraph = newGraph;

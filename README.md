@@ -77,6 +77,13 @@ logs, retry/abort, persistent history) is handled.
    calls with timing, supports ESC-to-abort, multiline input editing,
    slash commands, and persistent thread history.
 
+> **How far can it go?** The agent's competence is exactly the set of
+> tools you attach — from a plain chatbot with no tools, up to a
+> multi-tool operator that wraps your CLIs and composes new tools of its
+> own. The
+> **[competency-levels guide](docs/guides/agent-competency-levels.md)**
+> walks that progression one rung at a time, with an example for each.
+
 ---
 
 ## Quick start
@@ -496,6 +503,13 @@ cli-agent/
 
 ### User guides
 
+- **[`docs/guides/agent-competency-levels.md`](docs/guides/agent-competency-levels.md)**
+  — the competency ladder: how the agent grows from a plain chatbot (no
+  tools) up to a multi-tool operator that drives your shell, wraps your
+  installed CLIs, and bundles commands into new composite tools. One rung
+  at a time, with copy-pasteable examples for each. **Start here to
+  understand what cli-agent can do and how to dial in exactly the
+  capability level you want.**
 - **[`docs/guides/configuring-cli-agent.md`](docs/guides/configuring-cli-agent.md)**
   — how to wire cli-agent up to the LLM provider you have access to.
   Decision tree, copy-pasteable recipes for all 8 supported providers

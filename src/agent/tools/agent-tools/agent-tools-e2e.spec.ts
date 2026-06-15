@@ -118,6 +118,8 @@ function makeCfg(overrides: {
         patch: false,
         todoRead: false,
         todoWrite: false,
+        webSearch: false,
+        webFetch: false,
       },
     },
   } as unknown as AgentConfig;
@@ -479,17 +481,21 @@ describe('Suite C — umbrella disabled (agt_glob absent from catalog)', () => {
     expect(agentToolsMeta.registered).toHaveLength(0);
   });
 
-  it('C2: catalog without agt_glob still contains standard tools (file_read, etc.)', () => {
+  it('C2: catalog without agt_glob still contains the built-in standard tools (bash_*, tool_help)', () => {
     const cfg = makeCfg({ agentToolsEnabled: false, fileEditRoot: tempDir });
 
     const { tools } = buildToolCatalog(cfg, noopLogger);
     const names = tools.map((t: { name: string }) => t.name);
 
-    // Standard read-only tools must always be present.
-    expect(names).toContain('file_read');
-    expect(names).toContain('file_list');
+    // Standard built-in read-only tools must always be present. web_search/
+    // web_fetch (plan-011) AND file_read/file_list (plan-012) are no longer
+    // built-in — they moved to the agt_* pack and are gone with the umbrella off.
     expect(names).toContain('bash_list_allowed');
-    expect(names).toContain('web_search');
+    expect(names).toContain('bash_which');
+    expect(names).toContain('tool_help');
+    expect(names).not.toContain('file_read');
+    expect(names).not.toContain('file_list');
+    expect(names).not.toContain('web_search');
     expect(names).not.toContain(AGT_GLOB_NAME);
   });
 

@@ -24,7 +24,7 @@ const newCmd: SlashCommand = {
       c.cfg.tools,
       c.cfg.capabilities.maxBytesPerTool,
     );
-    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection, agentToolsMeta);
+    const systemPrompt = await buildSystemPromptForCfg(c.cfg, capSection, agentToolsMeta, tools);
     c.agentGraph = buildAgentGraph(llm, tools, systemPrompt, c.cfg.maxSteps, c.cfg);
     ctx.printSystem(`new thread started: ${c.threadId.slice(0, 8)}…`);
   },

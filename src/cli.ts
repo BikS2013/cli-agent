@@ -91,6 +91,8 @@ program
   .option('--system-prompt <path-or-name>', 'Select the BASE system prompt file. Resolution: absolute path → verbatim; bare filename → joined onto <capabilitiesDir>; relative path with separators → joined onto cwd. Omit to use the seeded default at <capabilitiesDir>/system-prompt.md.')
   .option('--system <text>', 'Append text to system prompt')
   .option('--system-file <path>', 'Append file contents to system prompt')
+  .option('--inspect-io', 'Enable LLM I/O capture (writes provider-normalized request/response JSONL to ~/.tool-agents/cli-agent/io-captures/)')
+  .option('--inspect-io-raw', 'Disable redaction for I/O captures only (use with caution; prints a warning)')
   .option('--per-tool-budget <bytes>', 'Per-tool result byte budget', (v) => parseInt(v, 10))
   .option('--allow-mutations', 'Enable mutating tools (file_write, file_edit, file_append)', false)
   .option('--bash-allow <csv>', 'Extra bash allowlist entries (csv or argv-regex:)')
@@ -104,6 +106,11 @@ program
   .option('--introspect-skip-llm-below-bytes <n>', 'Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)', (v) => parseInt(v, 10))
   .option('--refresh-capabilities', 'Force regenerate cached capability docs', false)
   .option('--verbose', 'Emit structured debug logs to stderr', false)
+  // ---- Tool-loading group toggles (plan-008) ----
+  .option('--composites', 'Load composite (virtual) tools (default; rarely needed)')
+  .option('--no-composites', 'Do NOT load any composite (virtual) tools')
+  .option('--builtin-tools', 'Load the built-in cross-cutting toolkit: bash_*, tool_help (default). File ops are now in the agt_ pack (agt_file_*).')
+  .option('--no-builtin-tools', 'Do NOT load the built-in cross-cutting toolkit (bash_*, tool_help). NOTE: this also removes bash_run, the path used to run wrapped CLIs. Does NOT affect file ops; use --no-agent-tools / --disable-agt-file-* for those.')
   // ---- Agent-tools pack (umbrella) ----
   .option('--agent-tools', 'Enable the agent-tools pack umbrella (default; rarely needed)')
   .option('--no-agent-tools', 'Disable the agent-tools pack umbrella (no agt_* tools registered)')
@@ -120,6 +127,20 @@ program
   .option('--disable-agt-todo-read', 'Disable agt_todo_read')
   .option('--enable-agt-todo-write', 'Enable agt_todo_write (default-off)')
   .option('--disable-agt-todo-write', 'Disable agt_todo_write')
+  .option('--enable-agt-web-search', 'Enable agt_web_search (default-on; read-only)')
+  .option('--disable-agt-web-search', 'Disable agt_web_search')
+  .option('--enable-agt-web-fetch', 'Enable agt_web_fetch (default-on; read-only)')
+  .option('--disable-agt-web-fetch', 'Disable agt_web_fetch')
+  .option('--enable-agt-file-read', 'Enable agt_file_read (default-on; read-only)')
+  .option('--disable-agt-file-read', 'Disable agt_file_read')
+  .option('--enable-agt-file-list', 'Enable agt_file_list (default-on; read-only)')
+  .option('--disable-agt-file-list', 'Disable agt_file_list')
+  .option('--enable-agt-file-write', 'Enable agt_file_write (default-on; mutation-gated)')
+  .option('--disable-agt-file-write', 'Disable agt_file_write')
+  .option('--enable-agt-file-edit', 'Enable agt_file_edit (default-on; mutation-gated)')
+  .option('--disable-agt-file-edit', 'Disable agt_file_edit')
+  .option('--enable-agt-file-append', 'Enable agt_file_append (default-on; mutation-gated)')
+  .option('--disable-agt-file-append', 'Disable agt_file_append')
   // ---- Configuration profiles (plan-005) ----
   .option('--profile <name>', 'Activate a named configuration profile (env: CLI_AGENT_PROFILE)')
   // ---- Composite intelligent tools (plan-006 P6 / U-FLAGS) ----
@@ -233,7 +254,15 @@ program
         system: opts['system'] as string | undefined,
         systemFile: opts['systemFile'] as string | undefined,
         systemPromptFile: opts['systemPrompt'] as string | undefined,
+        inspectIo: opts['inspectIo'] as boolean | undefined,
+        inspectIoRaw: opts['inspectIoRaw'] as boolean | undefined,
         agentTools,
+        // Tool-loading group toggles (plan-008). Commander merges
+        // `--no-composites` ⇒ opts.composites === false and `--composites`
+        // ⇒ true (same for builtinTools); undefined when neither is passed,
+        // deferring to env → config.json → profile → default(load).
+        composites: opts['composites'] as boolean | undefined,
+        builtinTools: opts['builtinTools'] as boolean | undefined,
         profile: opts['profile'] as string | undefined,
       });
     });

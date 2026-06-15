@@ -80,13 +80,20 @@ default — the built-in is used only as the bootstrap seed for the default file
 
 ## FR-AGT-009: Standard Cross-Cutting Tools
 
-The agent must ship with: `file_read`, `file_list`, `file_write`, `file_edit`, `file_append`,
-`web_search`, `web_fetch`, `bash_list_allowed`, `bash_which`, `bash_run`, `tool_help`.
+The built-in cross-cutting toolkit ships with: `bash_run`, `bash_list_allowed`, `bash_which`,
+`tool_help`. (plan-011: `web_search` / `web_fetch` left this built-in toolkit and re-entered as
+the first-party `agt_web_search` / `agt_web_fetch` members of the agent-tools pack — see
+FR-AGT-WEB-001. plan-012: `file_read` / `file_list` / `file_write` / `file_edit` / `file_append`
+likewise left this toolkit and re-entered as the first-party `agt_file_read` / `agt_file_list` /
+`agt_file_write` / `agt_file_edit` / `agt_file_append` members of the agent-tools pack — see
+FR-AGT-FILE-001.)
 
 ## FR-AGT-010: Mutation Gating
 
 `file_write`, `file_edit`, and `file_append` must be excluded from the LLM-visible catalog
-unless `--allow-mutations` is set. `bash_run` must be visible when the allowlist is non-empty
+unless `--allow-mutations` is set. (plan-012: these are now the agent-tools-pack members
+`agt_file_write` / `agt_file_edit` / `agt_file_append`, mutation-gated in `group-builder.ts`;
+the gating semantics are unchanged — see FR-AGT-FILE-001.) `bash_run` must be visible when the allowlist is non-empty
 (regardless of `--allow-mutations`), but with a `[READ-ONLY-AGENT]` prefix warning when
 `--allow-mutations` is off.
 
@@ -349,6 +356,63 @@ cli-agent's bash allowlist, `checkFsRead`/`checkFsWrite` to cli-agent's
 sandbox + mutation gate, and `scrubEnv` to cli-agent's existing credential
 strip. The bridge is constructed once per session and shared across all
 bundled wrappers.
+
+### FR-AGT-WEB-001 — First-party web tools in the agent-tools pack (plan-011) (Status: Accepted)
+
+`web_search` / `web_fetch` are removed from the built-in cross-cutting toolkit
+and re-homed in the agent-tools pack as the first-party tools `agt_web_search`
+/ `agt_web_fetch` — the ONLY non-vendored members of the `agt_` namespace. They
+REUSE the existing cli-agent web backend (`src/agent/tools/web/backends/`); the
+backend is not moved or duplicated. Both are read-only (no `--allow-mutations`
+gate) and default ON, and they share a single per-session request budget
+(`WEB_SEARCH_MAX_REQUESTS`, default 50). Governance:
+
+  - They appear iff the agent-tools umbrella is on (`--agent-tools` / not
+    `--no-agent-tools`) AND their per-tool flag is on.
+  - Per-tool flags: `--enable/--disable-agt-web-search`,
+    `--enable/--disable-agt-web-fetch`; env `CLI_AGENT_AGT_WEB_SEARCH` /
+    `CLI_AGENT_AGT_WEB_FETCH` (tri-state); config.json
+    `agentTools.tools.webSearch` / `.webFetch` (default `true`).
+  - They are NOT affected by `--no-builtin-tools` (web is no longer built-in).
+  - Profile name-based scoping works unchanged (`tools.deny: [agt_web_search]`).
+  - The "never fabricate URLs" guidance now rides on the `agt_web_*` tool
+    descriptions in the agent-tools prompt block; the built-in prompt block no
+    longer mentions web.
+
+### FR-AGT-FILE-001 — First-party file tools in the agent-tools pack (plan-012) (Status: Accepted)
+
+`file_read` / `file_list` / `file_write` / `file_edit` / `file_append` are removed from the
+built-in cross-cutting toolkit and re-homed in the agent-tools pack as the first-party tools
+`agt_file_read` / `agt_file_list` / `agt_file_write` / `agt_file_edit` / `agt_file_append`.
+They REUSE the existing first-party file logic and the sandbox
+(`src/agent/tools/file/sandbox.ts`); no upstream read/write/edit/list tools are vendored and
+no new runtime dependency is added (the rejected `@mozilla/readability` / `jsdom` / `turndown`
+/ `dotenv` deps stay out). After this change the built-in toolkit contains ONLY `bash_run`,
+`bash_list_allowed`, `bash_which`, and `tool_help`. Governance:
+
+  - They appear iff the agent-tools umbrella is on (`--agent-tools` / not `--no-agent-tools`)
+    AND their per-tool flag is on.
+  - `agt_file_read` / `agt_file_list` are read-only (no `--allow-mutations` gate), default ON.
+  - `agt_file_write` / `agt_file_edit` / `agt_file_append` are default ON but mutation-gated:
+    they register only when the per-tool flag is on AND `cfg.allowMutations === true`
+    (mirroring `agt_multiedit` / `agt_patch` and the former native `mutatingFile` gating).
+    This preserves today's effective behavior exactly (read+list load by default; the three
+    mutators load only with `--allow-mutations`).
+  - Per-tool flags: `--enable/--disable-agt-file-read` (and `-file-list`, `-file-write`,
+    `-file-edit`, `-file-append`); env `CLI_AGENT_AGT_FILE_READ` / `_LIST` / `_WRITE` /
+    `_EDIT` / `_APPEND` (tri-state); config.json `agentTools.tools.fileRead` / `.fileList` /
+    `.fileWrite` / `.fileEdit` / `.fileAppend` (default `true`). Four-tier precedence per
+    FR-AGT-011 (CLI flag > shell env > config.json > default).
+  - They are NOT affected by `--no-builtin-tools` (file tools are no longer built-in);
+    `--no-agent-tools` / `--disable-agt-file-*` govern them.
+  - Profile name-based scoping works unchanged (`tools.deny: [agt_file_write]`).
+  - The file-tool guidance now rides on the `agt_file_*` tool descriptions in the agent-tools
+    prompt block; the built-in prompt block no longer mentions file tools, and the dead
+    `BuiltinToolsPresence.mutatingFile` flag is removed.
+
+Reference: `docs/design/plan-012-file-ops-to-agt.md`,
+`docs/reference/refined-request-file-ops-to-agt.md`,
+`docs/reference/codebase-scan-file-ops-to-agt.md`.
 
 ## Acceptance Status — Agent-tools integration (refined-request acceptance criteria)
 
@@ -1156,3 +1220,367 @@ with USER-RECIPES; (4) synthesis of a composite from the two members;
 producing a coherent system prompt that embeds the composite's
 USER-RECIPES content. Lives at
 `test_scripts/smoke-coexistence-end-to-end.ts`. **Status: Accepted (Plan 006).**
+
+---
+
+## LLM I/O Inspector Subsystem (FR-IOI-* / NFR-IOI-*)
+
+The LLM I/O Inspector is a diagnostic/observability switch that captures the
+exact provider-normalized request and response for every LLM turn of the main
+interactive (TUI), one-shot, and legacy-REPL agent conversations, writing them
+to a tailable JSONL file under the per-user agent directory and rendering any
+completed turn on demand via an in-TUI `/inspect show [turn]` command. It is a
+parallel, additive channel: when the switch is off, provider payloads, streamed
+output, the operational `logs/` JSONL, transcript files, and `--help` output are
+byte-identical to the prior state. Specified by
+`docs/reference/refined-request-llm-io-inspector.md`; implemented per
+`docs/design/plan-007-llm-io-inspector.md`. (Requirement IDs below correspond to
+FR-1..FR-12 / NFR-1..NFR-6 of the refined request.)
+
+### FR-IOI-001 (FR-1) — Switch to enable capture
+
+A launch-time CLI flag (`--inspect-io`, plus `--inspect-io-raw`) on the default
+`agent` command AND an in-session TUI slash toggle (`/inspect on|off`,
+`/inspect show [turn]`, `/inspect status`) enable the inspector for a session.
+When the switch is off, no capture work is performed and the agent's outward
+behaviour and provider payloads are byte-identical. **Status: Implemented (Plan 007).**
+
+### FR-IOI-002 (FR-2) — Separate presentation surface
+
+When enabled, the captured conversation is presented in a surface separate from
+the primary chat stream: a structured, human-readable JSONL capture file
+tailable in a second terminal, complemented by an in-TUI `/inspect show [turn]`
+command that renders a chosen turn's full request+response in a clearly
+delimited block. The surface must not corrupt or race the raw-mode TUI render
+loop or the spinner. **Status: Implemented (Plan 007).**
+
+### FR-IOI-003 (FR-3) — Exact request capture
+
+For each LLM turn, capture the exact request payload handed to the model:
+(3a) the complete assembled system prompt string (post-composition), (3b) the
+complete ordered in-thread conversation memory, (3c) the current turn's
+user/human content, and (3d) the tool-use instruction surface — the effective
+per-tool prompt overlays / built-in tool prompts, the agent-tools prompt block
+(all embedded in the captured SystemMessage), and the tool/function JSON schemas
+bound to the model. The authoritative request source is the
+`on_chat_model_start.data.input` message array (which already contains the
+SystemMessage = full assembled prompt); bound tool schemas are serialized once
+per session with `convertToOpenAITool`. **Status: Implemented (Plan 007).**
+
+### FR-IOI-004 (FR-4) — Exact response capture
+
+For each LLM turn, capture the exact response received: (4a) the assistant
+message content (final assembled text), (4b) every tool-call the model emitted
+(name + parsed args object), in order, and (4c) the tool results fed back into
+the loop (tool name + result + duration + ok/error), so the
+request→response→tool-result chain is inspectable end to end. Tool-calls are
+read from the aggregated `on_chat_model_end.data.output` message, not from
+partial streamed chunks. **Status: Implemented (Plan 007).**
+
+### FR-IOI-005 (FR-5) — Turn correlation
+
+Each captured record is correlated by `sessionId`, `threadId`, and `turnId`
+(the same identifiers used by the logger and graph), with a `stepIndex`
+distinguishing the multiple model calls a single ReAct turn can produce, so
+request, response, tool calls, and tool results for one turn render as one
+coherent unit. **Status: Implemented (Plan 007).**
+
+### FR-IOI-006 (FR-6) — Clear, descriptive rendering
+
+The presented view clearly labels and visually separates the turn
+number/timestamp, the request block (system prompt, memory, user content, tool
+schemas) and the response block (assistant text, tool calls, tool results).
+Long blocks are individually identifiable/inspectable with visible truncation
+markers rather than dumped as one undifferentiated wall of text.
+**Status: Implemented (Plan 007).**
+
+### FR-IOI-007 (FR-7) — Live vs replay
+
+The capture store is written incrementally as the conversation proceeds
+(append-per-event), so it is usable live (a second-terminal `tail -f` updates).
+The in-TUI inspector renders any completed turn on demand. Full live-refresh of
+an in-app pane is deferred. **Status: Implemented (Plan 007).**
+
+### FR-IOI-008 (FR-8) — Persistence + retrieval
+
+Captures are persisted under the per-user agent directory at
+`~/.tool-agents/cli-agent/io-captures/session-<UTC>-<sessionId>.jsonl` with a
+`latest.jsonl` convenience pointer, directory mode `0700` / files mode `0600`,
+mirroring the operational logger. Not auto-pruned (user's responsibility,
+documented). **Status: Implemented (Plan 007).**
+
+### FR-IOI-009 (FR-9) — Redaction policy
+
+By default, captured payloads written to disk and shown in the separate surface
+pass through the existing redaction helper (`src/util/redact.ts`) — both message
+content and tool-call args. An explicit, clearly-named opt-out
+(`--inspect-io-raw` / `CLI_AGENT_INSPECT_IO_RAW=1`) disables redaction for the
+capture surface only, gated behind an explicit user choice and a prominent
+stderr warning. Default = redaction ON. **Status: Implemented (Plan 007).**
+
+### FR-IOI-010 (FR-10) — No-fallback configuration
+
+When the inspector is explicitly requested but cannot be initialised (capture
+directory uncreatable, invalid mode value), the agent raises the appropriate
+typed error (`ConfigurationError` / `UsageError` with the correct exit code) —
+never silently disabling capture or substituting a default mode.
+**Status: Implemented (Plan 007).**
+
+### FR-IOI-011 (FR-11) — Reuse, do not duplicate
+
+Capture is implemented as a dedicated parallel channel (`src/agent/io-capture.ts`)
+that REUSES the existing redaction helper, filesystem conventions, 64 KiB
+field-cap discipline, and turn-correlation IDs from the operational logger, while
+writing to its own `io-captures/` store. The hook points are the graph
+invocation boundary (`on_chat_model_start` / `on_chat_model_end` in
+`streamOneShot`, and `result['messages']` in `runOneShot`). The existing logger
+and transcript formats are not modified. **Status: Implemented (Plan 007).**
+
+### FR-IOI-012 (FR-12) — Provider neutrality
+
+Capture works uniformly across all eight supported providers at the normalized
+message layer, since it hooks above the provider SDK. No provider-specific
+capture code paths exist at the default fidelity level. **Status: Implemented (Plan 007).**
+
+### NFR-IOI-001 (NFR-1) — Off-state byte-stability & zero overhead
+
+With the switch off, the system prompt, the provider request, the streamed
+output, the existing log lines, and the existing transcript files are
+byte-identical to the prior state; the off path uses a `NullIoCapture` no-op. A
+regression test asserts the no-op behaviour; the `--help` baseline is
+deliberately regenerated for the two new flags. **Status: Implemented (Plan 007).**
+
+### NFR-IOI-002 (NFR-2) — TUI safety
+
+The inspector never corrupts the raw-mode TUI: no interleaving of capture output
+into the live token stream, no spinner/stdout column races (capture is a
+post-event side-effect inside `streamOneShot`, and `/inspect` output uses the
+same stdout path as all other commands), and graceful no-op on
+non-TTY / `CLI_AGENT_NO_TUI=1` contexts. **Status: Implemented (Plan 007).**
+
+### NFR-IOI-003 (NFR-3) — Performance
+
+Capture does not materially slow a turn. Large payloads (system prompt, memory)
+are size-bounded with explicit `_truncated` markers consistent with the existing
+64 KiB field-cap behaviour, rather than dropped silently. Bound tool schemas are
+serialized once per session, not per turn. **Status: Implemented (Plan 007).**
+
+### NFR-IOI-004 (NFR-4) — Security & permissions
+
+All capture artifacts inherit the existing secret-handling posture: `0700` dir /
+`0600` files, redaction on by default, and the redaction opt-out is impossible
+to enable by accident (explicit flag/env + prominent warning).
+**Status: Implemented (Plan 007).**
+
+### NFR-IOI-005 (NFR-5) — TypeScript / ESM consistency
+
+All new code is TypeScript ESM consistent with the existing `src/` layout,
+conventions, and lint rules; persisted records are typed; new config keys are
+camelCase in `config.json` (`inspectIo`) and `SCREAMING_SNAKE_CASE` for env vars
+(`CLI_AGENT_INSPECT_IO`, `CLI_AGENT_INSPECT_IO_RAW`). No new runtime dependency
+is introduced (`convertToOpenAITool` from `@langchain/core` is used;
+`zod-to-json-schema` is not). **Status: Implemented (Plan 007).**
+
+### NFR-IOI-006 (NFR-6) — Documentation completeness
+
+The feature is documented in `docs/tools/cli-agent.md`,
+`docs/design/project-functions.md`, `docs/design/project-design.md`, and
+`docs/design/configuration-guide.md`, including the configuration-guide treatment
+of the new variables (purpose, how to set, precedence, default value) and the
+redaction opt-out's risk and the no-auto-prune note. **Status: Implemented (Plan 007).**
+
+---
+
+## Tool-Loading Toggles Subsystem (FR-TLT-*)
+
+Three independent, group-level tool-loading switches let the user suppress
+whole families of tools at session-build time, through CLI flags, environment
+variables, `config.json`, and configuration profiles. Implemented per
+`docs/design/plan-008-tool-loading-toggles.md`.
+
+### FR-TLT-001 — Composites group toggle
+
+cli-agent SHALL provide a toggle that loads (default) or suppresses every
+composite/virtual tool (`loadVirtualToolsSync`). Surfaces: CLI
+`--composites` / `--no-composites`; env `CLI_AGENT_DISABLE_COMPOSITES`
+(truthy = OFF); `config.json` `composites: boolean`; profile
+`tools.composites: boolean`. When suppressed, `loadVirtualToolsSync` is not
+invoked and no virtual handles are added to the catalog. **Status: Implemented (Plan 008).**
+
+### FR-TLT-002 — Built-in tools group toggle
+
+cli-agent SHALL provide a toggle that loads (default) or suppresses the
+built-in cross-cutting toolkit — `file_read/list/write/edit/append`,
+`web_search/fetch`, `bash_list_allowed/which/run`, `tool_help` (i.e.
+`readOnly` + `mutatingFile` + `bashRunTools`). Surfaces: CLI
+`--builtin-tools` / `--no-builtin-tools`; env
+`CLI_AGENT_DISABLE_BUILTIN_TOOLS` (truthy = OFF); `config.json`
+`builtinTools: boolean`; profile `tools.builtin: boolean`. When suppressed,
+none of those tools are constructed. **Status: Implemented (Plan 008).**
+
+### FR-TLT-003 — Agent-tools pack profile tier
+
+The existing agent-tools pack umbrella (`agentTools.enabled`; CLI
+`--no-agent-tools`; env `CLI_AGENT_DISABLE_AGENT_TOOLS`; `config.json`
+`agentTools.enabled`) SHALL gain a profile tier `tools.agentTools: boolean`,
+inserted just above the default in the umbrella resolution. **Status: Implemented (Plan 008).**
+
+### FR-TLT-004 — Uniform precedence
+
+All three toggles SHALL resolve through one uniform chain:
+`CLI flag > env (CLI_AGENT_DISABLE_*) > config.json > profile > default(load)`.
+The `CLI_AGENT_DISABLE_*` env vars follow the inverted-disable convention
+(truthy = OFF); an invalid (non-boolean) value raises `ConfigurationError`
+(exit 3) — no fallback. The default (load) is an explicit starting value, not
+a runtime fallback for missing required config; no new required config is
+introduced. **Status: Implemented (Plan 008).**
+
+### FR-TLT-005 — `--no-builtin-tools` removes `bash_run` (wrapped-CLI caveat)
+
+Because `bash_run` is part of the built-in toolkit, suppressing the built-in
+group SHALL also remove `bash_run` — the path used to execute wrapped CLIs.
+This is documented so users who wrap CLIs keep the built-in group on. **Status: Implemented (Plan 008).**
+
+### FR-TLT-006 — Empty toolset is permitted
+
+Disabling every group (with no wrapped CLI) SHALL produce an empty catalog and
+degrade the agent to a plain conversational LLM, WITHOUT raising an error. The
+catalog builder SHALL emit exactly one stderr notice and proceed. This is
+distinct from profile tool-scoping's empty-survivor error (E7), which still
+applies to `allow`/`deny`. **Status: Implemented (Plan 008).**
+
+### FR-TLT-007 — Profile `tools.*` schema additions
+
+`ProfileToolsSchema` SHALL accept optional booleans `composites`, `builtin`,
+and `agentTools` under the `tools` sub-tree, while remaining `.strict()`
+(unknown keys under `tools` still rejected). **Status: Implemented (Plan 008).**
+
+### NFR-TLT-001 — Off-state byte-stability
+
+When all three groups are at their defaults (load), the assembled tool catalog
+SHALL be byte-identical to the pre-plan-008 behaviour. The gate evaluates
+`cfg.builtinTools !== false` and `cfg.composites !== false`, so an unset/`true`
+value reproduces the prior construction exactly. Verified by the existing
+`registry.spec.ts` suite remaining green. **Status: Implemented (Plan 008).**
+
+### NFR-TLT-002 — TypeScript / ESM consistency, no new dependency
+
+All new code is TypeScript ESM consistent with `src/`; new `config.json` keys
+are camelCase (`composites`, `builtinTools`) and new env vars are
+`SCREAMING_SNAKE_CASE` (`CLI_AGENT_DISABLE_COMPOSITES`,
+`CLI_AGENT_DISABLE_BUILTIN_TOOLS`). No new runtime dependency is introduced. **Status: Implemented (Plan 008).**
+
+### NFR-TLT-003 — Documentation completeness
+
+The feature is documented in `docs/tools/cli-agent.md` (the
+`<toolLoadingToggles>` subsection), `docs/design/configuration-guide.md`
+(per-variable treatment + precedence + opt-out matrix),
+`docs/design/project-functions.md` (this section), and
+`docs/design/project-design.md` (dated section). **Status: Implemented (Plan 008).**
+
+---
+
+## Tool-Loading-Aware System Prompt (FR-SPT-*)
+
+The base system prompt is made coherent with the built-in-tools toggle: the
+built-in tool INSTRUCTIONS become a runtime-injected conditional block gated on
+`cfg.builtinTools`, exactly like the existing `agt_*` block. This closes the
+gap left by plan-008, where `--no-builtin-tools` dropped the built-in tool
+SCHEMAS but the base prompt still hard-coded the built-in tool prose.
+Implemented per `docs/design/plan-009-systemprompt-toggle-aware.md`.
+
+### FR-SPT-001 — Slim, tool-agnostic default base prompt
+
+The seeded default base prompt (`BUILTIN_DEFAULT_SYSTEM_PROMPT`) SHALL contain
+only the generic agent identity and truly-generic conduct (keep responses
+concise; never echo raw credentials / bearer tokens / long base64). It SHALL
+contain NO tool-specific prose (`bash_run`, `file_*`, `web_*`, `tool_help`,
+`--allow-mutations`). **Status: Implemented (Plan 009).**
+
+### FR-SPT-002 — Built-in-tools system-prompt block, gated on the toggle
+
+The built-in cross-cutting toolkit's instructions SHALL be carried in a
+self-framed `## Built-in tools` block assembled by
+`buildBuiltinToolsPromptBlock` — the `bash_run` framing, the CORE RULES, the
+OUT-OF-SCOPE bullets, and the available-tools list. The function SHALL return
+`''` when the umbrella toggle is off (`builtinTools === false`). The block is
+injected into the assembled prompt ONLY when the built-in tools are loaded, so
+the model is not told about tools it cannot call. **Status: Implemented (Plan
+009; block content made adaptive in Plan 010 — see FR-SPT-005).**
+
+### FR-SPT-003 — Composition order
+
+`buildSystemPrompt` SHALL inject the built-in-tools block AFTER the base prompt
+and BEFORE the wrapped-CLI capabilities section. Full order: base →
+built-in-tools block (if loaded) → capabilities → agent-tools block (if loaded)
+→ user-provided instructions. `buildSystemPrompt`'s built-in-presence parameter
+SHALL default to `{ builtinTools: true, bashRun: true, mutatingFile: true }`
+(backward-compatible — today's full block); `buildSystemPromptForCfg` SHALL
+derive that presence from `cfg.builtinTools` plus the registered tool names
+(see FR-SPT-005). **Status: Implemented (Plan 009; presence object in Plan
+010).**
+
+### FR-SPT-004 — In-place upgrade of an unmodified default
+
+`bootstrapAgentDir` SHALL upgrade an existing `system-prompt.md` in place IFF
+its bytes are EXACTLY equal to a prior shipped default (an entry in
+`LEGACY_DEFAULT_SYSTEM_PROMPTS`) — overwriting it with the new slim default at
+mode `0600`. A file that differs in any way (user-customized, or already the
+new slim default) SHALL be left BYTE-UNCHANGED. The upgrade SHALL never throw.
+This is a bootstrap convenience, NOT a runtime fallback: a missing/unreadable
+SELECTED prompt still raises `UsageError` at load time. **Status: Implemented (Plan 009).**
+
+### FR-SPT-005 — Customized-base caveat (documented)
+
+The `## Built-in tools` block is injected on top of whatever base is on disk.
+For the slim default there is no duplication; a CUSTOMIZED base that still
+hard-codes tool prose owns that prose (the toggle cannot strip it), so it may
+appear twice when the built-in tools are loaded. This is documented in
+`docs/tools/cli-agent.md` and `docs/design/configuration-guide.md`. **Status: Implemented (Plan 009).**
+
+### FR-SPT-006 — Adaptive built-in-tools block (describes exactly the registered tools)
+
+When the umbrella toggle is on, the `## Built-in tools` block SHALL describe
+EXACTLY the built-in tools actually registered for the session, not a static
+superset. `buildBuiltinToolsPromptBlock` SHALL take a presence object
+`{ builtinTools, bashRun, mutatingFile }` and assemble the block from
+composable, gated sections:
+
+- The `bash_run` command-execution framing and its two confirmation/allowlist
+  CORE RULES SHALL be included ONLY when `bashRun` is true (i.e. the command
+  allowlist is non-empty so `bash_run` is bound). When `bashRun` is false the
+  block SHALL instead state that no local commands are allow-listed and command
+  execution is unavailable, and SHALL omit those two rules.
+- The mutating-file clause (`file_write` / `file_edit` / `file_append`) SHALL be
+  included ONLY when `mutatingFile` is true (i.e. `--allow-mutations` so those
+  tools are bound). When false, the OUT-OF-SCOPE section SHALL state that files
+  cannot be modified and SHALL hint `--allow-mutations`.
+- The general CORE RULES (capability docs / `tool_help`, read-only evidence,
+  error-JSON handling, `__truncated` handling, never invent URLs) and the
+  read-only tools (`file_read`/`file_list`, `web_search`/`web_fetch`,
+  `bash_list_allowed`/`bash_which`, `tool_help`) SHALL always be described.
+
+`buildSystemPromptForCfg` SHALL take a 4th parameter `registeredTools`
+(`ReadonlyArray<{ name: string }>` — the post-scoping tool array from
+`buildToolCatalog`) and SHALL derive presence as `builtinTools = cfg.builtinTools
+!== false`, `bashRun = names.has('bash_run')`, `mutatingFile =
+names.has('file_write') || names.has('file_edit') || names.has('file_append')`.
+Deriving from the registered names ensures the prompt prose matches the bound
+tool schemas across every gate (umbrella toggle, allowlist, `--allow-mutations`,
+profile deny), so the inspector's "Bound tool schemas" and the system-prompt
+tool prose agree for the built-in toolkit. All 10 production call sites SHALL
+pass the in-scope `tools` array. Implemented per
+`docs/design/plan-010-builtin-block-adaptive.md`. **Status: Implemented (Plan 010).**
+
+### NFR-SPT-001 — TypeScript / ESM consistency, no new dependency
+
+All new code is TypeScript ESM consistent with `src/`; no new runtime
+dependency is introduced. The default-prompt restructuring is a deliberate
+baseline re-record covered by updated `system-prompt.spec.ts` and new migration
+tests in `agent-config.spec.ts`. **Status: Implemented (Plan 009).**
+
+### Known minor follow-up — wrapped-CLI "via bash_run" framing under `--no-builtin-tools`
+
+`--no-builtin-tools` removes `bash_run`, so the wrapped-CLI capabilities
+section's "available via bash_run" framing is moot in that (self-defeating)
+combination. Left as-is for this change; tracked as a minor follow-up. **Status: Deferred.**
