@@ -49,7 +49,7 @@ export function getWebBackend(cfg: AgentConfig): WebBackend {
 }
 
 function getTavilyBackend(cfg: AgentConfig): WebBackend {
-  const apiKey = process.env['TAVILY_API_KEY'];
+  const apiKey = cfg.webSearch.tavilyApiKey;
   if (!apiKey) {
     throw new WebError(
       'E_SEARCH_API_KEY_MISSING',
@@ -85,7 +85,7 @@ function getTavilyBackend(cfg: AgentConfig): WebBackend {
 }
 
 function getSerpApiBackend(cfg: AgentConfig): WebBackend {
-  const apiKey = process.env['SERPAPI_API_KEY'];
+  const apiKey = cfg.webSearch.serpApiKey;
   if (!apiKey) {
     throw new WebError(
       'E_SEARCH_API_KEY_MISSING',
@@ -118,7 +118,7 @@ function getSerpApiBackend(cfg: AgentConfig): WebBackend {
 }
 
 function getBraveBackend(cfg: AgentConfig): WebBackend {
-  const apiKey = process.env['BRAVE_API_KEY'];
+  const apiKey = cfg.webSearch.braveApiKey;
   if (!apiKey) {
     throw new WebError(
       'E_SEARCH_API_KEY_MISSING',
@@ -179,14 +179,14 @@ function getDuckDuckGoBackend(): WebBackend {
 }
 
 function getCustomHttpBackend(cfg: AgentConfig): WebBackend {
-  const searchUrl = process.env['WEB_SEARCH_URL'];
+  const searchUrl = cfg.webSearch.customHttpUrl;
   if (!searchUrl) {
     throw new WebError(
       'E_SEARCH_API_KEY_MISSING',
       `WEB_SEARCH_URL is required when web search backend is 'custom-http'.`,
     );
   }
-  const apiKey = process.env['WEB_SEARCH_API_KEY'];
+  const apiKey = cfg.webSearch.customHttpApiKey;
 
   return {
     async search(query, topK = 5, site, timeRange) {

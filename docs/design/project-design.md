@@ -4,8 +4,9 @@
 
 `cli-agent` is a standalone Node.js CLI binary that runs a LangGraph ReAct agent wrapping
 any set of external CLI tools declared at launch. It inverts the standard "agentify your
-existing CLI" pattern: the agent IS the tool; the LLM-visible commands are driven through
-the bash allowlist, the file toolkit, and the web toolkit.
+existing CLI" pattern: the agent IS the tool; wrapped CLIs are driven through the built-in
+bash allowlist, while first-party file and web operations live in the `agt_*` agent-tools
+pack.
 
 ## 2. Architecture
 
@@ -22,13 +23,15 @@ src/cli.ts  (Commander arg parser)
     ├── bootstrapAgentDir()             creates ~/.tool-agents/cli-agent/{.env,logs/,capabilities/}
     │
     ├── discoverAllTools()              src/agent/capabilities/discover.ts
-    │       for each tool in cfg.tools:
-    │         getBinaryInfo (PATH lookup + mtime + version hash)
-    │         cache check (binaryPath + mtimeMs + versionHash)
-    │         if miss: runHelp (--help, -h, help <sub> fallbacks)
-    │                  extractSubcommands (LLM call with Zod structured output)
-    │                  composeCapabilityDoc (YAML frontmatter + AUTO-GENERATED + USER-NOTES)
-    │                  writeCacheEntry (mode 0600)
+    │       for each wrapped tool in cfg.tools:
+    │         if <capabilitiesDir>/<tool>.md exists and refresh is not forced:
+    │           trust the cached document and skip probing
+    │         otherwise:
+    │           getBinaryInfo (PATH lookup + mtime + version hash)
+    │           runHelp (--help, -h, help <sub> fallbacks)
+    │           extractSubcommands (LLM call with Zod structured output, unless small-help fast path applies)
+    │           composeCapabilityDoc (YAML frontmatter + AUTO-GENERATED + USER-NOTES/RECIPES)
+    │           writeCacheEntry (mode 0600)
     │
     ├── composeCapabilitiesSystemPrompt()    src/agent/capabilities/compose-system-prompt.ts
     │       read cached *.md files, embed in system prompt
@@ -41,10 +44,10 @@ src/cli.ts  (Commander arg parser)
     │       dispatches to one of 8 provider factories
     │
     ├── buildToolCatalog(cfg, logger)   src/agent/tools/registry.ts
-    │       Always: file_read, file_list, bash_list_allowed, bash_which,
-    │               tool_help    (web → agt_web_search/agt_web_fetch, plan-011)
-    │       + allowMutations: file_write, file_edit, file_append
+    │       Built-in toolkit: bash_list_allowed, bash_which, tool_help
     │       + allowlist non-empty: bash_run (READ-ONLY-AGENT or MUTATING mode)
+    │       + agent-tools pack: agt_glob/grep, agt_web_*, agt_file_*,
+    │                           agt_multiedit/patch, agt_todo_*
     │
     ├── buildAgentGraph(llm, tools, systemPrompt, maxSteps)
     │       createReactAgent from @langchain/langgraph/prebuilt
@@ -56,6 +59,28 @@ src/cli.ts  (Commander arg parser)
             JSONL → ~/.tool-agents/cli-agent/logs/session-<utc>-<id>.jsonl
             latest.jsonl symlink
 ```
+
+## 2a. Runtime Assembly
+
+Runtime setup is centralized in `assembleAgentRuntime(cfg, opts)` in
+`src/agent/run.ts` (Plan 013). The helper owns the common construction path for
+the one-shot runner, streaming one-shot runner, TUI bootstrap, and legacy
+readline interactive runner:
+
+1. create the session logger,
+2. create the LLM through `createLLM(cfg)`,
+3. assemble the post-scoping tool catalog through `buildToolCatalog(cfg, logger)`,
+4. create the LLM I/O capture channel for the same session id,
+5. run wrapped-tool capability discovery when `cfg.tools` is non-empty,
+6. compose the capability and system prompt sections,
+7. log `session_start` and optional `profile_active`,
+8. build the LangGraph agent graph.
+
+The public runner exports keep lifecycle-specific ownership outside the helper:
+one-shot and streaming runners log their own `user_prompt` and close logger plus
+capture in `finally`; the TUI receives the open runtime and controller-owned
+capture; legacy interactive keeps its readline loop and mutable thread id while
+using the same assembled graph/runtime.
 
 ## 3. Provider Registry
 
@@ -74,27 +99,25 @@ Factories read only from `cfg.providerEnv` (frozen snapshot). Never read `proces
 
 ## 4. Tool Catalog
 
-### Standard cross-cutting tools (always present)
+### Standard cross-cutting tools
 
 | Tool | Mutating | Description |
 |---|---|---|
-| `file_read` | No | Read file content inside sandbox root |
-| `file_list` | No | List directory contents |
-| `file_write` | Yes* | Overwrite file |
-| `file_edit` | Yes* | Find-and-replace in file |
-| `file_append` | Yes* | Append to file |
 | `bash_list_allowed` | No | List the bash allowlist |
 | `bash_which` | No | Resolve binary on PATH |
 | `bash_run` | Deviation† | Execute allow-listed binary |
 | `tool_help` | No | Fetch capability doc or subcommand section |
 
-> **Note (plan-011, §19):** `web_search` / `web_fetch` are no longer built-in
-> cross-cutting tools. They moved to the agent-tools pack as the first-party
-> `agt_web_search` / `agt_web_fetch` tools (read-only, default ON, governed by
-> `--agent-tools` rather than `--no-builtin-tools`). See § Agent-tools pack
-> and §19.
+> **Current contract (plan-011/012):** web and file operations are no longer
+> built-in cross-cutting tools. `web_search` / `web_fetch` moved to
+> `agt_web_search` / `agt_web_fetch`; `file_read` / `file_list` /
+> `file_write` / `file_edit` / `file_append` moved to `agt_file_read` /
+> `agt_file_list` / `agt_file_write` / `agt_file_edit` / `agt_file_append`.
+> Those tools are governed by `--agent-tools` and per-tool `--disable-agt-*`
+> flags, not by `--no-builtin-tools`.
 
-\* Off unless `--allow-mutations`
+\* `agt_file_write`, `agt_file_edit`, `agt_file_append`, `agt_multiedit`, and
+  `agt_patch` are off unless `--allow-mutations`.
 † `bash_run` is visible whenever the allowlist is non-empty, regardless of `--allow-mutations`.
   Without `--allow-mutations`, the description carries `[READ-ONLY-AGENT]` prefix as a warning.
   This is a documented deviation from the standard spec (see configuration-guide.md).
@@ -103,8 +126,13 @@ Factories read only from `cfg.providerEnv` (frozen snapshot). Never read `proces
 
 Files under `~/.tool-agents/cli-agent/capabilities/<tool>.md`.
 
-Cache validity: `binaryPath` + `binaryMtimeMs` + `versionHash` must all match. If any changes,
-the cache is invalidated. `--refresh-capabilities` bypasses the cache entirely.
+Normal startup uses a doc-exists shortcut: when a schema-supported capability
+document already exists and refresh is not forced, discovery treats it as cached
+and returns before PATH lookup, mtime/version probing, help probing, or LLM
+rediscovery. Explicit refresh remains the invalidation boundary:
+`--refresh-capabilities`, `cli-agent refresh-capabilities`, and TUI
+`/refresh-capabilities` bypass the cached document shortcut and rebuild the
+document from the current binary.
 
 The USER-NOTES and USER-RECIPES sections are preserved byte-for-byte across
 re-introspection. USER-RECIPES (introduced in schema-2 / 0.3.0) holds user-curated
@@ -843,13 +871,12 @@ Per-file responsibilities, exports, and imports:
 
 ```text
 buildToolCatalog(cfg, logger):
-    readOnly       = [file_read, file_list, bash_list_allowed, bash_which,
-                      tool_help]   // plan-011: web_search/fetch removed → agt_web_*
-    mutatingFile   = cfg.allowMutations
-                       ? [file_write, file_edit, file_append] : []   // unchanged
+    readOnly       = [bash_list_allowed, bash_which, tool_help]
     bashRunTools   = allowlist.length > 0 ? [bash_run] : []          // unchanged
     // agent-tools group (group-builder.ts) now also registers, read-only,
-    // when their per-tool flags are on: agt_web_search, agt_web_fetch (plan-011)
+    // when their per-tool flags are on: agt_web_search, agt_web_fetch,
+    // agt_file_read, agt_file_list. Mutating agt_file_write/edit/append
+    // register only when the per-tool flag and cfg.allowMutations are true.
 
     policy         = cliAgentPermissionPolicy(cfg)                   // NEW, once
     needsSession   = cfg.agentTools.enabled
@@ -860,7 +887,7 @@ buildToolCatalog(cfg, logger):
     group          = buildAgentToolsGroup(cfg, policy, sessionStore) // NEW
 
     return {
-      tools:           [...readOnly, ...mutatingFile, ...bashRunTools, ...group.tools],
+      tools:           [...readOnly, ...bashRunTools, ...group.tools],
       agentToolsMeta:  group.metadata,
     }
 
@@ -1005,7 +1032,7 @@ default-off; documented in `configuration-guide.md` as a known limitation.
 | Error class | Handling | Rationale |
 |---|---|---|
 | Upstream `ToolResult.ok === false` | Wrapper returns `[agt_<tool> error] <name>: <message>` string | Matches existing JSONL `tool_result.output` contract; the LangChain adapter convention is errors-as-string so the ReAct loop can recover. No exception bubbles to `createReactAgent`. |
-| Upstream throws synchronously inside `execute()` | Wrapper's outer `try/catch` catches; `handleToolError(err)` is called; recoverable errors → JSON string return; `ConfigurationError`/`AuthError` → re-thrown (fatal) | Same as every existing standard tool (e.g. `file_read`). |
+| Upstream throws synchronously inside `execute()` | Wrapper's outer `try/catch` catches; `handleToolError(err)` is called; recoverable errors → JSON string return; `ConfigurationError`/`AuthError` → re-thrown (fatal) | Same recoverable-error convention as the first-party tools (for example `agt_file_read`). |
 | Wrapper contract violation: `configurable.workingDirectory` missing AND `staticCwd` empty | Wrapper throws `ConfigurationError('cli-agent: workingDirectory not provided')` | No fallback: cli-agent always sets `workingDirectory` in `configurable` via `graph.ts`. If it's missing, that is a programming bug, not a runtime condition. Throw fast. |
 | Todo wrapper called with `sessionStore === undefined` | Wrapper throws `ConfigurationError('cli-agent: agentToolsSession missing — registry should have constructed one')` | Same as above — invariant violation, not a recoverable runtime state. |
 | Permission bridge failure (e.g., malformed path passed to `resolveSandboxPath`) | Throw propagates from the bridge → caught by wrapper's outer `try/catch` → `handleToolError` | The bridge does not silently substitute a default path. |
@@ -1026,7 +1053,7 @@ throws.
 | Choice | Rationale | Rejected alternatives |
 |---|---|---|
 | **`js-tiktoken` (`cl100k_base`) for token-budget assertion** | Already a transitive dep of `@langchain/core` and `@langchain/openai` (research §3); pure JS, MIT, ESM, no WASM, no Vitest plugins required. Zero install footprint added. | `tiktoken` (WASM, requires Vite plugins); `gpt-tokenizer` (extra dep, no accuracy benefit); char-count proxy (20-40% drift on markdown — research §2.2.5). |
-| **`DynamicStructuredTool` for wrappers (NOT `tool()` factory)** | Matches the existing 11 standard tools (`file_*`, `web_*`, `bash_*`, `tool_help`); `func` receives `RunnableConfig` as the third argument (research §2.1) which is the documented LangChain pattern. Consistency with the project's authored style. | `tool()` factory (config is 2nd arg, mismatched style); upstream `toLangChainTool` adapter (closes over `ToolContext` at construction time — defeats per-call injection; research §3 source 3). |
+| **`DynamicStructuredTool` for wrappers (NOT `tool()` factory)** | Matches the project's authored first-party tool style (`agt_file_*`, `agt_web_*`, `bash_*`, `tool_help`); `func` receives `RunnableConfig` as the third argument (research §2.1) which is the documented LangChain pattern. Consistency with the existing catalog implementation. | `tool()` factory (config is 2nd arg, mismatched style); upstream `toLangChainTool` adapter (closes over `ToolContext` at construction time — defeats per-call injection; research §3 source 3). |
 | **`RunnableConfig.configurable` for context injection** | The `ToolNode` passes `RunnableConfig` to every `tool.invoke()` call (research §1.2 + source 1). Argument-scoped, no shared mutable state, no checkpointer impact, no graph rebuild. | `AsyncLocalStorage` / module-level mutable holder (anti-pattern, leak risk, concurrency hazard); per-turn catalog rebuild (recompiles graph, defeats `createReactAgent`'s compile-once contract); `ToolRuntime.state` injection (JS gap vs. Python, research §3.3). |
 | **cli-agent's own `DynamicStructuredTool` wrappers (NOT upstream's `toLangChainTool`)** | Upstream's adapter captures `ToolContext` at construction time; cli-agent needs per-call `cwd` / `session`. ADR-5 below. | Use upstream adapter (forces context immutability per session — incompatible with the configurable-injection design). |
 | **Vendoring (`src/agent/tools/agent-tools-vendored/` + pinned SHA + `PROVENANCE.md` + `scripts/sync-agent-tools.sh`)** | Upstream is `"private": true` (not on npm); git-submodule complicates end-user `npm install`; `github:` git-dep would force `tsc` at every install (fragile). Vendoring keeps install clean and provides an auditable copy. ADR-2. | npm install (impossible); git submodule (install complexity); `github:` direct git dep (build-on-install fragility); MCP sidecar (over-engineering, IPC overhead, new failure mode). |
@@ -1340,8 +1367,8 @@ runs last.
                 ┌──────────────────────────────────────┐
                 │ ~/.tool-agents/cli-agent/            │
                 │   tool-prompts/                      │
-                │     file_read.md                     │
-                │     file_list.md                     │
+                │     agt_file_read.md                 │
+                │     agt_file_list.md                 │
                 │     ...   (one MD file per tool)     │
                 └──────────────┬───────────────────────┘
                                │  read on every cli-agent run
@@ -1364,8 +1391,8 @@ runs last.
                 │                             ▼
                 │                ┌──────────────────────────┐
                 │                │ Each tool factory        │
-                │                │  (file_*, web_*, bash_*, │
-                │                │   tool_help, agt_*)      │
+                │                │  (agt_file_*, agt_web_*, │
+                │                │   bash_*, tool_help)     │
                 │                └──────────┬───────────────┘
                 │                           │
                 │                           ▼
@@ -3534,16 +3561,16 @@ prefers the original spec wording.
 
 | Group | Members | CLI | Env (truthy = OFF) | `config.json` | profile |
 |---|---|---|---|---|---|
-| Built-in tools (cross-cutting toolkit) | `file_read/list/write/edit/append`, `bash_list_allowed/which/run`, `tool_help` (= `readOnly` + `mutatingFile` + `bashRunTools`). *As of plan-008 this also included `web_search/fetch`; plan-011 (§19) moved web to the `agt_*` pack.* | `--builtin-tools` / `--no-builtin-tools` | `CLI_AGENT_DISABLE_BUILTIN_TOOLS` | `builtinTools` | `tools.builtin` |
+| Built-in tools (cross-cutting toolkit) | `bash_list_allowed`, `bash_which`, `tool_help`, plus `bash_run` when the bash allowlist is non-empty. *Plan-011 moved web to `agt_web_*`; plan-012 moved file operations to `agt_file_*`.* | `--builtin-tools` / `--no-builtin-tools` | `CLI_AGENT_DISABLE_BUILTIN_TOOLS` | `builtinTools` | `tools.builtin` |
 | Composites | every virtual/composite tool (`loadVirtualToolsSync`) | `--composites` / `--no-composites` | `CLI_AGENT_DISABLE_COMPOSITES` | `composites` | `tools.composites` |
-| Agent-tools pack (`agt_*`) | the six vendored `agt_*` tools (§ Agent-tools pack) + first-party `agt_web_search/agt_web_fetch` (plan-011, §19) | `--agent-tools` / `--no-agent-tools` (pre-existing) | `CLI_AGENT_DISABLE_AGENT_TOOLS` (pre-existing) | `agentTools.enabled` (pre-existing) | `tools.agentTools` (**new tier**) |
+| Agent-tools pack (`agt_*`) | the vendored `agt_glob/grep/multiedit/patch/todo_read/todo_write` tools plus first-party `agt_web_search/agt_web_fetch` and `agt_file_read/list/write/edit/append` | `--agent-tools` / `--no-agent-tools` (pre-existing) | `CLI_AGENT_DISABLE_AGENT_TOOLS` (pre-existing) | `agentTools.enabled` (pre-existing) | `tools.agentTools` (**new tier**) |
 
 **Precedence (uniform).** `CLI flag > env (CLI_AGENT_DISABLE_*) > config.json > profile > default(load)`. The `CLI_AGENT_DISABLE_*` env vars use the inverted-disable convention (truthy = OFF), matching `CLI_AGENT_DISABLE_AGENT_TOOLS`. Invalid (non-boolean) env values raise `ConfigurationError` (exit 3) via `parseAgentToolsBoolEnvVar` — no fallback. The defaults are explicit optional-toggle starting values, NOT runtime fallbacks for missing required config; no new required config is introduced (the no-fallback rule is not triggered).
 
 **Where it lands (code).**
 - **`src/config/agent-config.ts`** — `AgentCliFlags` gains `composites?`/`builtinTools?`; `AgentConfigFile` gains `composites?`/`builtinTools?`; the resolved `AgentConfig` gains the always-present `composites: boolean` / `builtinTools: boolean`. `OTHER_ENV_KEYS` gains `CLI_AGENT_DISABLE_COMPOSITES` and `CLI_AGENT_DISABLE_BUILTIN_TOOLS`. A new `resolveToolGroupToggle(flagVal, disableEnvKey, layered, configVal, profileVal)` helper encodes the uniform chain (mirrors the umbrella logic in `resolveAgentTools`) and resolves `composites` / `builtinTools` from the active profile's `tools.composites` / `tools.builtin`. `resolveAgentTools` is extended with a `profileEnabled` parameter, inserting `tools.agentTools` as the profile tier just above the default in the umbrella resolution.
 - **`src/config/profile-schema.ts`** — `ProfileToolsSchema` gains optional booleans `composites`, `builtin`, `agentTools`, remaining `.strict()` (unknown keys under `tools` still rejected). `KNOWN_CLI_PARAMS` is unchanged — these live under `tools`, not `cliParams`.
-- **`src/agent/tools/registry.ts` — `buildToolCatalog` (the gate).** Built-in toolkit: when `cfg.builtinTools === false`, `readOnly`, `mutatingFile`, and `bashRunTools` are each `[]` (the tools are not constructed). Composites: `loadVirtualToolsSync` is called only when `cfg.composites !== false`. Profile `tools.allow/deny/order` scoping runs AFTER, unchanged. When the final scoped catalog is empty, ONE stderr notice is emitted (the agent degrades to a plain conversational LLM) — no throw. The off-path invariant uses `!== false`, so unset/`true` reproduces the previous construction exactly.
+- **`src/agent/tools/registry.ts` — `buildToolCatalog` (the gate).** Built-in toolkit: when `cfg.builtinTools === false`, the bash/tool-help group and `bashRunTools` are each `[]` (the tools are not constructed). File and web operations are outside this gate after plan-011/012; they are controlled by the agent-tools umbrella and per-tool flags. Composites: `loadVirtualToolsSync` is called only when `cfg.composites !== false`. Profile `tools.allow/deny/order` scoping runs AFTER, unchanged. When the final scoped catalog is empty, ONE stderr notice is emitted (the agent degrades to a plain conversational LLM) — no throw. The off-path invariant uses `!== false`, so unset/`true` preserves the current default construction.
 - **`src/cli.ts`** — registers `--composites` / `--no-composites` and `--builtin-tools` / `--no-builtin-tools` on the default agent command (Commander maps `--no-x` ⇒ `opts.x === false`), and threads `composites` / `builtinTools` into the `AgentCliFlags` literal passed to `runAgentCommand`.
 
 **Behaviour notes.**
@@ -3565,7 +3592,7 @@ prefers the original spec wording.
 
 **Plan reference:** `docs/design/plan-009-systemprompt-toggle-aware.md`. (Functional requirements registered as FR-SPT-001..005 / NFR-SPT-001 in `docs/design/project-functions.md`; full user-facing behaviour in `docs/tools/cli-agent.md` → "System Prompt Selection" and the configuration-guide system-prompt + `builtinTools` sections.)
 
-**The gap it closes.** Plan-008 gated the bound tool SCHEMAS (`--no-builtin-tools` ⇒ no `file_*`/`web_*`/`bash_*` schemas) but NOT the system-prompt PROSE: the built-in tool instructions (the `bash_run` CORE RULES + the "three general-purpose tools" paragraph) were hard-coded into `BUILTIN_DEFAULT_SYSTEM_PROMPT`, which `buildSystemPrompt` loaded verbatim. So with `--no-builtin-tools` the model was still TOLD about tools it could not call. Plan-009 makes those instructions a runtime conditional block gated on `cfg.builtinTools`, exactly like the existing `agt_*` block.
+**The gap it closes.** Plan-008 gated the then-current bound tool SCHEMAS (`--no-builtin-tools` removed the built-in toolkit) but NOT the system-prompt PROSE: the built-in tool instructions were hard-coded into `BUILTIN_DEFAULT_SYSTEM_PROMPT`, which `buildSystemPrompt` loaded verbatim. So with `--no-builtin-tools` the model was still TOLD about tools it could not call. Plan-009 makes those instructions a runtime conditional block gated on `cfg.builtinTools`, exactly like the existing `agt_*` block. Plan-011/012 later moved web and file prose out of this built-in block.
 
 **Design — mirror the existing conditional-block pattern.** The `agt_*` block and the wrapped-CLI capabilities section are already runtime-injected conditional blocks; the built-in toolkit now follows suit.
 
@@ -3586,7 +3613,7 @@ prefers the original spec wording.
 
 **As-built surface.** Shipped under Plan 009 — `src/agent/system-prompt.ts` (`LEGACY_DEFAULT_SYSTEM_PROMPTS`, slim `BUILTIN_DEFAULT_SYSTEM_PROMPT`, `BUILTIN_TOOLS_PROMPT_BLOCK`, `buildBuiltinToolsPromptBlock`, extended `buildSystemPrompt`/`buildSystemPromptForCfg`), `src/config/agent-config.ts` (the in-place `bootstrapAgentDir` upgrade + `LEGACY_DEFAULT_SYSTEM_PROMPTS` import). Tests: re-recorded `src/agent/system-prompt.spec.ts` (slim default + gated block + composition order) and new migration tests in `src/config/agent-config.spec.ts` (upgrade unmodified default / leave user-modified / leave already-slim). No new dependency.
 
-> **Superseded in part by Plan 010 (§18).** The static `BUILTIN_TOOLS_PROMPT_BLOCK` constant and the `buildBuiltinToolsPromptBlock(builtinTools: boolean)` / `buildSystemPrompt(..., builtinTools = true)` signatures described above were the Plan-009 shape. Plan 010 replaced the static block with an adaptive one assembled from a `{ builtinTools, bashRun, mutatingFile }` presence object, removed `BUILTIN_TOOLS_PROMPT_BLOCK`, and added a 4th `registeredTools` parameter to `buildSystemPromptForCfg` (so all 10 production call sites now pass the in-scope `tools` array). The slim base prompt and the migration logic are unchanged. See §18.
+> **Superseded in part by Plan 010 (§18) and Plan 012 (§20).** The static `BUILTIN_TOOLS_PROMPT_BLOCK` constant and the `buildBuiltinToolsPromptBlock(builtinTools: boolean)` / `buildSystemPrompt(..., builtinTools = true)` signatures described above were the Plan-009 shape. Plan 010 replaced the static block with an adaptive one assembled from a presence object, removed `BUILTIN_TOOLS_PROMPT_BLOCK`, and added a 4th `registeredTools` parameter to `buildSystemPromptForCfg` (so all production call sites pass the in-scope `tools` array). Plan 012 then removed the mutating-file presence from that object when file operations moved to `agt_file_*`. The slim base prompt and the migration logic are unchanged. See §18 and §20.
 
 ## §18. Adaptive Built-in-Tools Prompt Block (plan-010)
 
@@ -3594,15 +3621,15 @@ prefers the original spec wording.
 
 **Plan reference:** `docs/design/plan-010-builtin-block-adaptive.md`. (Functional requirements registered as FR-SPT-006 in `docs/design/project-functions.md`, with FR-SPT-002/003 amended; full user-facing behaviour in `docs/tools/cli-agent.md` → "Slim base + runtime-injected built-in-tools block" and the configuration-guide system-prompt section.)
 
-**The gap it closes.** Plan-009 gated the WHOLE `## Built-in tools` block on `cfg.builtinTools`, but its prose was STATIC: it always described `bash_run` and the mutating-file tools (`file_write`/`file_edit`/`file_append`). Those two groups are gated by OTHER session config — `bash_run` is bound only when the command allowlist is non-empty; the mutating-file tools only with `--allow-mutations`. So in the common case (empty allowlist, no mutations) the prompt over-promised vs the bound schemas. Plan-010 makes the block describe EXACTLY the registered built-in tools.
+**The gap it closes.** Plan-009 gated the WHOLE `## Built-in tools` block on `cfg.builtinTools`, but its prose was STATIC: it always described `bash_run` and, at the time, the mutating-file tools (`file_write`/`file_edit`/`file_append`). Those groups were gated by OTHER session config, so the prompt could over-promise vs the bound schemas. Plan-010 made the block describe the registered built-in tools; plan-012 later removed file tools from the built-in toolkit entirely.
 
 **Design — derive the block from the registered tool NAMES (drift-free).** Every `buildSystemPromptForCfg` call site already has the post-scoping `tools` array from `buildToolCatalog` in scope. It is passed in as a new 4th parameter and presence is derived from the real bound set (which also respects a profile `deny` of a built-in).
 
-- **`BuiltinToolsPresence`** — `{ builtinTools, bashRun, mutatingFile }`. `buildBuiltinToolsPromptBlock(p)` returns `''` when `!p.builtinTools`; otherwise it assembles the block from composable, gated section constants (`BUILTIN_BLOCK_HEADER`, the bashRun / no-bashRun intros, the bashRun-specific + general CORE RULES, the available-tools list, and the OUT-OF-SCOPE bullets). `BUILTIN_TOOLS_PROMPT_BLOCK` was removed (the block is runtime-only and is NOT seeded to disk, so there is no migration concern).
-- **Adaptive content.** bashRun ON ⇒ the `bash_run` command-execution framing + its two confirmation/allowlist CORE RULES + the `bash_run` available-tools clause + the shell-features OUT-OF-SCOPE line. bashRun OFF ⇒ a "no local commands are allow-listed; command execution unavailable" note, the read-only `bash_list_allowed`/`bash_which` clause only, and no shell-features line. mutatingFile ON ⇒ the `file_write`/`file_edit`/`file_append` clause + an OUT-OF-SCOPE line that you may modify files only when asked. mutatingFile OFF ⇒ no mutating clause + an OUT-OF-SCOPE line that files cannot be modified, hinting `--allow-mutations`. The general CORE RULES and read-only tools are always present.
-- **Composition.** `buildSystemPrompt`'s 5th parameter became `builtinPresence: BuiltinToolsPresence = { builtinTools: true, bashRun: true, mutatingFile: true }` (default = today's full block, backward-compatible). `buildSystemPromptForCfg` gained a 4th parameter `registeredTools: ReadonlyArray<{ name: string }> = []` and computes `{ builtinTools: cfg.builtinTools !== false, bashRun: names.has('bash_run'), mutatingFile: names.has('file_write') || names.has('file_edit') || names.has('file_append') }`. Injection position is unchanged (after base, before capabilities).
+- **`BuiltinToolsPresence`** — current shape `{ builtinTools, bashRun }` after plan-012. `buildBuiltinToolsPromptBlock(p)` returns `''` when `!p.builtinTools`; otherwise it assembles the block from composable, gated section constants (`BUILTIN_BLOCK_HEADER`, the bashRun / no-bashRun intros, the bashRun-specific + general CORE RULES, the available-tools list, and the OUT-OF-SCOPE bullets). `BUILTIN_TOOLS_PROMPT_BLOCK` was removed (the block is runtime-only and is NOT seeded to disk, so there is no migration concern).
+- **Adaptive content.** bashRun ON ⇒ the `bash_run` command-execution framing + its two confirmation/allowlist CORE RULES + the `bash_run` available-tools clause + the shell-features OUT-OF-SCOPE line. bashRun OFF ⇒ a "no local commands are allow-listed; command execution unavailable" note, the read-only `bash_list_allowed`/`bash_which` clause only, and no shell-features line. File guidance is not part of this block after plan-012; it rides on the `agt_file_*` entries in the agent-tools prompt block. The general CORE RULES and read-only bash/tool-help entries remain present when the built-in toolkit is enabled.
+- **Composition.** `buildSystemPrompt`'s 5th parameter is `builtinPresence: BuiltinToolsPresence = { builtinTools: true, bashRun: true }` (default = full current built-in block, backward-compatible for the remaining built-ins). `buildSystemPromptForCfg` takes a 4th parameter `registeredTools: ReadonlyArray<{ name: string }> = []` and computes `{ builtinTools: cfg.builtinTools !== false, bashRun: names.has('bash_run') }`. Injection position is unchanged (after base, before capabilities).
 
-**As-built surface.** Shipped under Plan 010 — `src/agent/system-prompt.ts` (new `BuiltinToolsPresence` interface, gated section constants, rewritten `buildBuiltinToolsPromptBlock`, presence-object `buildSystemPrompt`, 4th-param `buildSystemPromptForCfg`; `BUILTIN_TOOLS_PROMPT_BLOCK` removed). All 10 production call sites updated to pass the in-scope `tools` array: `src/agent/run.ts` (×4) and `src/tui/slash/{resume,allow-mutations,new,provider,tools,model}.ts`. Tests: `src/agent/system-prompt.spec.ts` re-recorded for the presence object + the four bashRun/mutatingFile combinations + the registeredTools-derived presence in `buildSystemPromptForCfg`. The slim base prompt (`BUILTIN_DEFAULT_SYSTEM_PROMPT`), `LEGACY_DEFAULT_SYSTEM_PROMPTS`, and the `bootstrapAgentDir` migration are UNCHANGED. No new dependency.
+**As-built surface.** Shipped under Plan 010 and amended by Plan 012 — `src/agent/system-prompt.ts` (new `BuiltinToolsPresence` interface, gated section constants, rewritten `buildBuiltinToolsPromptBlock`, presence-object `buildSystemPrompt`, 4th-param `buildSystemPromptForCfg`; `BUILTIN_TOOLS_PROMPT_BLOCK` removed). All production call sites pass the in-scope `tools` array. Plan-012 removed the now-dead `mutatingFile` presence, file-tool prose, and `file_write`/`file_edit`/`file_append` registered-name derivation. The slim base prompt (`BUILTIN_DEFAULT_SYSTEM_PROMPT`), `LEGACY_DEFAULT_SYSTEM_PROMPTS`, and the `bootstrapAgentDir` migration are UNCHANGED. No new dependency.
 
 **Result.** The inspector's "Bound tool schemas" and the system-prompt tool prose now agree for the built-in toolkit across every gate — umbrella toggle, allowlist, `--allow-mutations`, and profile deny.
 
@@ -3616,9 +3643,10 @@ prefers the original spec wording.
 
 **Design.**
 - **Wrappers.** `buildAgtWebSearchTool({cfg, requestBudget, overlays})` / `buildAgtWebFetchTool({...})` carry the former `createWebSearchTool` / `createWebFetchTool` bodies verbatim, with `name` and `BUILTIN_TOOL_PROMPTS` key changed to `agt_web_*`. They keep `getWebBackend(cfg)`, the budget decrement + `E_SEARCH_BUDGET_EXCEEDED`, `mergeProfileToolArgs`, and `handleToolError`. The canonical description/params live in `BUILTIN_TOOL_PROMPTS['agt_web_search'|'agt_web_fetch']` (copied verbatim from the old `web_*` entries, incl. the "Never fabricate URLs" guidance); the `AGT_WEB_*_DESCRIPTION` constants alias them.
-- **Registration / budget.** `group-builder.ts` constructs ONE per-session `requestBudget` (`WEB_SEARCH_MAX_REQUESTS`, default 50) shared by both tools, and registers them (after grep) under `if (flags.webSearch)` / `if (flags.webFetch)` — read-only, NO `allowMutations` gate. The `tools[i] ↔ meta.registered[i]` lockstep invariant is preserved; the agent-tools prompt block is a pure projection of `registered`, so web documentation rides the existing pack block automatically.
+- **Registration / budget.** `group-builder.ts` constructs ONE per-session `requestBudget` from the resolved `cfg.webSearch.maxRequests` value (`WEB_SEARCH_MAX_REQUESTS`, default 50) shared by both tools, and registers them (after grep) under `if (flags.webSearch)` / `if (flags.webFetch)` — read-only, NO `allowMutations` gate. The `tools[i] ↔ meta.registered[i]` lockstep invariant is preserved; the agent-tools prompt block is a pure projection of `registered`, so web documentation rides the existing pack block automatically.
 - **Config.** `AgentConfig.agentTools.tools` (+ the file/CLI shapes) gain `webSearch` / `webFetch` (default `true`), resolved via the existing `resolveOne` chain with env keys `CLI_AGENT_AGT_WEB_SEARCH` / `CLI_AGENT_AGT_WEB_FETCH` (added to `OTHER_ENV_KEYS`). Flags `--enable/--disable-agt-web-search` / `-agt-web-fetch` map through `mapAgentToolFlags` and are registered on the agent command in `cli.ts`.
-- **System prompt.** `buildBuiltinToolsPromptBlock` drops ALL web references (the web available-tools bullet, the "NEVER invent URLs" CORE RULE, and the OUT-OF-SCOPE web line). The bashRun / mutatingFile gating is unchanged.
+- **Web backend snapshot.** `loadAgentConfig` resolves `WEB_SEARCH_BACKEND`, `TAVILY_API_KEY`, `SERPAPI_API_KEY`, `BRAVE_API_KEY`, `WEB_SEARCH_URL`, `WEB_SEARCH_API_KEY`, and `WEB_SEARCH_MAX_REQUESTS` into `cfg.webSearch`. `src/agent/tools/web/backends/registry.ts`, `agt-web-search.ts`, `agt-web-fetch.ts`, and `group-builder.ts` consume only that snapshot; they must not read `process.env` directly.
+- **System prompt.** `buildBuiltinToolsPromptBlock` drops ALL web references (the web available-tools bullet, the "NEVER invent URLs" CORE RULE, and the OUT-OF-SCOPE web line). At plan-011 time the bashRun / mutatingFile gating was otherwise unchanged; plan-012 later removed the file/mutatingFile branch when file operations moved to `agt_file_*`.
 
 **Gating after this change.** `agt_web_search` / `agt_web_fetch` appear iff `cfg.agentTools.enabled` AND the per-tool flag is on; they are read-only (no `--allow-mutations`); `--no-builtin-tools` no longer affects web; profile `tools.deny: [agt_web_search]` works (name-based, no code change).
 
@@ -3655,3 +3683,19 @@ prefers the original spec wording.
 **Decision.** Mirror that empty-toolset signal into the prompt. `buildSystemPrompt` gains a `noToolsAvailable` flag (default `false`) that, when set, injects a self-framed `NO_TOOLS_BLOCK` immediately after the base identity: it states the agent has no way to act this session and explicitly forbids fabricating/guessing/role-playing command output, directory listings, file contents, or URLs, and points the user at the flags to re-enable tools. `buildSystemPromptForCfg` computes `noToolsAvailable = registeredTools.length === 0` (the post-scoping catalog it already receives), so the guard fires for any zero-tool session — all-groups-off OR a profile that scopes the catalog to nothing — and never when ≥1 tool is registered. No CLI/config surface changes; `LEGACY_DEFAULT_SYSTEM_PROMPTS` untouched.
 
 **As-built.** `NO_TOOLS_BLOCK` constant + `noToolsAvailable` param in `buildSystemPrompt`; `registeredTools.length === 0` computation in `buildSystemPromptForCfg`. Coverage: 5 new `system-prompt.spec.ts` tests + `test_scripts/verify-no-tools-notice.ts` (E2E repro). Follow-up (logged in `Issues - Pending Items.md`, LOW): an always-present anti-fabrication CORE RULE to also cover *partial*-toolset gaps.
+
+## 2026-06-15 — Release / CI hardening (plan-014)
+
+**Provenance chain.** Refined request `docs/reference/refined-request-release-ci-hardening.md` -> plan `docs/design/plan-014-release-ci-hardening.md`. Investigation and technical research skipped because the project already uses npm, TypeScript, Vitest, and `npm audit`; no new dependency or approach choice was introduced.
+
+**Problem.** The package release gate only ran `clean`, `build`, and `test`. There was no `lint` script, no audit gate, and no validation of the actual npm publish payload. A dry-run pack also showed stale compiled spec files could remain in `dist/` and be included by the broad `"files": ["dist", ...]` package rule.
+
+**Decision.**
+- `npm run lint` is added as strict TypeScript static validation (`tsc --noEmit -p tsconfig.json --pretty false`) without adding lint dependencies.
+- `npm run build` now starts with `clean`, uses `tsconfig.build.json`, and excludes spec/test TypeScript plus source JSON that is not needed at runtime.
+- `scripts/copy-vendored-assets.mjs` now copies only vendored upstream `*.prompt.md` runtime assets, instead of every `.md` / `.txt` / `.json` under `src/`.
+- `npm run release:audit` runs `npm audit --audit-level=high`.
+- `npm run release:package` runs `scripts/check-package-content.mjs`, which parses `npm pack --dry-run --json` and checks the actual publish payload for required files and forbidden source/test/support artifacts.
+- `prepublishOnly` runs `lint`, `typecheck`, `build`, `test`, `release:audit`, and `release:package` in sequence, so any failed gate blocks publish. `build` owns the clean `dist/` step and intentionally precedes `test` because the CLI help baseline tests execute `dist/cli.js`.
+
+**As-built surface.** Modified `package.json`, `scripts/copy-vendored-assets.mjs`, `README.md`, `docs/design/project-functions.md`, and this design file. Added `tsconfig.build.json`, `scripts/check-package-content.mjs`, and `docs/design/plan-014-release-ci-hardening.md`. No package dependency was added.

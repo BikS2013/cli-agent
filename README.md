@@ -418,9 +418,13 @@ Suppress with `CLI_AGENT_QUIET_DISCOVERY=1`.
   allow-list the wrapper binary.
 - **Confirmation envelope on every `bash_run` call.** No "remember for
   this session" optimization — every shell-out is a manual yes/no.
-- **Mutating file ops** (`file_write`, `file_edit`, `file_append`)
-  require `--allow-mutations`. Without it, only read/list are
-  available.
+- **Mutating tools** (`agt_file_write`, `agt_file_edit`,
+  `agt_file_append`, `agt_multiedit`, `agt_patch`) require
+  `--allow-mutations`. Without it, only the read-only file tools
+  (`agt_file_read`, `agt_file_list`) and the other read-only `agt_*`
+  skills are available. (File and web tools live in the agent-tools
+  pack; the built-in toolkit is now just `bash_*` + `tool_help`. See
+  [`docs/guides/agent-competency-levels.md`](docs/guides/agent-competency-levels.md).)
 - **Environment stripping for child processes.** Spawned children
   inherit only `PATH`, `HOME`, `LANG`, `TERM` by default; credential-
   shaped vars are explicitly stripped unless the user opts each one in
@@ -477,7 +481,10 @@ cli-agent/
 │   ├── config/agent-config.ts       # 4-tier resolution chain
 │   ├── agent/
 │   │   ├── providers/               # 8 LLM provider factories
-│   │   ├── tools/{file,web,bash}/   # standard cross-cutting tools
+│   │   ├── tools/bash/              # built-in cross-cutting shell toolkit (bash_*)
+│   │   ├── tools/tool-help-tool.ts  # tool_help (built-in capability lookup)
+│   │   ├── tools/agent-tools/       # the agt_* pack (file, web, search, grep, glob, todos, patch)
+│   │   ├── tools/{file,web}/        # file sandbox + web backends, reused by the agt_* pack
 │   │   ├── capabilities/            # discovery + cache + system-prompt composition
 │   │   ├── graph.ts                 # LangGraph ReAct + streamEvents wrapper
 │   │   ├── run.ts                   # one-shot, streaming, REPL, TUI runtimes
@@ -553,9 +560,11 @@ cli-agent/
 
 ```bash
 npm install
+npm run lint            # strict TypeScript static validation
 npm run typecheck       # tsc --noEmit
 npm run test            # vitest run (111 tests across 17 files at last count)
-npm run build           # tsc → dist/, then chmod +x dist/cli.js
+npm run build           # clean dist/, tsc release build, copy prompt assets, chmod dist/cli.js
+npm run release:package # verify the npm publish payload with npm pack --dry-run
 npm run dev -- --tool git "smoke test"   # tsx src/cli.ts directly
 ```
 

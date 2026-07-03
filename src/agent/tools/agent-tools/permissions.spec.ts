@@ -71,7 +71,7 @@ function makeCfg(overrides: {
       skipLlmBelowBytes: 4096,
     },
     bash,
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     fileEdit,
     perToolBudgetBytes: 8192,
     baseUrl: undefined,

@@ -123,7 +123,7 @@ function makeCfg(opts: MakeCfgOpts = {}): AgentConfig {
     allowMutations,
 
     // --- web ---
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     webSearchBackend: 'tavily',
 
     // --- agent-tools pack ---

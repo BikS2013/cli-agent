@@ -57,7 +57,7 @@ export interface AgtWebSearchDeps {
 /** Build the LangChain tool. */
 export function buildAgtWebSearchTool(deps: AgtWebSearchDeps): DynamicStructuredTool {
   const { cfg, requestBudget } = deps;
-  const maxRequests = parseInt(process.env['WEB_SEARCH_MAX_REQUESTS'] ?? '50', 10);
+  const maxRequests = cfg.webSearch.maxRequests;
   const BUILTIN = BUILTIN_TOOL_PROMPTS[AGT_WEB_SEARCH_NAME]!;
   const reg = deps.overlays ?? cfg.toolPromptOverlays;
   const schema = z.object({

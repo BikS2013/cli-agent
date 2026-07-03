@@ -2,23 +2,42 @@
 
 ## Pending
 
+### [HIGH] File sandbox permits new-file writes through symlinked directories outside `fileEdit.root`
+- Surfaced during the 2026-06-15 security review (`docs/reference/security-review-2026-06-15.md`).
+- `src/agent/tools/file/sandbox.ts` falls back to `path.resolve(...)` when the requested target does not exist. For `root/linkdir/new.txt`, where `linkdir` is a symlink to a directory outside the sandbox, the text path still starts with `root` and is accepted, but the eventual write follows the symlinked parent outside the root.
+- Confirmed with a temporary-directory reproduction against `dist/agent/tools/file/sandbox.js`: the accepted path was under `root/linkdir/new.txt`, while `realpath(dirname(resolved))` was the outside directory.
+- Impact: with `--allow-mutations`, `agt_file_write` / `agt_file_append` can create files outside `fileEdit.root`, breaking the sandbox guarantee. `agt_file_edit` is also affected for existing files around TOCTOU/symlink handling and should be covered by the same hardening pass.
+- Suggested fix: canonicalize the nearest existing parent with `fs.realpathSync.native`, join the unresolved tail, then re-check against `fileEdit.root` and `allowPaths` before opening the file. Add regression tests for new file creation under a symlinked directory, nested missing paths, append, and edit.
+
+### [HIGH] Default-on web fetch can reach localhost/private networks/cloud metadata endpoints
+- Surfaced during the 2026-06-15 security review (`docs/reference/security-review-2026-06-15.md`).
+- `agt_web_fetch` is default-on and accepts any Zod-valid URL; `fetchUrl` fetches the supplied URL directly without blocking loopback, RFC1918/private ranges, link-local addresses, IPv6 local ranges, or cloud metadata endpoints.
+- Impact: prompt injection or model error can cause the agent to fetch internal resources and return their contents to the LLM/provider.
+- Suggested fix: add an outbound URL policy that allows only `http:`/`https:`, rejects localhost/private/link-local/metadata destinations, validates every DNS result, re-checks redirect targets, and makes private-network access an explicit opt-in with warnings. Add SSRF regression tests.
+
+### [HIGH] `/inspect show` renders raw I/O capture records even when disk redaction is enabled
+- Surfaced during the 2026-06-15 security review (`docs/reference/security-review-2026-06-15.md`).
+- `src/agent/io-capture.ts` stores raw records in memory before redacting the on-disk payload. `src/tui/slash/inspect.ts` renders records from the in-memory copy, so prompts, tool args, tool results, and final text can appear in plaintext in terminal output despite default capture redaction.
+- Impact: secrets can enter terminal scrollback, recordings, screenshots, or copy buffers when `/inspect show` is used.
+- Suggested fix: store redacted/capped records in memory when redaction is enabled, or apply the same redaction at `read()` / render time. Add tests proving `/inspect show` does not render a known secret under default redaction.
+
+### [MEDIUM] `bash_run` read-only mode is advisory for allowlisted CLIs
+- Surfaced during the 2026-06-15 security review (`docs/reference/security-review-2026-06-15.md`).
+- When `allowMutations` is false, `bash_run` changes its description to `[READ-ONLY-AGENT]` and asks the model to prefer read-only commands, but it still executes any allowlisted binary when the model supplies `confirmed: true`.
+- Impact: broad allowlist entries such as `git`, `kubectl`, `aws`, `docker`, `python`, or `node` still permit mutating subcommands without `--allow-mutations`; this is a prompt/usage convention rather than a runtime enforcement boundary.
+- Suggested fix: document binary-name allowlist entries as full CLI authority; consider requiring `argv-regex:` entries in read-only mode, adding deny patterns for common mutating verbs, or adding a real user-mediated confirmation path outside model-controlled tool args.
+
+### [MEDIUM] Web fetch and composite dispatch enforce output limits after buffering
+- Surfaced during the 2026-06-15 security review (`docs/reference/security-review-2026-06-15.md`).
+- `src/agent/tools/web/backends/registry.ts` reads `response.arrayBuffer()` before checking `maxBytes`, and `src/agent/composite/dispatcher.ts` accumulates child stdout/stderr chunks without per-stream caps before concatenation.
+- Impact: large responses or noisy composite child processes can create avoidable memory pressure or local denial of service.
+- Suggested fix: stream web responses and abort at the byte cap; enforce `Content-Length` when present; reuse `spawnCommand` or equivalent capped buffering for composite dispatch.
+
 ### [HIGH] Project `AGENTS.md` is not in sync with the current user-level Structure & Conventions chapter
 - Surfaced during the 2026-06-14 project evaluation (`docs/reference/project-evaluation.md`).
 - The current project `AGENTS.md` starts with a shorter/older `Structure & Conventions` chapter and does not include the current user-level request-refinement, investigation/research, codebase-scanning, and dependency-vetting rules.
 - Impact: future agents working only from the project file may skip required refinement/scanning phases or dependency-vetting steps, producing workflow drift from the user-level instructions.
 - Suggested fix: replace the leading `Structure & Conventions` chapter in `AGENTS.md` with the current user-level chapter, then verify the `Tools` section still remains concise and points to `docs/tools/cli-agent.md`.
-
-### [HIGH] Web search backend ignores layered `.env` values for backend credentials
-- Surfaced during the 2026-06-15 architecture review (`docs/reference/architecture-review-2026-06-15.md`).
-- `bootstrapAgentDir` seeds `TAVILY_API_KEY`, `SERPAPI_API_KEY`, `BRAVE_API_KEY`, `WEB_SEARCH_URL`, `WEB_SEARCH_API_KEY`, and `WEB_SEARCH_MAX_REQUESTS` into `~/.tool-agents/cli-agent/.env`, and `loadAgentConfig` reads those keys into its layered env snapshot. However, `src/agent/tools/web/backends/registry.ts` and the `agt_web_*` wrappers read `process.env` directly, so values supplied only by the agent `.env` or local `.env` are not visible to the web backend.
-- Impact: documented configuration sources do not work for web search unless the variables are exported in the shell; this violates the central configuration-resolution architecture and produces misleading `E_SEARCH_API_KEY_MISSING` errors.
-- Suggested fix: add a resolved `webSearch` configuration snapshot to `AgentConfig` that carries backend credentials and `maxRequests` from the layered env resolver, then make `getWebBackend`, `agt_web_search`, and `agt_web_fetch` consume only that snapshot.
-
-### [MEDIUM] Project design and requirements still describe pre-plan-011/012 tool catalog and old capability invalidation
-- Surfaced during the 2026-06-15 architecture review (`docs/reference/architecture-review-2026-06-15.md`).
-- `docs/design/project-design.md` still describes `file_read`, `file_list`, and mutating `file_*` tools as standard built-ins, while the current implementation has moved file operations into the agent-tools pack as `agt_file_*`. The same design and `docs/design/project-functions.md` also describe automatic capability-cache invalidation by binary path, mtime, and version hash, while `src/agent/capabilities/discover.ts` now intentionally trusts an existing capability document until explicit refresh.
-- Impact: future design, implementation, and review work may reintroduce old assumptions, especially around `--no-builtin-tools`, file-tool availability, and startup cache freshness.
-- Suggested fix: update `project-design.md` and `project-functions.md` to make the current contracts explicit: built-in toolkit is `bash_*` plus `tool_help`; file/web live in `agt_*`; normal startup uses the doc-exists shortcut; explicit refresh performs full rediscovery.
 
 ### [LOW] Partial-toolset fabrication hardening (defense-in-depth follow-up)
 - The toolless-session fix (see Completed: "Toolless session fabricated tool output") injects the no-tools / anti-fabrication notice only when the catalog is **completely empty** (`registeredTools.length === 0`). In **partial** states — e.g. `--no-builtin-tools` with only `agt_glob`/`agt_grep` enabled — a user request that needs a missing capability (e.g. "run `git status`" when no bash tool is bound) could still be answered with fabricated output, because the always-empty tool blocks no longer carry the per-tool "X is not available" guidance for the *missing* tools.
@@ -57,17 +76,6 @@
 - Suggested follow-up: a one-line note in §14.P clarifying the
   rename to keep doc and code in lockstep. No code change required.
 
-### [MEDIUM] Pre-existing dependency-tree security & deprecation backlog
-- Surfaced by `dependency-validator` during plan-005 Phase 8. **None introduced by config-profiles** — all are pre-existing and could not be auto-fixed because remediation requires major-version migrations.
-- Full report: `docs/reference/dependency-validation-config-profiles.md`.
-- Items:
-  - **vitest 2 → 4 migration** — closes 1 deprecation (`glob`) and several vite/esbuild CVEs in the test toolchain.
-  - **`@langchain/anthropic` upgrade** — blocked on upstream shipping `@anthropic-ai/sdk >= 0.91.1`.
-  - **uuid override decision** for the langgraph dependency chain.
-  - Two additional minor advisories detailed in the report.
-- Suggested approach: dedicated upgrade tasks per item; do not bundle with feature work.
-- **Update (plan-007 validation, 2026-06-13):** Re-confirmed the LLM I/O inspector added NO dependencies (report: `docs/reference/dependency-validation-llm-io-inspector.md`). Changes since plan-005: (a) the `vitest` advisory severity escalated to **CRITICAL (CVSS 9.8)** and a new `langsmith` high advisory (CVSS 7.1) was published upstream — both pre-existing in the tree, not introduced here; (b) `@langchain/anthropic@1.4.1` and `@langchain/langgraph@1.4.2` resolved their advisories upstream WITHIN the existing caret ranges, so a plain `npm update` would close two CVEs with no manifest edit. NOT applied here — deliberately not bundled with feature work, and `@langchain/langgraph` powers the new `streamEvents` capture hooks, so that bump must be validated on its own.
-
 ### [MEDIUM] plan-005 E10 load-time toolArgs schema validation — defer to v2
 - **E10**: `validateToolArgsAgainstTool(name, args, schema?)` was originally named in plan-005 §6 / project-design §12.D so profile load could Zod-validate `toolArgs` entries against each tool's input schema (`.partial()`) and surface a hard `ConfigurationError` at load time for malformed presets against known schemas.
 - v1 disposition: NOT implemented. The shallow merge already lets runtime input override preset keys, so a bad preset value surfaces as a Zod parse error at the moment the LLM first calls the tool. This is acceptable for v1; the comment at the top of `src/agent/tools/profile-tool-args.ts` documents the disposition.
@@ -95,15 +103,6 @@
   (`\x1b[J`). Or: reset the editor's `prevTermRows` cache to `state.lines.length` on resize.
 - Workaround for users: avoid resizing the terminal while editing; press Enter or Ctrl+C to
   resync.
-
-### [LOW] Suggest hardening the asset-copy postbuild step
-- `scripts/copy-vendored-assets.mjs` (added during Phase 10 verification) walks `src/`
-  and copies `.md` / `.txt` / `.json` files into `dist/` so the vendored
-  agent-tools `*.prompt.md` files are present at runtime. The implementation works
-  but is broad (it will copy ANY `.md` placed under `src/`, not just vendored
-  prompts). A future iteration could narrow the include set to
-  `src/agent/tools/agent-tools-vendored/**/*.prompt.md` plus any explicitly
-  whitelisted assets.
 
 ### [HIGH] Expiry warning for Azure API keys not yet implemented
 - `config.json` accepts `_azure_openai_key_expires` and similar fields per the configuration guide,
@@ -165,6 +164,50 @@
   The full output is already available in `~/.tool-agents/cli-agent/logs/`.
 
 ## Completed
+
+### Done — Release/CI posture hardened before npm publish
+- **Symptom**: `package.json` had no `lint` script, and `prepublishOnly` only ran `clean`, `build`, and `test`; it did not run static validation, dependency audit, or package-content validation. A dry-run pack also showed stale compiled spec/integration artifacts could remain in `dist/` and be published when `dist/` was not cleaned first.
+- **Fix**: Added `lint`, `release:audit`, and `release:package` npm scripts; changed `prepublishOnly` to run lint, typecheck, clean release build, tests, audit, and package validation in sequence; added `tsconfig.build.json` so release builds exclude specs/tests/source JSON; made `build` clean `dist/`; added `scripts/check-package-content.mjs` to validate the actual `npm pack --dry-run --json` payload; narrowed `scripts/copy-vendored-assets.mjs` to copy only vendored `*.prompt.md` runtime assets.
+- **Validation**: `npm run lint`, `npm run typecheck`, `npm test` (89 files / 1126 tests), `npm run build`, `npm run release:audit`, `npm run release:package`, and `npm run prepublishOnly` pass.
+- **Reference**: `docs/reference/refined-request-release-ci-hardening.md`, `docs/design/plan-014-release-ci-hardening.md`.
+
+### Done — Asset-copy postbuild step narrowed to runtime prompt assets
+- **Symptom**: `scripts/copy-vendored-assets.mjs` copied every `.md`, `.txt`, and `.json` under `src/`, which could publish unrelated future assets.
+- **Fix**: The script now walks only `src/agent/tools/agent-tools-vendored/upstream/src` and copies files ending in `.prompt.md` to the matching `dist/` location.
+- **Validation**: `npm run build` copies exactly 6 vendored prompt assets, and `npm run release:package` validates that only the expected prompt assets appear in the npm payload.
+
+### Done — Project design and requirements described pre-plan-011/012 file tools and old capability invalidation
+- **Symptom**: `docs/design/project-design.md` and `docs/design/project-functions.md` still described `file_read`, `file_list`, and mutating `file_*` tools as current built-ins, and described normal-startup capability invalidation by binary path, mtime, and version hash. Current implementation uses `agt_file_*` in the agent-tools pack and a doc-exists shortcut in `src/agent/capabilities/discover.ts`.
+- **Fix**: Updated the current architecture, tool catalog, capability discovery, tool-loading, and system-prompt requirement sections so the built-in toolkit is `bash_*` plus `tool_help`, file/web operations are `agt_*`, `--no-builtin-tools` does not disable file operations, and explicit refresh is the cache refresh/invalidation boundary. Also corrected `docs/guides/enabling-write-capabilities.md` where it still named old `file_write`/`file_edit`/`file_append` tools.
+- **Validation**: Targeted documentation searches now show remaining old `file_*` and path/mtime/version references as historical, migration-related, UI-diagnostic, or explicitly contrasted with the current `agt_file_*` / doc-exists contracts.
+- **Reference**: `docs/reference/refined-request-docs-sync-file-tools-capability-invalidation.md`, `docs/reference/architecture-review-2026-06-15.md`.
+
+### Done — Runtime assembly duplicated across runner paths
+- **Symptom**: `runOneShotAgent`, `streamOneShotAgent`, `buildTuiAgentRuntime`, and `runInteractiveAgent` repeated the same runtime setup sequence in `src/agent/run.ts`: logger/session creation, LLM construction, tool catalog assembly, capability discovery, capability/system prompt composition, session/profile logging, and graph construction.
+- **Risk**: future changes to prompt composition, profile logging, tool catalog metadata, capability discovery, or I/O capture wiring could land in one path and drift in the others.
+- **Fix**: added `assembleAgentRuntime(cfg, opts)` in `src/agent/run.ts` as the shared setup path. The public runners now call it and keep only lifecycle-specific behavior locally. Legacy interactive now also closes the capture channel with the logger and passes it into per-turn `runOneShot`, matching the centralized runtime.
+- **Validation**: `npx vitest run src/agent/run.spec.ts` passes (3/3), and `npm run typecheck` passes.
+- **Reference**: `docs/reference/refined-request-runtime-assembly-dedup.md`, `docs/reference/codebase-scan-runtime-assembly-dedup.md`, `docs/design/plan-013-runtime-assembly-dedup.md`.
+
+### Done — Web search backend ignored layered `.env` values for backend credentials
+- **Symptom**: Web backend credential and request-budget settings placed in `~/.tool-agents/cli-agent/.env` or local `.env` were read into the loader's layered snapshot but ignored by the backend and `agt_web_*` wrappers, which read `process.env` directly. This produced false `E_SEARCH_API_KEY_MISSING` errors unless credentials were exported in the shell.
+- **Fix**: Added a resolved `AgentConfig.webSearch` snapshot carrying backend id, Tavily/SerpAPI/Brave/custom HTTP credentials, custom URL, and numeric `maxRequests`; updated `src/agent/tools/web/backends/registry.ts`, `src/agent/tools/agent-tools/group-builder.ts`, `agt-web-search.ts`, and `agt-web-fetch.ts` to consume that snapshot only.
+- **Validation**: Added focused tests for layered `.env` resolution, invalid `WEB_SEARCH_MAX_REQUESTS`, backend credential use without `process.env`, and request-budget construction from `cfg.webSearch.maxRequests`.
+- **Reference**: `docs/reference/refined-request-web-search-layered-config.md`.
+
+### Done — Release-blocking dependency vulnerabilities remediated
+- **Symptom**: `npm audit --audit-level=high` blocked release safety with 14 vulnerabilities: 9 moderate, 3 high, and 2 critical. The previously tracked backlog included the Vitest/Vite/esbuild toolchain, `tsx`/esbuild, LangChain Anthropic SDK, LangGraph/uuid, and `langsmith` advisory chains.
+- **Fix**:
+  - Upgraded `vitest` and `@vitest/coverage-v8` to `^4.1.8`.
+  - Upgraded `tsx` to `^4.22.4`.
+  - Upgraded `@langchain/anthropic` to `^1.4.1`.
+  - Upgraded `@langchain/core` to `^1.1.49`.
+  - Upgraded `@langchain/langgraph` to `^1.4.2`.
+  - Updated transitive `langsmith` to `0.7.7` within the existing `@langchain/core` dependency range.
+  - Regenerated `package-lock.json`.
+- **Validation**: `npm audit --audit-level=high` and full `npm audit` now report zero vulnerabilities. `npm run typecheck`, `npm test` (87 files / 1117 tests), and `npm run build` pass.
+- **Report**: `docs/reference/dependency-validation-2026-06-15.md`.
+- **Dependency vetting log**: Vetted on 2026-06-15; selected current clean releases for the fast-moving/security-sensitive packages `vitest@4.1.8`, `@vitest/coverage-v8@4.1.8`, and `tsx@4.22.4`; no override required.
 
 ### Done — Toolless session fabricated tool output (hallucinated a directory listing with no tools loaded)
 - **Symptom**: Running `cli-agent --no-builtin-tools --no-composites --no-agent-tools` (every tool group disabled — the documented "plain conversational LLM" state) and asking "list files in current folder" produced a fabricated `ls -la`-style directory listing (root-owned `main.py` / `README.md` / `data/` / `scripts/`). `/inspect show` confirmed the response carried **zero tool calls** — pure hallucination presented as real filesystem output. The agent also claimed *"I can run commands and use CLI tools on your machine"* despite having none.

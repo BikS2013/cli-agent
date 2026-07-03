@@ -36,7 +36,7 @@ import type { OverlayRegistry } from '../tool-prompt-overlay.js';
 
 function makeCfg(overlays?: OverlayRegistry): AgentConfig {
   return {
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     toolPromptOverlays: overlays,
   } as unknown as AgentConfig;
 }

@@ -50,7 +50,7 @@ const cfg: AgentConfig = {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   capabilities: { depth: 2, maxBytesPerTool: 1000, timeoutMs: 1000, totalTimeoutMs: 1000, subcommandExtractor: '' } as any,
   bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH'], timeoutMs: 1000, maxOutputBytes: 1000 },
-  webSearch: { backend: 'tavily' },
+  webSearch: { backend: 'tavily', maxRequests: 50 },
   fileEdit: { root: '/tmp', allowPaths: [] },
   perToolBudgetBytes: 1000,
   baseUrl: undefined,

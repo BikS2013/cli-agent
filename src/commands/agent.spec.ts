@@ -32,7 +32,7 @@ vi.mock('../config/agent-config.js', async (importOriginal) => {
         tools: [],
         capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, subcommandExtractor: '' },
         bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH'], timeoutMs: 30000, maxOutputBytes: 1048576 },
-        webSearch: { backend: 'tavily' },
+        webSearch: { backend: 'tavily', maxRequests: 50 },
         fileEdit: { root: '/tmp', allowPaths: [] },
         perToolBudgetBytes: 8192,
         baseUrl: undefined,

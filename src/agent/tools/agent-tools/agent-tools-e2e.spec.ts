@@ -96,7 +96,7 @@ function makeCfg(overrides: {
       timeoutMs: 30_000,
       maxOutputBytes: 1_048_576,
     },
-    webSearch: { backend: 'none' },
+    webSearch: { backend: 'none', maxRequests: 50 },
     fileEdit: {
       root: fileEditRoot,
       allowPaths: [],

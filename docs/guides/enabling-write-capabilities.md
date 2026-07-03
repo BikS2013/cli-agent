@@ -45,10 +45,11 @@ launches.
 `cli-agent` exposes **two families of writing capability**, each with its
 own switch:
 
-1. **Native file tools** — built-in tools called `file_write`, `file_edit`,
-   `file_append`, `agt_multiedit`, and `agt_patch`. They write directly to
-   the file system. The agent uses these when you ask it to "edit X" or
-   "create a file Y".
+1. **Native file tools** — agent-tools-pack tools called `agt_file_write`,
+   `agt_file_edit`, `agt_file_append`, plus `agt_multiedit` and `agt_patch`.
+   They write directly to the file system. The agent uses these when you ask
+   it to "edit X" or "create a file Y". Read-only file access is handled by
+   `agt_file_read` and `agt_file_list`.
 2. **Wrapped external CLI tools** — anything you attach with `--tool foo`
    (e.g. `git`, `kubectl`, `aws`, your custom `telegram-cli`). The agent
    calls these through `bash_run`. Many of them have write-y subcommands
@@ -59,7 +60,7 @@ switch:
 
 | Capability you want | What you turn on | Why |
 |---|---|---|
-| Native file writes (`file_write`, `file_edit`, `agt_multiedit`, etc.) | `--allow-mutations` | This is the global "I'm OK with the agent modifying things" switch. |
+| Native file writes (`agt_file_write`, `agt_file_edit`, `agt_multiedit`, etc.) | `--allow-mutations` | This is the global "I'm OK with the agent modifying things" switch. |
 | Wrapped CLI writes (`git commit`, etc.) | `--allow-mutations` PLUS the binary on the bash allowlist | The mutation switch tells the agent it may issue write subcommands. The allowlist tells `bash_run` which binaries it may execute at all. Both are needed. |
 | Wrapped CLI writes that need a token | All of the above PLUS `--bash-pass-secret <ENV_VAR>` | By default, environment variables that look like credentials are scrubbed before the binary runs. You re-allow specific ones explicitly. |
 
@@ -74,7 +75,7 @@ agent still cannot run any external binary).
 This is the master switch for "the agent may make changes".
 
 **With `--allow-mutations` ON:**
-- The native write tools (`file_write`, `file_edit`, `file_append`,
+- The native write tools (`agt_file_write`, `agt_file_edit`, `agt_file_append`,
   `agt_multiedit`, `agt_patch`) are **registered** and visible to the
   LLM. It will use them when appropriate.
 - `bash_run`'s description tells the LLM it is in **MUTATING** mode,
@@ -191,7 +192,7 @@ Decoupling them gives you flexible combinations:
   commands of allow-listed binaries (`git status`, `kubectl get`,
   `aws s3 ls`).
 - Mutation **on**, allowlist **empty** → agent has the native file
-  tools (`file_write` etc.) but no `bash_run` at all. Useful when
+  tools (`agt_file_write` etc.) but no `bash_run` at all. Useful when
   you only want code edits, no shell invocations.
 - Mutation **on**, allowlist **populated with `argv-regex:` entries**
   → fully unlocked but each binary is constrained to specific
@@ -248,8 +249,8 @@ cli-agent --allow-mutations \
           "rename FooBar to FooBaz across src/ and tests/"
 ```
 
-- `--allow-mutations` registers `file_write` / `file_edit` /
-  `file_append` / `agt_multiedit` / `agt_patch`.
+- `--allow-mutations` registers `agt_file_write` / `agt_file_edit` /
+  `agt_file_append` / `agt_multiedit` / `agt_patch`.
 - No `--bash-allow` is needed — you're not running any binary.
 - All writes are confined to the configured file root. By default,
   that's the directory you launched `cli-agent` from. Set
@@ -344,7 +345,7 @@ itself is informative:
 
 ```
 /allow-mutations            ← prints current state
-/tools list                 ← shows registered tools (file_write, etc., are visible
+/tools list                 ← shows registered tools (agt_file_write, etc., are visible
                               only when mutations are on)
 ```
 

@@ -103,7 +103,7 @@ function makeCfg(
     bashAllow: [],
     bashPassSecrets: [],
     allowMutations: overrides.allowMutations ?? false,
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     webSearchBackend: 'tavily',
     agentTools: {
       enabled: overrides.agentToolsEnabled ?? false,

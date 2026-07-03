@@ -15,6 +15,7 @@ import {
   agentCompositeCapabilitiesDir,
   agentCompositeDistillDir,
   agentCompositesDir,
+  agentDotEnvPath,
   agentToolAgentsDir,
   bootstrapAgentDir,
 } from './agent-config.js';
@@ -159,6 +160,51 @@ describe('loadAgentConfig', () => {
       { shellEnv: { AGENT_PROVIDER: 'openai' }, cwd: '/tmp' },
     );
     expect(cfg.provider).toBe('openai');
+  });
+
+  it('resolves web backend credentials and request budget from the layered agent .env snapshot', async () => {
+    const files = await getTestFiles();
+    const envPath = agentDotEnvPath();
+    files.set(envPath, Buffer.from([
+      'WEB_SEARCH_BACKEND=brave',
+      'BRAVE_API_KEY=agent-env-brave-key',
+      'TAVILY_API_KEY=agent-env-tavily-key',
+      'SERPAPI_API_KEY=agent-env-serp-key',
+      'WEB_SEARCH_URL=https://search.example/api',
+      'WEB_SEARCH_API_KEY=agent-env-custom-key',
+      'WEB_SEARCH_MAX_REQUESTS=7',
+      '',
+    ].join('\n'), 'utf8'));
+    try {
+      const cfg = await loadAgentConfig(
+        { provider: 'openai' },
+        { shellEnv: {}, cwd: '/tmp' },
+      );
+      expect(cfg.webSearch).toMatchObject({
+        backend: 'brave',
+        braveApiKey: 'agent-env-brave-key',
+        tavilyApiKey: 'agent-env-tavily-key',
+        serpApiKey: 'agent-env-serp-key',
+        customHttpUrl: 'https://search.example/api',
+        customHttpApiKey: 'agent-env-custom-key',
+        maxRequests: 7,
+      });
+    } finally {
+      files.delete(envPath);
+    }
+  });
+
+  it('rejects an invalid WEB_SEARCH_MAX_REQUESTS value instead of silently weakening budget enforcement', async () => {
+    const files = await getTestFiles();
+    const envPath = agentDotEnvPath();
+    files.set(envPath, Buffer.from('WEB_SEARCH_MAX_REQUESTS=not-a-number\n', 'utf8'));
+    try {
+      await expect(
+        loadAgentConfig({ provider: 'openai' }, { shellEnv: {}, cwd: '/tmp' }),
+      ).rejects.toMatchObject({ code: 'E_CONFIG_MISSING' });
+    } finally {
+      files.delete(envPath);
+    }
   });
 
   it('CLI flag provider overrides shell env', async () => {

@@ -85,6 +85,17 @@ export interface WebSearchConfig {
   readonly backend?: string;
 }
 
+/** Resolved web-search runtime snapshot. Web tools read only from this. */
+export interface ResolvedWebSearchConfig {
+  readonly backend: string;
+  readonly tavilyApiKey?: string;
+  readonly serpApiKey?: string;
+  readonly braveApiKey?: string;
+  readonly customHttpUrl?: string;
+  readonly customHttpApiKey?: string;
+  readonly maxRequests: number;
+}
+
 export interface FileEditConfig {
   readonly root?: string;
   readonly allowPaths?: string[];
@@ -220,7 +231,7 @@ export interface AgentConfig {
   readonly tools: ReadonlyArray<string>;
   readonly capabilities: Required<CapabilitiesConfig>;
   readonly bash: Required<BashConfig>;
-  readonly webSearch: { backend: string };
+  readonly webSearch: ResolvedWebSearchConfig;
   readonly fileEdit: { root: string; allowPaths: ReadonlyArray<string> };
   readonly perToolBudgetBytes: number;
   readonly baseUrl: string | undefined;
@@ -1124,6 +1135,19 @@ export async function loadAgentConfig(
     activeProfileData?.cliParams?.webSearchBackend ??
     webSearchConfig.backend ??
     'tavily';
+  const webSearch: ResolvedWebSearchConfig = {
+    backend: webSearchBackend,
+    tavilyApiKey: layered['TAVILY_API_KEY'],
+    serpApiKey: layered['SERPAPI_API_KEY'],
+    braveApiKey: layered['BRAVE_API_KEY'],
+    customHttpUrl: layered['WEB_SEARCH_URL'],
+    customHttpApiKey: layered['WEB_SEARCH_API_KEY'],
+    maxRequests: parseNonNegativeIntegerEnvVar(
+      layered['WEB_SEARCH_MAX_REQUESTS'],
+      'WEB_SEARCH_MAX_REQUESTS',
+      50,
+    ),
+  };
 
   // File edit config
   const fileEditConfig = configFile?.fileEdit ?? {};
@@ -1206,7 +1230,7 @@ export async function loadAgentConfig(
     tools,
     capabilities,
     bash,
-    webSearch: { backend: webSearchBackend },
+    webSearch,
     fileEdit: {
       root: fileEditRoot,
       allowPaths: fileEditConfig.allowPaths ?? [],
@@ -1277,6 +1301,23 @@ function parseBooleanEnvVar(raw: string, name: string): boolean {
   throw new ConfigurationError(name, [
     `env:${name} must be one of true|false|1|0|yes|no|on|off (got '${raw}')`,
   ]);
+}
+
+function parseNonNegativeIntegerEnvVar(raw: string | undefined, name: string, defaultValue: number): number {
+  if (raw === undefined) return defaultValue;
+  const v = raw.trim();
+  if (!/^\d+$/.test(v)) {
+    throw new ConfigurationError(name, [
+      `env:${name} must be a non-negative integer (got '${raw}')`,
+    ]);
+  }
+  const parsed = Number(v);
+  if (!Number.isSafeInteger(parsed)) {
+    throw new ConfigurationError(name, [
+      `env:${name} must be a safe non-negative integer (got '${raw}')`,
+    ]);
+  }
+  return parsed;
 }
 
 

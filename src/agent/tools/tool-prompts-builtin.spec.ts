@@ -40,7 +40,7 @@ function makeMaximalCfg(): AgentConfig {
     bashAllow: ['git'],
     bashPassSecrets: [],
     allowMutations: true,
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     webSearchBackend: 'tavily',
     agentTools: {
       enabled: true,

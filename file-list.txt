@@ -1,0 +1,19 @@
+.git
+.gitignore
+.serena
+AGENTS.md
+CLAUDE.md
+Issues - Pending Items.md
+LICENSE
+README.md
+dist
+docs
+node_modules
+package-lock.json
+package.json
+scripts
+src
+test_scripts
+tsconfig.build.json
+tsconfig.json
+vitest.config.ts

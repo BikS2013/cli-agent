@@ -10,14 +10,62 @@ import { createLLM } from './providers/registry.js';
 import { buildToolCatalog } from './tools/registry.js';
 import { buildSystemPromptForCfg } from './system-prompt.js';
 import { buildAgentGraph, runOneShot, streamOneShot, type AgentStreamEvent, type AgentGraph } from './graph.js';
-import { createLogger, CLI_VERSION } from './logging.js';
+import { createLogger, CLI_VERSION, type Logger } from './logging.js';
 import { createIoCapture } from './io-capture.js';
 import type { IoCapture } from './io-capture.js';
 import { discoverAllTools, defaultDiscoveryReporter } from './capabilities/discover.js';
 import { composeCapabilitiesSystemPrompt } from './capabilities/compose-system-prompt.js';
 import { redactString } from '../util/redact.js';
 
-export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise<string> {
+export interface AgentRuntime {
+  agentGraph: AgentGraph;
+  logger: Logger;
+  sessionId: string;
+  threadId: string;
+  /**
+   * Parallel LLM-I/O capture channel (plan-007). Callers that finish a
+   * session own closing it alongside the logger. Long-lived callers such as
+   * the TUI hand ownership to their controller.
+   */
+  ioCapture: IoCapture;
+  tools: ReadonlyArray<{ name: string }>;
+}
+
+export interface AssembleAgentRuntimeOptions {
+  /** Initial thread id to record in session_start and use for first graph calls. */
+  threadId?: string;
+}
+
+function logSessionStart(logger: Logger, cfg: AgentConfig, sessionId: string, threadId: string): void {
+  logger.log({
+    kind: 'session_start',
+    ts: new Date().toISOString(),
+    sessionId,
+    threadId,
+    provider: cfg.provider,
+    model: cfg.model,
+    allowMutations: cfg.allowMutations,
+    cliVersion: CLI_VERSION,
+  });
+}
+
+function logActiveProfile(logger: Logger, cfg: AgentConfig, sessionId: string): void {
+  if (!cfg.activeProfile) return;
+  logger.log({
+    kind: 'profile_active',
+    ts: new Date().toISOString(),
+    sessionId,
+    profileName: cfg.activeProfile.name,
+    profilePath: cfg.activeProfile.path,
+    schemaVersion: cfg.activeProfile.schemaVersion,
+    digest: cfg.activeProfile.digest,
+  });
+}
+
+export async function assembleAgentRuntime(
+  cfg: AgentConfig,
+  opts: AssembleAgentRuntimeOptions = {},
+): Promise<AgentRuntime> {
   const loggingEnabled = !isLoggingDisabledByEnv();
   const logger = createLogger({
     toolDir: agentToolAgentsDir(),
@@ -25,7 +73,7 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
   });
 
   const sessionId = logger.currentSessionId;
-  const threadId = randomUUID();
+  const threadId = opts.threadId ?? randomUUID();
 
   const llm = createLLM(cfg);
   const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
@@ -50,28 +98,17 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
 
   const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
 
-  logger.log({
-    kind: 'session_start',
-    ts: new Date().toISOString(),
-    sessionId,
-    threadId,
-    provider: cfg.provider,
-    model: cfg.model,
-    allowMutations: cfg.allowMutations,
-    cliVersion: CLI_VERSION,
-  });
+  logSessionStart(logger, cfg, sessionId, threadId);
+  logActiveProfile(logger, cfg, sessionId);
 
-  if (cfg.activeProfile) {
-    logger.log({
-      kind: 'profile_active',
-      ts: new Date().toISOString(),
-      sessionId,
-      profileName: cfg.activeProfile.name,
-      profilePath: cfg.activeProfile.path,
-      schemaVersion: cfg.activeProfile.schemaVersion,
-      digest: cfg.activeProfile.digest,
-    });
-  }
+  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
+
+  return { agentGraph, logger, sessionId, threadId, ioCapture, tools };
+}
+
+export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise<string> {
+  const runtime = await assembleAgentRuntime(cfg);
+  const { agentGraph, logger, sessionId, threadId, ioCapture, tools } = runtime;
 
   logger.log({
     kind: 'user_prompt',
@@ -86,8 +123,6 @@ export async function runOneShotAgent(cfg: AgentConfig, prompt: string): Promise
       redactString(`[cli-agent] provider=${cfg.provider} model=${cfg.model} tools=${tools.length} thread=${threadId}\n`),
     );
   }
-
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 
   let answer: string;
   let terminatedByError = false;
@@ -133,54 +168,8 @@ export async function* streamOneShotAgent(
   prompt: string,
   abortSignal?: AbortSignal,
 ): AsyncGenerator<AgentStreamEvent, string, void> {
-  const loggingEnabled = !isLoggingDisabledByEnv();
-  const logger = createLogger({
-    toolDir: agentToolAgentsDir(),
-    enabled: loggingEnabled,
-  });
-
-  const sessionId = logger.currentSessionId;
-  const threadId = randomUUID();
-
-  const llm = createLLM(cfg);
-  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
-
-  // Parallel LLM-I/O capture channel (plan-007); `NullIoCapture` when off.
-  const ioCapture = createIoCapture(cfg, sessionId, tools);
-
-  if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
-  }
-
-  const capSection = await composeCapabilitiesSystemPrompt(
-    cfg.capabilitiesDir,
-    cfg.tools,
-    cfg.capabilities.maxBytesPerTool,
-  );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
-
-  logger.log({
-    kind: 'session_start',
-    ts: new Date().toISOString(),
-    sessionId,
-    threadId,
-    provider: cfg.provider,
-    model: cfg.model,
-    allowMutations: cfg.allowMutations,
-    cliVersion: CLI_VERSION,
-  });
-
-  if (cfg.activeProfile) {
-    logger.log({
-      kind: 'profile_active',
-      ts: new Date().toISOString(),
-      sessionId,
-      profileName: cfg.activeProfile.name,
-      profilePath: cfg.activeProfile.path,
-      schemaVersion: cfg.activeProfile.schemaVersion,
-      digest: cfg.activeProfile.digest,
-    });
-  }
+  const runtime = await assembleAgentRuntime(cfg);
+  const { agentGraph, logger, sessionId, threadId, ioCapture, tools } = runtime;
 
   logger.log({
     kind: 'user_prompt',
@@ -195,8 +184,6 @@ export async function* streamOneShotAgent(
       redactString(`[cli-agent] streaming provider=${cfg.provider} model=${cfg.model} tools=${tools.length} thread=${threadId}\n`),
     );
   }
-
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
 
   let assembled = '';
   let terminatedByError = false;
@@ -263,106 +250,16 @@ export interface TuiAgentRuntime {
 }
 
 export async function buildTuiAgentRuntime(cfg: AgentConfig): Promise<TuiAgentRuntime> {
-  const loggingEnabled = !isLoggingDisabledByEnv();
-  const logger = createLogger({
-    toolDir: agentToolAgentsDir(),
-    enabled: loggingEnabled,
-  });
-  const sessionId = logger.currentSessionId;
-
-  const llm = createLLM(cfg);
-  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
-
-  // Parallel LLM-I/O capture channel (plan-007); `NullIoCapture` when off. The
-  // TUI controller owns the close on session end (returned as a 4th member).
-  const ioCapture = createIoCapture(cfg, sessionId, tools);
-
-  if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
-  }
-
-  const capSection = await composeCapabilitiesSystemPrompt(
-    cfg.capabilitiesDir,
-    cfg.tools,
-    cfg.capabilities.maxBytesPerTool,
-  );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
-
-  logger.log({
-    kind: 'session_start',
-    ts: new Date().toISOString(),
-    sessionId,
+  const { agentGraph, logger, sessionId, ioCapture } = await assembleAgentRuntime(cfg, {
     threadId: 'tui-bootstrap',
-    provider: cfg.provider,
-    model: cfg.model,
-    allowMutations: cfg.allowMutations,
-    cliVersion: CLI_VERSION,
   });
-
-  if (cfg.activeProfile) {
-    logger.log({
-      kind: 'profile_active',
-      ts: new Date().toISOString(),
-      sessionId,
-      profileName: cfg.activeProfile.name,
-      profilePath: cfg.activeProfile.path,
-      schemaVersion: cfg.activeProfile.schemaVersion,
-      digest: cfg.activeProfile.digest,
-    });
-  }
-
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
   return { agentGraph, logger, sessionId, ioCapture };
 }
 
 export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
-  const loggingEnabled = !isLoggingDisabledByEnv();
-  const logger = createLogger({
-    toolDir: agentToolAgentsDir(),
-    enabled: loggingEnabled,
-  });
-
-  const sessionId = logger.currentSessionId;
-  let threadId = randomUUID();
-
-  const llm = createLLM(cfg);
-  const { tools, agentToolsMeta } = buildToolCatalog(cfg, logger);
-
-  if (cfg.tools.length > 0) {
-    await discoverAllTools(cfg, llm, logger, false, defaultDiscoveryReporter());
-  }
-
-  const capSection = await composeCapabilitiesSystemPrompt(
-    cfg.capabilitiesDir,
-    cfg.tools,
-    cfg.capabilities.maxBytesPerTool,
-  );
-  const systemPrompt = await buildSystemPromptForCfg(cfg, capSection, agentToolsMeta, tools);
-
-  logger.log({
-    kind: 'session_start',
-    ts: new Date().toISOString(),
-    sessionId,
-    threadId,
-    provider: cfg.provider,
-    model: cfg.model,
-    allowMutations: cfg.allowMutations,
-    cliVersion: CLI_VERSION,
-  });
-
-  if (cfg.activeProfile) {
-    logger.log({
-      kind: 'profile_active',
-      ts: new Date().toISOString(),
-      sessionId,
-      profileName: cfg.activeProfile.name,
-      profilePath: cfg.activeProfile.path,
-      schemaVersion: cfg.activeProfile.schemaVersion,
-      digest: cfg.activeProfile.digest,
-    });
-  }
-
-  const agentGraph = buildAgentGraph(llm, tools, systemPrompt, cfg.maxSteps, cfg);
+  const runtime = await assembleAgentRuntime(cfg);
+  const { agentGraph, logger, sessionId, ioCapture } = runtime;
+  let { threadId } = runtime;
 
   process.stdout.write(`cli-agent interactive session (provider: ${cfg.provider}, model: ${cfg.model})\n`);
   process.stdout.write('Type your message, /exit to quit, /reset to start a new conversation.\n\n');
@@ -384,7 +281,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
       sessionId,
       reason: 'sigint',
     });
-    void logger.close().then(() => {
+    void Promise.all([logger.close(), ioCapture.close()]).then(() => {
       process.exit(130);
     });
   });
@@ -398,6 +295,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
       rl.close();
       logger.log({ kind: 'session_end', ts: new Date().toISOString(), sessionId, reason: 'quit' });
       await logger.close();
+      await ioCapture.close();
       process.exit(0);
     }
 
@@ -416,7 +314,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     });
 
     try {
-      const answer = await runOneShot(agentGraph, input, threadId, cfg.maxSteps);
+      const answer = await runOneShot(agentGraph, input, threadId, cfg.maxSteps, { ioCapture, sessionId });
       process.stdout.write('\n' + answer + '\n\n');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -435,6 +333,7 @@ export async function runInteractiveAgent(cfg: AgentConfig): Promise<void> {
     if (!sigintReceived) {
       logger.log({ kind: 'session_end', ts: new Date().toISOString(), sessionId, reason: 'quit' });
       await logger.close();
+      await ioCapture.close();
     }
   });
 }

@@ -155,11 +155,9 @@ export function buildAgentToolsGroup(
   // overlay is registered).
   const overlays = cfg.toolPromptOverlays;
 
-  // Per-session web request budget, shared by agt_web_search + agt_web_fetch
-  // (plan-011). Mirrors the budget the former built-in web tools owned in
-  // registry.ts (WEB_SEARCH_MAX_REQUESTS, default 50). Constructed ONCE so a
-  // single decrementing counter spans both tools for the whole session.
-  const requestBudget = { remaining: parseInt(process.env['WEB_SEARCH_MAX_REQUESTS'] ?? '50', 10) };
+  // Per-session web request budget, shared by agt_web_search + agt_web_fetch.
+  // Resolved by loadAgentConfig so agent-dir/local .env values are honored.
+  const requestBudget = { remaining: cfg.webSearch.maxRequests };
 
   if (flags.glob) {
     tools.push(buildAgtGlobTool({ permissions: policy, overlays }));

@@ -28,7 +28,7 @@ function makeBaseConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
     tools: [],
     capabilities: { depth: 2, maxBytesPerTool: 10240, timeoutMs: 5000, totalTimeoutMs: 60000, subcommandExtractor: '', skipLlmBelowBytes: 4096 },
     bash: { allow: [], allowedRoots: ['/tmp'], passEnv: ['PATH', 'HOME', 'LANG', 'TERM'], timeoutMs: 30000, maxOutputBytes: 1048576 },
-    webSearch: { backend: 'tavily' },
+    webSearch: { backend: 'tavily', maxRequests: 50 },
     fileEdit: { root: '/tmp', allowPaths: [] },
     agentTools: { enabled: true, tools: { glob: true, grep: true, multiedit: true, patch: true, todoRead: false, todoWrite: false, webSearch: true, webFetch: true, fileRead: true, fileList: true, fileWrite: true, fileEdit: true, fileAppend: true } },
     // plan-008 tool-loading group toggles — required on AgentConfig; both

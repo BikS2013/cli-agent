@@ -23,17 +23,24 @@ Additional entries can be added via `--bash-allow`, `--bash-allow-file`, and `BA
 ## FR-AGT-005: Capability Discovery
 
 At startup, for each declared tool, the system must:
-1. Check PATH for the binary.
-2. Validate the cache (binaryPath + mtime + versionHash).
-3. On cache miss: invoke `--help`, `-h`, and `help <sub>` fallbacks.
-4. Use the active LLM to extract subcommand names from the help text.
-5. Drill into each subcommand's help (if `capabilities.depth >= 2`).
-6. Compose and cache a Markdown capability document.
+1. Check whether `~/.tool-agents/cli-agent/capabilities/<tool>.md` already exists
+   as a schema-supported capability document.
+2. If it exists and refresh is not forced, treat the document as cached and skip
+   binary probing, help probing, and LLM rediscovery.
+3. If it is missing, unsupported, or refresh is forced: check PATH for the binary,
+   invoke `--help`, `-h`, and `help <sub>` fallbacks, use the active LLM to extract
+   subcommand names from the help text unless the normal-startup small-help fast path
+   applies, drill into subcommand help when `capabilities.depth >= 2`, then compose
+   and cache a Markdown capability document.
 
-## FR-AGT-006: Capability Cache Invalidation
+## FR-AGT-006: Capability Cache Refresh
 
-The capability cache must be invalidated when any of: binaryPath, binaryMtimeMs, or
-versionHash changes. `--refresh-capabilities` must bypass the cache entirely.
+Normal startup must trust an existing schema-supported capability document until
+explicit refresh is requested; it must not require automatic invalidation on
+`binaryPath`, `binaryMtimeMs`, or `versionHash` changes before using that document.
+`--refresh-capabilities`, `cli-agent refresh-capabilities`, and the TUI
+`/refresh-capabilities` command must bypass the cached-document shortcut and perform
+fresh binary probing plus rediscovery.
 
 ## FR-AGT-007: USER-NOTES Preservation
 
@@ -213,9 +220,11 @@ tool catalog before the next user prompt.
 
 ### FR-TUI-012 — Capability freshness UI
 `/capabilities` lists every active wrapped tool with a freshness column
-(✓ fresh / ⚠ stale / ✗ missing) computed from the same `isCacheValid()` the
-agent uses internally. `/refresh-capabilities` is the TUI twin of the existing
-CLI subcommand.
+(✓ fresh / ⚠ stale / ✗ missing) computed diagnostically from
+`getBinaryInfo()` + `isCacheValid()`. This UI can warn that the cached document
+differs from the current binary, but normal startup still uses the doc-exists
+shortcut until the user explicitly refreshes. `/refresh-capabilities` is the TUI
+twin of the existing CLI subcommand and performs full rediscovery.
 
 ### FR-TUI-013 — Cross-platform clipboard
 `/copy` dispatches to `pbcopy` / `xclip` (with `xsel` fallback) / `clip.exe`
@@ -365,7 +374,11 @@ and re-homed in the agent-tools pack as the first-party tools `agt_web_search`
 REUSE the existing cli-agent web backend (`src/agent/tools/web/backends/`); the
 backend is not moved or duplicated. Both are read-only (no `--allow-mutations`
 gate) and default ON, and they share a single per-session request budget
-(`WEB_SEARCH_MAX_REQUESTS`, default 50). Governance:
+(`WEB_SEARCH_MAX_REQUESTS`, default 50). The backend, credentials, custom HTTP
+URL/key, and request budget must be read from the resolved `AgentConfig.webSearch`
+snapshot produced by `loadAgentConfig`, not from `process.env`, so shell env,
+`~/.tool-agents/cli-agent/.env`, local `.env`, and CLI/config precedence stay
+centralized. Governance:
 
   - They appear iff the agent-tools umbrella is on (`--agent-tools` / not
     `--no-agent-tools`) AND their per-tool flag is on.
@@ -1410,20 +1423,26 @@ invoked and no virtual handles are added to the catalog. **Status: Implemented (
 ### FR-TLT-002 — Built-in tools group toggle
 
 cli-agent SHALL provide a toggle that loads (default) or suppresses the
-built-in cross-cutting toolkit — `file_read/list/write/edit/append`,
-`web_search/fetch`, `bash_list_allowed/which/run`, `tool_help` (i.e.
-`readOnly` + `mutatingFile` + `bashRunTools`). Surfaces: CLI
-`--builtin-tools` / `--no-builtin-tools`; env
-`CLI_AGENT_DISABLE_BUILTIN_TOOLS` (truthy = OFF); `config.json`
-`builtinTools: boolean`; profile `tools.builtin: boolean`. When suppressed,
-none of those tools are constructed. **Status: Implemented (Plan 008).**
+built-in cross-cutting toolkit — `bash_list_allowed`, `bash_which`, `tool_help`,
+and `bash_run` when the bash allowlist is non-empty. Surfaces: CLI
+`--builtin-tools` / `--no-builtin-tools`; env `CLI_AGENT_DISABLE_BUILTIN_TOOLS`
+(truthy = OFF); `config.json` `builtinTools: boolean`; profile
+`tools.builtin: boolean`. When suppressed, none of those built-in tools are
+constructed. File and web tools are no longer part of this group after
+plan-011/012; they are governed by the agent-tools pack. **Status: Implemented
+(Plan 008; current membership amended by Plans 011/012).**
 
 ### FR-TLT-003 — Agent-tools pack profile tier
 
 The existing agent-tools pack umbrella (`agentTools.enabled`; CLI
 `--no-agent-tools`; env `CLI_AGENT_DISABLE_AGENT_TOOLS`; `config.json`
 `agentTools.enabled`) SHALL gain a profile tier `tools.agentTools: boolean`,
-inserted just above the default in the umbrella resolution. **Status: Implemented (Plan 008).**
+inserted just above the default in the umbrella resolution. The governed pack
+includes the vendored `agt_*` tools plus first-party `agt_web_search`,
+`agt_web_fetch`, `agt_file_read`, `agt_file_list`, `agt_file_write`,
+`agt_file_edit`, and `agt_file_append`; file/web tools are not affected by
+`--no-builtin-tools`. **Status: Implemented (Plan 008; current membership
+amended by Plans 011/012).**
 
 ### FR-TLT-004 — Uniform precedence
 
@@ -1478,6 +1497,15 @@ The feature is documented in `docs/tools/cli-agent.md` (the
 `docs/design/project-functions.md` (this section), and
 `docs/design/project-design.md` (dated section). **Status: Implemented (Plan 008).**
 
+### FR-TLT-008 — File and web tools are governed by agent-tools toggles
+
+First-party web tools (`agt_web_search`, `agt_web_fetch`) and first-party file
+tools (`agt_file_read`, `agt_file_list`, `agt_file_write`, `agt_file_edit`,
+`agt_file_append`) SHALL be controlled by `agentTools.enabled`, their per-tool
+`--enable/--disable-agt-*` flags, and name-based profile scoping. They SHALL NOT
+be disabled by `--no-builtin-tools`. The three file mutators remain additionally
+gated by `allowMutations`. **Status: Implemented (Plans 011/012).**
+
 ---
 
 ## Tool-Loading-Aware System Prompt (FR-SPT-*)
@@ -1506,7 +1534,8 @@ OUT-OF-SCOPE bullets, and the available-tools list. The function SHALL return
 `''` when the umbrella toggle is off (`builtinTools === false`). The block is
 injected into the assembled prompt ONLY when the built-in tools are loaded, so
 the model is not told about tools it cannot call. **Status: Implemented (Plan
-009; block content made adaptive in Plan 010 — see FR-SPT-005).**
+009; block content made adaptive in Plan 010 and narrowed after Plan 012 — see
+FR-SPT-006).**
 
 ### FR-SPT-003 — Composition order
 
@@ -1514,11 +1543,11 @@ the model is not told about tools it cannot call. **Status: Implemented (Plan
 and BEFORE the wrapped-CLI capabilities section. Full order: base →
 built-in-tools block (if loaded) → capabilities → agent-tools block (if loaded)
 → user-provided instructions. `buildSystemPrompt`'s built-in-presence parameter
-SHALL default to `{ builtinTools: true, bashRun: true, mutatingFile: true }`
-(backward-compatible — today's full block); `buildSystemPromptForCfg` SHALL
-derive that presence from `cfg.builtinTools` plus the registered tool names
-(see FR-SPT-005). **Status: Implemented (Plan 009; presence object in Plan
-010).**
+SHALL default to `{ builtinTools: true, bashRun: true }` for the current built-in
+toolkit; `buildSystemPromptForCfg` SHALL derive that presence from
+`cfg.builtinTools` plus the registered tool names (see FR-SPT-006). **Status:
+Implemented (Plan 009; presence object in Plan 010; file presence removed in
+Plan 012).**
 
 ### FR-SPT-004 — In-place upgrade of an unmodified default
 
@@ -1543,34 +1572,34 @@ appear twice when the built-in tools are loaded. This is documented in
 When the umbrella toggle is on, the `## Built-in tools` block SHALL describe
 EXACTLY the built-in tools actually registered for the session, not a static
 superset. `buildBuiltinToolsPromptBlock` SHALL take a presence object
-`{ builtinTools, bashRun, mutatingFile }` and assemble the block from
-composable, gated sections:
+`{ builtinTools, bashRun }` and assemble the block from composable, gated
+sections:
 
 - The `bash_run` command-execution framing and its two confirmation/allowlist
   CORE RULES SHALL be included ONLY when `bashRun` is true (i.e. the command
   allowlist is non-empty so `bash_run` is bound). When `bashRun` is false the
   block SHALL instead state that no local commands are allow-listed and command
   execution is unavailable, and SHALL omit those two rules.
-- The mutating-file clause (`file_write` / `file_edit` / `file_append`) SHALL be
-  included ONLY when `mutatingFile` is true (i.e. `--allow-mutations` so those
-  tools are bound). When false, the OUT-OF-SCOPE section SHALL state that files
-  cannot be modified and SHALL hint `--allow-mutations`.
 - The general CORE RULES (capability docs / `tool_help`, read-only evidence,
-  error-JSON handling, `__truncated` handling, never invent URLs) and the
-  read-only tools (`file_read`/`file_list`, `web_search`/`web_fetch`,
-  `bash_list_allowed`/`bash_which`, `tool_help`) SHALL always be described.
+  error-JSON handling, `__truncated` handling) and the read-only built-in tools
+  (`bash_list_allowed`/`bash_which`, `tool_help`) SHALL always be described when
+  the built-in group is enabled.
+
+File and web guidance SHALL NOT live in this built-in block after Plans 011/012;
+it rides on the `agt_web_*` and `agt_file_*` descriptions in the agent-tools
+prompt block. The old `mutatingFile` presence flag and its
+`file_write`/`file_edit`/`file_append` name derivation are removed.
 
 `buildSystemPromptForCfg` SHALL take a 4th parameter `registeredTools`
 (`ReadonlyArray<{ name: string }>` — the post-scoping tool array from
 `buildToolCatalog`) and SHALL derive presence as `builtinTools = cfg.builtinTools
-!== false`, `bashRun = names.has('bash_run')`, `mutatingFile =
-names.has('file_write') || names.has('file_edit') || names.has('file_append')`.
+!== false`, `bashRun = names.has('bash_run')`.
 Deriving from the registered names ensures the prompt prose matches the bound
-tool schemas across every gate (umbrella toggle, allowlist, `--allow-mutations`,
-profile deny), so the inspector's "Bound tool schemas" and the system-prompt
-tool prose agree for the built-in toolkit. All 10 production call sites SHALL
-pass the in-scope `tools` array. Implemented per
-`docs/design/plan-010-builtin-block-adaptive.md`. **Status: Implemented (Plan 010).**
+tool schemas across every built-in gate (umbrella toggle, allowlist, profile
+deny), so the inspector's "Bound tool schemas" and the system-prompt tool prose
+agree for the built-in toolkit. All production call sites SHALL pass the
+in-scope `tools` array. Implemented per `docs/design/plan-010-builtin-block-adaptive.md`
+and amended by Plan 012. **Status: Implemented (Plan 010; amended by Plan 012).**
 
 ### NFR-SPT-001 — TypeScript / ESM consistency, no new dependency
 
@@ -1584,3 +1613,52 @@ tests in `agent-config.spec.ts`. **Status: Implemented (Plan 009).**
 `--no-builtin-tools` removes `bash_run`, so the wrapped-CLI capabilities
 section's "available via bash_run" framing is moot in that (self-defeating)
 combination. Left as-is for this change; tracked as a minor follow-up. **Status: Deferred.**
+
+## Runner Runtime Assembly
+
+### FR-RUN-001 — Centralized runtime assembly
+
+The one-shot runner, streaming one-shot runner, TUI bootstrap path, and legacy
+readline interactive runner SHALL construct their common runtime through
+`assembleAgentRuntime(cfg, opts)` rather than repeating logger, LLM, tool
+catalog, capability discovery, system prompt, session/profile logging, I/O
+capture, and graph setup inline. Path-specific lifecycle behavior remains in
+the runner functions: prompt logging, streaming iteration, readline event
+handling, and logger/capture close ownership. **Status: Implemented (Plan
+013).**
+
+## Release / CI Hardening
+
+### FR-REL-001 — Local release gate
+
+The npm package SHALL expose a `prepublishOnly` release gate that fails before
+publish when any required local release check fails. The gate SHALL run lint,
+typecheck, a clean release build, tests, high-or-higher dependency audit, and
+package payload validation in sequence. The build step runs before tests because
+the CLI help baseline tests execute `dist/cli.js`. **Status: Implemented (Plan
+014).**
+
+### FR-REL-002 — Lint script
+
+The npm package SHALL expose `npm run lint`. In the current dependency-free
+implementation, lint is strict TypeScript static validation through
+`tsc --noEmit -p tsconfig.json --pretty false`; a future dedicated linter can
+replace this script without changing the release-gate contract. **Status:
+Implemented (Plan 014).**
+
+### FR-REL-003 — Release build excludes test artifacts
+
+The release build SHALL use a build-specific TypeScript configuration that
+emits runtime/library files into `dist/` and excludes `*.spec.ts`,
+`*.test.ts`, and source JSON that is not required at runtime. `npm run build`
+SHALL start from a clean `dist/` directory so stale files cannot leak into the
+publish payload. **Status: Implemented (Plan 014).**
+
+### FR-REL-004 — Package payload validation
+
+The package content check SHALL inspect the actual `npm pack --dry-run --json`
+payload. It SHALL require `package.json`, `README.md`, `LICENSE`, executable
+`dist/cli.js`, and all vendored `*.prompt.md` runtime assets. It SHALL reject
+source, docs, test scripts, compiled spec/test/integration artifacts,
+TypeScript source files, fixture/test directories, lockfiles, and vendored
+upstream package metadata. **Status: Implemented (Plan 014).**

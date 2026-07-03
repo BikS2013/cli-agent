@@ -60,6 +60,7 @@ function makeCfg(opts: {
   enabled?: boolean;
   allowMutations?: boolean;
   flags?: Flags;
+  webMaxRequests?: number;
 }): AgentConfig {
   const enabled = opts.enabled ?? true;
   const allowMutations = opts.allowMutations ?? false;
@@ -86,6 +87,8 @@ function makeCfg(opts: {
     allowMutations,
     // Consulted by the agt_file_* wrappers at construction (sandbox config).
     fileEdit: { root: '/tmp/test-sandbox', allowPaths: [] },
+    // Consulted by the agt_web_* wrappers at construction and execution.
+    webSearch: { backend: 'tavily', maxRequests: opts.webMaxRequests ?? 50 },
     perToolBudgetBytes: 8192,
     // Other fields are not consulted by buildAgentToolsGroup; the cast
     // keeps the fixture minimal and intentional.
@@ -261,6 +264,29 @@ describe('buildAgentToolsGroup — gating matrix', () => {
     });
     const group = buildAgentToolsGroup(cfg, noopPolicy);
     expect(group.meta.registered.map((e) => e.name)).toEqual([AGT_WEB_SEARCH_NAME]);
+  });
+
+  it('web wrappers use cfg.webSearch.maxRequests for the shared budget, ignoring process.env', async () => {
+    const original = process.env['WEB_SEARCH_MAX_REQUESTS'];
+    process.env['WEB_SEARCH_MAX_REQUESTS'] = '50';
+    try {
+      const cfg = makeCfg({
+        enabled: true,
+        flags: { webSearch: true },
+        webMaxRequests: 0,
+      });
+      const group = buildAgentToolsGroup(cfg, noopPolicy);
+      const out = await group.tools[0]!.invoke({ query: 'q' });
+      const parsed = JSON.parse(out) as { error?: { code?: string; message?: string } };
+      expect(parsed.error?.code).toBe('E_SEARCH_BUDGET_EXCEEDED');
+      expect(parsed.error?.message).toContain('0 requests');
+    } finally {
+      if (original === undefined) {
+        delete process.env['WEB_SEARCH_MAX_REQUESTS'];
+      } else {
+        process.env['WEB_SEARCH_MAX_REQUESTS'] = original;
+      }
+    }
   });
 
   it('every meta entry carries a non-empty description', () => {
