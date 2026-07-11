@@ -30,8 +30,9 @@
  *   `cliAgentPermissionPolicy(cfg)` throws {@link ConfigurationError} when
  *   `cfg` itself is missing or when one of the consumed fields is absent
  *   (`cfg.bash`, `cfg.fileEdit.root`). It does NOT throw when
- *   `cfg.bashAllow` is empty — empty allowlist is a meaningful state that
- *   simply causes every bash command to be denied (fail-closed). Likewise
+ *   `cfg.bashAllow` is empty — an empty (unconfigured) allowlist is a
+ *   meaningful state that makes bash UNRESTRICTED: every command is allowed
+ *   (fail-open by explicit user decision, 2026-07-04; formerly fail-closed). Likewise
  *   `cfg.allowMutations` defaults to `false` at the config-loader level
  *   (U4); the bridge reads whatever the loader resolved.
  *
@@ -111,8 +112,9 @@ export function cliAgentPermissionPolicy(cfg: AgentConfig): PermissionPolicy {
      *  2. Tokenise on whitespace (the upstream passes a free-form
      *     command string; cli-agent's matcher takes (binary, args)).
      *  3. Delegate the (binary, args) tuple to cli-agent's allowlist
-     *     matcher. Empty allowlist means "deny all" — matcher.test
-     *     returns false.
+     *     matcher. An EMPTY (unconfigured) allowlist means UNRESTRICTED
+     *     — matcher.test returns true for every command (fail-open by
+     *     explicit user decision, 2026-07-04; formerly fail-closed).
      */
     evaluateBash(req: BashCommandRequest): PermissionDecision {
       const cmd = (req.command ?? '').trim();
@@ -130,12 +132,9 @@ export function cliAgentPermissionPolicy(cfg: AgentConfig): PermissionPolicy {
       }
       const args = tokens.slice(1);
 
-      if (matcher.isEmpty()) {
-        return {
-          allow: false,
-          reason: 'bash allowlist is empty (cli-agent fail-closed)',
-        };
-      }
+      // Unconfigured allowlist ⇒ unrestricted (matcher.test returns true
+      // for every command); the explicit isEmpty() fail-closed branch was
+      // removed 2026-07-04 by user decision.
       if (!matcher.test(head, args)) {
         const allowed = matcher.getBinaryNames();
         return {

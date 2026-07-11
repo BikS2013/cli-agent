@@ -224,6 +224,25 @@ function buildKnobResolvers(): ReadonlyArray<KnobResolver> {
       },
     },
     {
+      // Agent mode knob (plan-015): pinnable chain CLI --mode >
+      // CLI_AGENT_MODE (shell > agent-dir .env > local .env) > profile
+      // cliParams.mode > config.json mode > default 'composite'.
+      knob: 'mode',
+      resolve: (l) =>
+        pickSource('mode', [
+          { value: l.cliFlags['mode'], source: 'cli-flag' },
+          { value: l.shellEnv['CLI_AGENT_MODE'], source: 'env:CLI_AGENT_MODE' },
+          { value: l.agentDotEnv['CLI_AGENT_MODE'], source: 'agent-dir-.env' },
+          { value: l.localDotEnv['CLI_AGENT_MODE'], source: 'local-.env' },
+          {
+            value: l.profile?.cliParams?.['mode'],
+            source: l.profile ? `profile:${l.profile.name}` : 'built-in-default',
+          },
+          { value: l.configFile?.['mode'], source: 'config.json' },
+          { value: 'composite', source: 'built-in-default' },
+        ]),
+    },
+    {
       knob: 'webSearchBackend',
       resolve: (l) =>
         pickSource('webSearchBackend', [

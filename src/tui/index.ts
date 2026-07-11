@@ -32,6 +32,7 @@ import './slash/model.js';
 import './slash/provider.js';
 import './slash/tools.js';
 import './slash/allow-mutations.js';
+import './slash/mode.js';
 import './slash/capabilities.js';
 import './slash/refresh-capabilities.js';
 import './slash/tool-help.js';

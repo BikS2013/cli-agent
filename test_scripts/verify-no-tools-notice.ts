@@ -1,8 +1,9 @@
 /**
  * E2E verification for the toolless-session fabrication guard.
  *
- * Reproduces `cli-agent --no-builtin-tools --no-agent-tools --no-composites`:
- * loads a real resolved config with every tool group disabled, assembles the
+ * Reproduces `cli-agent --mode chat` (plan-015; formerly the three
+ * `--no-*` group toggles): loads a real resolved config with every tool
+ * group disabled, assembles the
  * tool catalog (expected: zero tools) and the system prompt EXACTLY as
  * run.ts does, then asserts the prompt now carries the no-tools /
  * anti-fabrication notice (so the model cannot hallucinate command output).
@@ -24,13 +25,12 @@ const nullLogger: Logger = {
 };
 
 async function main(): Promise<void> {
-  // Mirror the user's flags: all three tool groups disabled.
+  // Mirror the user's flags: --mode chat disables all three tool groups
+  // (plan-015; formerly builtinTools/composites/agentTools.enabled=false).
   const cfg = await loadAgentConfig(
     {
       provider: 'openai',
-      builtinTools: false,
-      composites: false,
-      agentTools: { enabled: false },
+      mode: 'chat',
     },
     { shellEnv: { OPENAI_API_KEY: 'sk-verify-placeholder' }, cwd: process.cwd() },
   );

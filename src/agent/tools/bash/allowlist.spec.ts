@@ -44,6 +44,15 @@ describe('buildAllowlistMatcher', () => {
     expect(matcher.isEmpty()).toBe(true);
   });
 
+  it('an empty allowlist is UNRESTRICTED — test() accepts every command (fail-open, 2026-07-04)', () => {
+    const matcher = buildAllowlistMatcher([]);
+    expect(matcher.test('git', ['push'])).toBe(true);
+    expect(matcher.test('rm', ['-rf', '/'])).toBe(true);
+    expect(matcher.test('/usr/bin/anything', [])).toBe(true);
+    // isEmpty still reports the unconfigured state so callers can surface it.
+    expect(matcher.isEmpty()).toBe(true);
+  });
+
   it('getBinaryNames excludes argv-regex patterns', () => {
     const entries = parseAllowlistEntries(['git', 'argv-regex:^kubectl get .*$']);
     const matcher = buildAllowlistMatcher(entries);

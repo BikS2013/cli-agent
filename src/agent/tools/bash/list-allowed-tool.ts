@@ -38,6 +38,12 @@ export function createBashListAllowedTool(cfg: AgentConfig): DynamicStructuredTo
         hasArgvRegexEntries: entries.some((e) => e.kind === 'argv-regex'),
         totalEntries: entries.length,
         isEmpty: matcher.isEmpty(),
+        // Unconfigured allowlist ⇒ unrestricted: every binary on PATH may
+        // be executed (fail-open by explicit user decision, 2026-07-04).
+        unrestricted: matcher.isEmpty(),
+        ...(matcher.isEmpty()
+          ? { note: 'No allowlist is configured — ANY binary on PATH may be executed.' }
+          : {}),
       });
     },
   });

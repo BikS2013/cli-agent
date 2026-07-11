@@ -28,6 +28,10 @@ export const ProfileCliParamsSchema = z
     logLevel: z.string().optional(),
     webSearchBackend: z.string().optional(),
     allowMutations: z.boolean().optional(),
+    // Agent mode knob (plan-015): pins which tool groups load. Optional;
+    // omitted → defer to config.json `mode` and ultimately the composite
+    // default.
+    mode: z.enum(['chat', 'basic', 'tool', 'composite']).optional(),
   })
   .passthrough(); // E20: forward-compat for unknown cliParams keys.
 
@@ -36,17 +40,11 @@ export const ProfileToolsSchema = z
     allow: z.array(z.string()).min(1).optional(), // E6: empty array rejected.
     deny: z.array(z.string()).optional(),
     order: z.array(z.string()).optional(),
-    // Tool-loading group toggles (plan-008). Profile tier of the uniform
-    // precedence chain CLI flag > env > config.json > profile > default(load).
-    // Each is an OPTIONAL boolean; `undefined` defers to the built-in default
-    // (load). These are explicit user settings, NOT runtime fallbacks for
-    // missing required config.
-    //   composites → every virtual/composite tool (loadVirtualToolsSync)
-    //   builtin    → the cross-cutting toolkit (file_*/web_*/bash_*/tool_help)
-    //   agentTools → the agent-tools pack umbrella (agt_*)
-    composites: z.boolean().optional(),
-    builtin: z.boolean().optional(),
-    agentTools: z.boolean().optional(),
+    // NOTE (plan-015): the plan-008 group-toggle keys (`composites`,
+    // `builtin`, `agentTools`) were removed — tool groups are pinned via
+    // `cliParams.mode` instead. `.strict()` rejects them; `parseProfile`
+    // (profile-codec.ts) pre-checks the raw object to surface the
+    // migration hint instead of a generic Zod "unrecognized key" message.
   })
   .strict();
 
@@ -88,6 +86,7 @@ export const KNOWN_CLI_PARAMS: ReadonlySet<string> = new Set<string>([
   'logLevel',
   'webSearchBackend',
   'allowMutations',
+  'mode',
 ]);
 
 /* ---------- Credential-shape detection (E11) ---------- */

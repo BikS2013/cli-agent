@@ -13,7 +13,7 @@ import { buildSystemPromptForCfg } from '../../agent/system-prompt.js';
 
 const allowMutCmd: SlashCommand = {
   name: '/allow-mutations',
-  summary: 'Toggle mutating tools (file_write/file_edit/file_append): on|off',
+  summary: 'Toggle mutating tools (agt_file_write/edit/append, agt_multiedit, agt_patch): on|off',
   async run(ctx, args): Promise<void> {
     const c = ctx.controller;
     const v = args[0]?.toLowerCase();

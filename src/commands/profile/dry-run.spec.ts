@@ -131,4 +131,51 @@ describe('profile-dry-run', () => {
       runProfileDryRun({ profile: 'does-not-exist' }),
     ).rejects.toMatchObject({ code: 'E_USAGE', exitCode: 2 });
   });
+
+  // ---- mode knob (plan-015) — source attribution across the tiers ----
+
+  it('mode defaults to composite with built-in-default attribution', async () => {
+    const { runProfileDryRun } = await import('./dry-run.js');
+    await runProfileDryRun();
+    const out = captured.stdout.join('');
+    expect(out).toMatch(/mode\s+composite\s+built-in-default/);
+  });
+
+  it('mode is attributed to env:CLI_AGENT_MODE when the env var is set', async () => {
+    process.env['CLI_AGENT_MODE'] = 'basic';
+    try {
+      const { runProfileDryRun } = await import('./dry-run.js');
+      await runProfileDryRun();
+      const out = captured.stdout.join('');
+      expect(out).toMatch(/mode\s+basic\s+env:CLI_AGENT_MODE/);
+    } finally {
+      delete process.env['CLI_AGENT_MODE'];
+    }
+  });
+
+  it('mode is attributed to profile:<name> when pinned via cliParams.mode', async () => {
+    await placeProfile(
+      'pinned',
+      'name: pinned\nschemaVersion: 1\ncliParams:\n  mode: tool\n',
+    );
+    const { runProfileDryRun } = await import('./dry-run.js');
+    await runProfileDryRun({ profile: 'pinned' });
+    const out = captured.stdout.join('');
+    expect(out).toMatch(/mode\s+tool\s+profile:pinned/);
+  });
+
+  it('mode is attributed to config.json when set there', async () => {
+    const fsp = await import('node:fs/promises');
+    const agentDir = path.join(TMP_HOME, '.tool-agents', 'cli-agent');
+    await fsp.mkdir(agentDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(agentDir, 'config.json'),
+      JSON.stringify({ schemaVersion: 1, mode: 'basic' }),
+      { mode: 0o600 },
+    );
+    const { runProfileDryRun } = await import('./dry-run.js');
+    await runProfileDryRun();
+    const out = captured.stdout.join('');
+    expect(out).toMatch(/mode\s+basic\s+config\.json/);
+  });
 });

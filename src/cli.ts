@@ -32,6 +32,8 @@ import { runCompositeShow } from './commands/composite/show.js';
 import { runCompositeDelete } from './commands/composite/delete.js';
 import { handleSynthesize } from './commands/composite/synthesize.js';
 import { CliAgentError, UsageError } from './errors.js';
+import { parseModeFlag } from './config/mode.js';
+import { rejectRemovedLegacyFlags } from './cli-removed-flags.js';
 import { redactString } from './util/redact.js';
 import { mapAgentToolFlags } from './cli-agent-tools-flags.js';
 import {
@@ -80,7 +82,7 @@ program
   .argument('[prompt]', 'One-shot prompt for the agent')
   .option('-i, --interactive', 'Start an interactive REPL session', false)
   .option('-r, --resume [threadId]', 'Resume a previous TUI thread (omit threadId to use the last active session from cursor.json)')
-  .option('--tool <name>', 'CLI binary to wrap (repeatable)', collectTool, [] as string[])
+  .option('--tool <name>', 'CLI binary to wrap (repeatable; auto-added to the bash allowlist)', collectTool, [] as string[])
   .option('-p, --provider <name>', 'LLM provider (openai|anthropic|gemini|azure-openai|azure-anthropic|ollama|litellm|mlx)')
   .option('-m, --model <id>', 'Model ID / deployment name')
   .option('--base-url <url>', 'Override provider base URL')
@@ -94,8 +96,8 @@ program
   .option('--inspect-io', 'Enable LLM I/O capture (writes provider-normalized request/response JSONL to ~/.tool-agents/cli-agent/io-captures/)')
   .option('--inspect-io-raw', 'Disable redaction for I/O captures only (use with caution; prints a warning)')
   .option('--per-tool-budget <bytes>', 'Per-tool result byte budget', (v) => parseInt(v, 10))
-  .option('--allow-mutations', 'Enable mutating tools (file_write, file_edit, file_append)', false)
-  .option('--bash-allow <csv>', 'Extra bash allowlist entries (csv or argv-regex:)')
+  .option('--allow-mutations', 'Enable mutating tools (agt_file_write/edit/append, agt_multiedit, agt_patch) and side-effecting bash commands', false)
+  .option('--bash-allow <csv>', 'Extra bash allowlist entries (csv; bare binary names or argv-regex:<pattern> rules)')
   .option('--bash-allow-file <path>', 'File with bash allowlist entries (one per line)')
   .option('--bash-pass-secret <NAME>', 'Pass credential env var to child processes (repeatable)', collectTool, [] as string[])
   .option('--web-search-backend <id>', 'Web search backend (tavily|serpapi|brave|duckduckgo|custom-http)')
@@ -106,41 +108,15 @@ program
   .option('--introspect-skip-llm-below-bytes <n>', 'Skip the LLM extractor when top-level --help is smaller than this many bytes (0 disables)', (v) => parseInt(v, 10))
   .option('--refresh-capabilities', 'Force regenerate cached capability docs', false)
   .option('--verbose', 'Emit structured debug logs to stderr', false)
-  // ---- Tool-loading group toggles (plan-008) ----
-  .option('--composites', 'Load composite (virtual) tools (default; rarely needed)')
-  .option('--no-composites', 'Do NOT load any composite (virtual) tools')
-  .option('--builtin-tools', 'Load the built-in cross-cutting toolkit: bash_*, tool_help (default). File ops are now in the agt_ pack (agt_file_*).')
-  .option('--no-builtin-tools', 'Do NOT load the built-in cross-cutting toolkit (bash_*, tool_help). NOTE: this also removes bash_run, the path used to run wrapped CLIs. Does NOT affect file ops; use --no-agent-tools / --disable-agt-file-* for those.')
-  // ---- Agent-tools pack (umbrella) ----
-  .option('--agent-tools', 'Enable the agent-tools pack umbrella (default; rarely needed)')
-  .option('--no-agent-tools', 'Disable the agent-tools pack umbrella (no agt_* tools registered)')
-  // ---- Agent-tools pack (per-tool) ----
-  .option('--enable-agt-glob', 'Enable agt_glob (default-on)')
-  .option('--disable-agt-glob', 'Disable agt_glob')
-  .option('--enable-agt-grep', 'Enable agt_grep (default-on)')
-  .option('--disable-agt-grep', 'Disable agt_grep')
-  .option('--enable-agt-multiedit', 'Enable agt_multiedit (default-on; mutation-gated)')
-  .option('--disable-agt-multiedit', 'Disable agt_multiedit')
-  .option('--enable-agt-patch', 'Enable agt_patch (default-on; mutation-gated)')
-  .option('--disable-agt-patch', 'Disable agt_patch')
-  .option('--enable-agt-todo-read', 'Enable agt_todo_read (default-off)')
-  .option('--disable-agt-todo-read', 'Disable agt_todo_read')
-  .option('--enable-agt-todo-write', 'Enable agt_todo_write (default-off)')
-  .option('--disable-agt-todo-write', 'Disable agt_todo_write')
-  .option('--enable-agt-web-search', 'Enable agt_web_search (default-on; read-only)')
-  .option('--disable-agt-web-search', 'Disable agt_web_search')
-  .option('--enable-agt-web-fetch', 'Enable agt_web_fetch (default-on; read-only)')
-  .option('--disable-agt-web-fetch', 'Disable agt_web_fetch')
-  .option('--enable-agt-file-read', 'Enable agt_file_read (default-on; read-only)')
-  .option('--disable-agt-file-read', 'Disable agt_file_read')
-  .option('--enable-agt-file-list', 'Enable agt_file_list (default-on; read-only)')
-  .option('--disable-agt-file-list', 'Disable agt_file_list')
-  .option('--enable-agt-file-write', 'Enable agt_file_write (default-on; mutation-gated)')
-  .option('--disable-agt-file-write', 'Disable agt_file_write')
-  .option('--enable-agt-file-edit', 'Enable agt_file_edit (default-on; mutation-gated)')
-  .option('--disable-agt-file-edit', 'Disable agt_file_edit')
-  .option('--enable-agt-file-append', 'Enable agt_file_append (default-on; mutation-gated)')
-  .option('--disable-agt-file-append', 'Disable agt_file_append')
+  // ---- Agent mode + generic per-tool pair (plan-015) ----
+  // Replaces the plan-008 group-toggle flag pairs and the 26 per-tool
+  // --enable-agt-*/--disable-agt-* flags (all hard-removed; see
+  // rejectRemovedLegacyFlags). NB: no Commander default on --mode — a
+  // default would append `(default: composite)` to the help row and
+  // drift the byte baseline; the description text carries it instead.
+  .option('--mode <mode>', 'Tool-group mode: chat|basic|tool|composite (env: CLI_AGENT_MODE; default: composite)')
+  .option('--enable-tool <name>', 'Enable an agt_* tool by canonical name, e.g. agt_todo_write (repeatable)', collectTool, [] as string[])
+  .option('--disable-tool <name>', 'Disable an agt_* tool by canonical name, e.g. agt_web_fetch (repeatable)', collectTool, [] as string[])
   // ---- Configuration profiles (plan-005) ----
   .option('--profile <name>', 'Activate a named configuration profile (env: CLI_AGENT_PROFILE)')
   // ---- Composite intelligent tools (plan-006 P6 / U-FLAGS) ----
@@ -226,6 +202,9 @@ program
         : undefined;
       const bashPassSecret = (opts['bashPassSecret'] as string[]) ?? [];
       const agentTools = mapAgentToolFlags(opts);
+      // CLI-tier validation of the raw --mode value (plan-015, FR-MODE-1):
+      // a non-mode value raises UsageError (exit 2) before config loading.
+      const mode = parseModeFlag(opts['mode']);
 
       await runAgentCommand(prompt ?? null, {
         interactive: opts['interactive'] as boolean | undefined,
@@ -257,12 +236,10 @@ program
         inspectIo: opts['inspectIo'] as boolean | undefined,
         inspectIoRaw: opts['inspectIoRaw'] as boolean | undefined,
         agentTools,
-        // Tool-loading group toggles (plan-008). Commander merges
-        // `--no-composites` ⇒ opts.composites === false and `--composites`
-        // ⇒ true (same for builtinTools); undefined when neither is passed,
-        // deferring to env → config.json → profile → default(load).
-        composites: opts['composites'] as boolean | undefined,
-        builtinTools: opts['builtinTools'] as boolean | undefined,
+        // Agent mode knob (plan-015). Undefined when --mode is not passed,
+        // deferring to env CLI_AGENT_MODE → profile cliParams.mode →
+        // config.json mode → default 'composite'.
+        mode,
         profile: opts['profile'] as string | undefined,
       });
     });
@@ -691,6 +668,21 @@ async function handleErrors(fn: () => Promise<void>): Promise<void> {
 
 function collectTool(value: string, previous: string[]): string[] {
   return [...previous, value];
+}
+
+// Legacy-flag pre-scan (plan-015): the 32 removed tool-group / per-tool
+// flags must fail with UsageError (exit 2) + migration hint. This must run
+// BEFORE Commander parses — with the options unregistered, Commander's
+// "unknown option" error would surface through the parseAsync catch below,
+// which exits 1 and carries no hint.
+try {
+  rejectRemovedLegacyFlags(process.argv.slice(2));
+} catch (e) {
+  if (e instanceof CliAgentError) {
+    process.stderr.write(redactString(`Error [${e.code}]: ${e.message}\n`));
+    process.exit(e.exitCode);
+  }
+  throw e;
 }
 
 program.parseAsync(process.argv).catch((e: unknown) => {

@@ -131,8 +131,10 @@ Keep responses concise: plain prose or a short bullet list. Never include raw cr
  *   - `builtinTools`  — the umbrella toggle (`cfg.builtinTools !== false`,
  *     plan-008). When `false`, no built-in tool schemas are bound at all,
  *     so the whole block is suppressed.
- *   - `bashRun`       — whether `bash_run` is registered. It is bound only
- *     when the command allowlist is non-empty (`registry.ts`).
+ *   - `bashRun`       — whether `bash_run` is registered. Since 2026-07-04
+ *     it is bound whenever the built-in group is on (an empty allowlist
+ *     means UNRESTRICTED, no longer "unbound"); a profile deny can still
+ *     remove it (`registry.ts`).
  *
  * (File operations are no longer built-in — plan-012 moved them into the
  * agt_ pack as `agt_file_*`, so there is no longer a `mutatingFile` built-in
@@ -145,8 +147,14 @@ Keep responses concise: plain prose or a short bullet list. Never include raw cr
 export interface BuiltinToolsPresence {
   /** Umbrella toggle — `cfg.builtinTools !== false`. */
   readonly builtinTools: boolean;
-  /** `bash_run` is registered (non-empty command allowlist). */
+  /** `bash_run` is registered (built-in group on; a profile deny can still
+   * remove it). Since 2026-07-04 an empty allowlist no longer suppresses
+   * the tool — it means UNRESTRICTED execution (see `bashUnrestricted`). */
   readonly bashRun: boolean;
+  /** No allowlist entry is configured — bash_run may execute ANY binary on
+   * PATH (fail-open by explicit user decision, 2026-07-04). Optional for
+   * fixture compatibility; omitted/false ⇒ restricted (allow-listed) prose. */
+  readonly bashUnrestricted?: boolean;
 }
 
 /**
@@ -162,15 +170,29 @@ You have a set of built-in tools this session; their JSON schemas are bound to y
 
 /**
  * Command-execution framing + the two bash_run-specific CORE RULES.
- * Included ONLY when `bash_run` is registered (non-empty allowlist).
+ * Included ONLY when `bash_run` is registered. Two variants: restricted
+ * (an allowlist is configured) and unrestricted (no allowlist configured —
+ * fail-open, 2026-07-04).
  */
 const BUILTIN_BLOCK_BASHRUN_INTRO = `
 
 You act on the user's machine through the bash_run tool, which executes only the specific allow-listed binaries the user has permitted — never arbitrary shell.`;
 
 /**
- * Stated when `bash_run` is NOT registered (empty allowlist). Replaces the
- * bash_run framing AND omits the two bash_run CORE RULES.
+ * Unrestricted variant: no allowlist is configured, so any binary on PATH
+ * may be executed. The framing makes the breadth explicit AND instructs
+ * restraint — the power is the user's deliberate choice, not an invitation
+ * to run destructive commands.
+ */
+const BUILTIN_BLOCK_BASHRUN_UNRESTRICTED_INTRO = `
+
+You act on the user's machine through the bash_run tool. No command allowlist is configured this session, so ANY binary on PATH may be executed (single binary + explicit arguments — never arbitrary shell). Use this breadth conservatively: prefer read-only commands, and never run a destructive or irreversible command unless the user explicitly asked for it.`;
+
+/**
+ * Stated when `bash_run` is NOT registered (built-in group off for this
+ * tool, e.g. a profile `deny`; since 2026-07-04 an empty allowlist no
+ * longer unbinds it). Replaces the bash_run framing AND omits the two
+ * bash_run CORE RULES.
  *
  * Deliberately does NOT name the command-execution tool, so the block never
  * mentions a tool the model cannot call (the registered read-only bash
@@ -180,11 +202,19 @@ const BUILTIN_BLOCK_NO_BASHRUN_INTRO = `
 
 No local commands are allow-listed in this session, so command execution is not available — you cannot run binaries on the user's machine. If a task needs one, tell the user which binary to allow-list.`;
 
-/** The two bash_run-specific CORE RULES (only when bashRun). */
+/** The two bash_run-specific CORE RULES (only when bashRun, restricted). */
 const BUILTIN_BLOCK_BASHRUN_RULES = `
 1. Before attempting bash_run, call bash_list_allowed to see which commands are permitted.
    If the command you need is not on the allowlist, tell the user which binary would help
    instead of attempting a workaround.
+2. bash_run requires confirmed: true. Never call it speculatively. Explain what you are
+   about to run and why before calling it.`;
+
+/** The two bash_run-specific CORE RULES (only when bashRun, UNRESTRICTED). */
+const BUILTIN_BLOCK_BASHRUN_UNRESTRICTED_RULES = `
+1. No allowlist is configured — any binary on PATH is executable. Choose the least
+   powerful command that answers the question, prefer read-only invocations, and never
+   run a destructive or irreversible command unless the user explicitly asked for it.
 2. bash_run requires confirmed: true. Never call it speculatively. Explain what you are
    about to run and why before calling it.`;
 
@@ -208,9 +238,9 @@ const BUILTIN_BLOCK_GENERAL_RULES = `
   Narrow your request (fewer results, smaller page, specific subcommand) and retry.`;
 
 /**
- * Injected when a session has ZERO registered tools (every tool group
- * disabled via --no-builtin-tools/--no-agent-tools/--no-composites, or a
- * profile scoped the catalog to nothing). The slim base identity still says
+ * Injected when a session has ZERO registered tools (`--mode chat`
+ * (plan-015), or a profile scoped the catalog to nothing). The slim base
+ * identity still says
  * the agent "accomplishes tasks by invoking external CLI tools", but no tools
  * are bound this turn — without this notice the model role-plays a tool-user
  * and FABRICATES tool output (e.g. a directory listing it never ran). The
@@ -223,7 +253,7 @@ const NO_TOOLS_BLOCK = `
 
 No tools are enabled, so you have NO way to act on the user's machine or the outside world: you cannot run commands, read or write files, list directories, search or fetch from the internet, or execute anything. This turn you are a plain conversational assistant.
 
-NEVER fabricate, guess, simulate, or role-play the result of an action you cannot perform — do not invent command output, directory listings, file contents, process lists, or URLs, and never claim you ran something. If a request needs a tool, say plainly that no tools are enabled in this session and that the user can re-run cli-agent without --no-builtin-tools / --no-agent-tools / --no-composites (adding --allow-mutations or a bash allowlist where needed) to enable them. You can still answer from your own knowledge and help the user reason about what to do.`;
+NEVER fabricate, guess, simulate, or role-play the result of an action you cannot perform — do not invent command output, directory listings, file contents, process lists, or URLs, and never claim you ran something. If a request needs a tool, say plainly that no tools are enabled in this session and that the user can re-run cli-agent with --mode composite or --mode tool (adding --allow-mutations or a bash allowlist where needed) to enable them. You can still answer from your own knowledge and help the user reason about what to do.`;
 
 /**
  * Render the `## Built-in tools` system-prompt block, describing EXACTLY
@@ -243,29 +273,47 @@ NEVER fabricate, guess, simulate, or role-play the result of an action you canno
 export function buildBuiltinToolsPromptBlock(p: {
   builtinTools: boolean;
   bashRun: boolean;
+  bashUnrestricted?: boolean;
 }): string {
   if (!p.builtinTools) return '';
+
+  const unrestricted = p.bashRun && p.bashUnrestricted === true;
 
   let block = BUILTIN_BLOCK_HEADER;
 
   // Command execution: bash_run framing (+ its two CORE RULES) only when
   // bash_run is actually bound; otherwise an explicit "not available" note.
-  block += p.bashRun ? BUILTIN_BLOCK_BASHRUN_INTRO : BUILTIN_BLOCK_NO_BASHRUN_INTRO;
+  // The framing adapts to the allowlist state (restricted vs unrestricted).
+  block += p.bashRun
+    ? (unrestricted ? BUILTIN_BLOCK_BASHRUN_UNRESTRICTED_INTRO : BUILTIN_BLOCK_BASHRUN_INTRO)
+    : BUILTIN_BLOCK_NO_BASHRUN_INTRO;
 
   // CORE RULES: the two bash_run-specific rules (only when bashRun) followed
   // by the general rules (always). Numbered bash_run rules lead; the general
   // rules are bulleted so the list reads coherently with or without them.
   block += '\n\nCORE RULES';
-  if (p.bashRun) block += BUILTIN_BLOCK_BASHRUN_RULES;
+  if (p.bashRun) {
+    block += unrestricted
+      ? BUILTIN_BLOCK_BASHRUN_UNRESTRICTED_RULES
+      : BUILTIN_BLOCK_BASHRUN_RULES;
+  }
   block += BUILTIN_BLOCK_GENERAL_RULES;
 
   // Available tools — the built-in toolkit is now bash_* + tool_help only
   // (file operations moved to the agt_ pack, plan-012). Describe the bash
-  // tools (adapted to whether bash_run is bound) and tool_help.
+  // tools (adapted to whether bash_run is bound and the allowlist state)
+  // and tool_help.
   block += `
 
 Available tools:`;
-  if (p.bashRun) {
+  if (p.bashRun && unrestricted) {
+    block += `
+- bash_list_allowed / bash_which / bash_run: run local commands and inspect their stdout/stderr
+  to decide your next step. No allowlist is configured — any binary on PATH may be executed;
+  bash_which resolves where a binary lives. bash_run requires user confirmation; never call it
+  speculatively. Treat output as read-only evidence: never paste captured tokens or secrets back
+  into a later prompt or another tool argument.`;
+  } else if (p.bashRun) {
     block += `
 - bash_list_allowed / bash_which / bash_run: run allow-listed local commands and inspect their
   stdout/stderr to decide your next step. Always call bash_list_allowed first to see what is
@@ -417,6 +465,10 @@ export async function buildSystemPromptForCfg(
     readonly systemAppendText: string | undefined;
     readonly systemAppendFile: string | undefined;
     readonly builtinTools: boolean;
+    /** Optional (fixture compatibility): resolved bash allowlist. An empty
+     * list means UNRESTRICTED bash (2026-07-04) and switches the bash_run
+     * prompt prose to the unrestricted variant. Omitted ⇒ restricted prose. */
+    readonly bash?: { readonly allow: readonly string[] };
   },
   capabilitiesSection: string,
   agentToolsMeta?: AgentToolsCatalogMeta,
@@ -443,6 +495,9 @@ export async function buildSystemPromptForCfg(
   const builtinPresence: BuiltinToolsPresence = {
     builtinTools: cfg.builtinTools !== false,
     bashRun: names.has('bash_run'),
+    // Empty allowlist ⇒ unrestricted bash (2026-07-04): the prompt framing
+    // switches to the any-binary-on-PATH variant with restraint guidance.
+    bashUnrestricted: (cfg.bash?.allow?.length ?? 1) === 0,
   };
 
   // Toolless-session guard: zero registered tools (every group disabled, or a

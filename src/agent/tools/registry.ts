@@ -66,10 +66,19 @@ export function buildToolCatalog(
       ]
     : [];
 
+  // bash_run binding (2026-07-04, user-directed change): bound whenever the
+  // built-in toolkit is on. An EMPTY allowlist no longer suppresses the tool
+  // — it now means UNRESTRICTED (any binary on PATH may be executed). One
+  // stderr notice makes the fail-open state visible at session build.
   const allowlistEntries = parseAllowlistEntries([...cfg.bash.allow]);
-  const bashRunTools: AnyTool[] = builtinEnabled && allowlistEntries.length > 0
+  const bashRunTools: AnyTool[] = builtinEnabled
     ? [createBashRunTool(cfg, logger, cfg.allowMutations)]
     : [];
+  if (builtinEnabled && allowlistEntries.length === 0) {
+    process.stderr.write(
+      '[cli-agent] note: no bash allowlist is configured — bash_run may execute ANY binary on PATH. Add --bash-allow / bash.allow entries (or wrap CLIs with --tool) to restrict it.\n',
+    );
+  }
 
   // Agent-tools pack (U2/U3/U5). Independent of the built-in toolkit toggle
   // — gated only by its own umbrella (`cfg.agentTools.enabled`, evaluated

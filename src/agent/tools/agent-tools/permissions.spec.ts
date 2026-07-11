@@ -114,13 +114,12 @@ describe('cliAgentPermissionPolicy.evaluateBash', () => {
   const cwd = path.resolve('/tmp/test-cwd');
   const baseReq = { cwd, env: {} as Record<string, string> };
 
-  it('denies when bashAllow is empty (fail-closed)', () => {
+  it('allows every command when bashAllow is empty (UNRESTRICTED — fail-open, 2026-07-04)', () => {
     const policy = cliAgentPermissionPolicy(makeCfg({ bashAllow: [] }));
-    const decision = policy.evaluateBash({ ...baseReq, command: 'ls -la' });
-    expect(decision.allow).toBe(false);
-    if (decision.allow === false) {
-      expect(decision.reason).toMatch(/empty|fail-closed/i);
-    }
+    expect(policy.evaluateBash({ ...baseReq, command: 'ls -la' }).allow).toBe(true);
+    expect(policy.evaluateBash({ ...baseReq, command: 'anything --at-all' }).allow).toBe(true);
+    // Empty/whitespace-only commands are still rejected.
+    expect(policy.evaluateBash({ ...baseReq, command: '   ' }).allow).toBe(false);
   });
 
   it('allows a binary present in the allowlist', () => {

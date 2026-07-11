@@ -86,7 +86,7 @@ describe('cli.ts cold-start wiring sanity', () => {
     expect(typeof dryRun.runProfileDryRun).toBe('function');
   });
 
-  it('KNOWN_CLI_PARAMS contains the required plan-005 keys', async () => {
+  it('KNOWN_CLI_PARAMS contains the required plan-005 keys plus mode (plan-015)', async () => {
     const { KNOWN_CLI_PARAMS } = await import('./config/profile-schema.js');
 
     const required = [
@@ -98,11 +98,26 @@ describe('cli.ts cold-start wiring sanity', () => {
       'logLevel',
       'webSearchBackend',
       'allowMutations',
+      'mode',
     ];
 
     for (const key of required) {
       expect(KNOWN_CLI_PARAMS.has(key)).toBe(true);
     }
+  });
+
+  it('mode module exports the plan-015 surface', async () => {
+    const mod = await import('./config/mode.js');
+    expect(mod.AGENT_MODES).toEqual(['chat', 'basic', 'tool', 'composite']);
+    expect(typeof mod.modeToGroups).toBe('function');
+    expect(typeof mod.deriveModeFromGroups).toBe('function');
+    expect(typeof mod.parseModeFlag).toBe('function');
+    expect(typeof mod.MODE_MIGRATION_HINT).toBe('string');
+  });
+
+  it('removed-flags pre-scan module imports without throwing', async () => {
+    const mod = await import('./cli-removed-flags.js');
+    expect(typeof mod.rejectRemovedLegacyFlags).toBe('function');
   });
 
   it('CREDENTIAL_KEY_PATTERN matches common credential-shape keys (E11 regression)', async () => {

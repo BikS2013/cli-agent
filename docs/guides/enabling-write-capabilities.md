@@ -15,21 +15,22 @@ If you just want the answer for a common case, copy one of these:
 cli-agent --allow-mutations "rename every occurrence of FooBar to FooBaz under src/"
 
 # 2. Let the agent run a wrapped CLI that writes (e.g. git, kubectl)
+#    (--tool git auto-adds git to the bash allowlist — no --bash-allow needed)
 cli-agent --tool git \
           --allow-mutations \
-          --bash-allow git \
           "create a commit with the current staged changes"
 
 # 3. Let it use a CLI that needs a credential
 cli-agent --tool gh \
           --allow-mutations \
-          --bash-allow gh \
           --bash-pass-secret GH_TOKEN \
           "open a draft PR for the current branch"
 
-# 4. Fine-grained: allow git commit but not git push --force
-cli-agent --tool git \
-          --allow-mutations \
+# 4. Fine-grained: allow git commit but not git push --force.
+#    NOTE: no --tool git here — wrapping auto-adds a bare "git" allowlist
+#    entry, and a bare entry allows EVERY git invocation (entries are OR'd),
+#    which would defeat the regex restriction below.
+cli-agent --allow-mutations \
           --bash-allow 'argv-regex:^git (status|diff|add|commit|log)\b' \
           "commit the staged work with a sensible message"
 ```
@@ -61,12 +62,20 @@ switch:
 | Capability you want | What you turn on | Why |
 |---|---|---|
 | Native file writes (`agt_file_write`, `agt_file_edit`, `agt_multiedit`, etc.) | `--allow-mutations` | This is the global "I'm OK with the agent modifying things" switch. |
-| Wrapped CLI writes (`git commit`, etc.) | `--allow-mutations` PLUS the binary on the bash allowlist | The mutation switch tells the agent it may issue write subcommands. The allowlist tells `bash_run` which binaries it may execute at all. Both are needed. |
+| Wrapped CLI writes (`git commit`, etc.) | `--allow-mutations` PLUS the binary on the bash allowlist (`--tool foo` auto-adds `foo`) | The mutation switch tells the agent it may issue write subcommands. The allowlist tells `bash_run` which binaries it may execute at all. Binaries you wrap with `--tool` are allow-listed automatically; `--bash-allow` is for additional, unwrapped binaries or `argv-regex:` rules. |
 | Wrapped CLI writes that need a token | All of the above PLUS `--bash-pass-secret <ENV_VAR>` | By default, environment variables that look like credentials are scrubbed before the binary runs. You re-allow specific ones explicitly. |
 
-These three switches are independent. You can have any combination
-(though "mutations on, allowlist empty" gives you nothing useful — the
-agent still cannot run any external binary).
+These three switches are independent. You can have any combination.
+
+> **⚠ Changed 2026-07-04 — an empty allowlist is now UNRESTRICTED, not "deny all".**
+> If you leave the bash allowlist completely unconfigured (no `--tool`, no
+> `--bash-allow`/`--bash-allow-file`, no `BASH_ALLOWED_COMMANDS`, no
+> `config.json` `bash.allow`), `bash_run` is bound and may execute **any**
+> binary on your `PATH` (cli-agent prints a stderr notice when this happens).
+> The allowlist only *restricts* once it has at least one entry. Whether those
+> commands may make changes is still governed separately by `--allow-mutations`.
+> To keep the agent from running arbitrary binaries, configure at least one
+> allowlist entry (or wrap the specific CLIs you want with `--tool`).
 
 ---
 
@@ -123,21 +132,26 @@ you send sees the new posture.
 ## Switch 2 — the bash allowlist (which binaries `bash_run` may run)
 
 `bash_run` is the only path through which the agent can spawn a child
-process. It will execute **only** binaries that are explicitly on the
-allowlist. Binaries you attach with `--tool foo` are **not**
-automatically added; the allowlist is a separate concern.
+process. It will execute **only** binaries that are on the allowlist.
+Binaries you attach with `--tool foo` **are added automatically**: each
+wrapped tool name is merged into the allowlist as a bare-name entry at
+startup (`src/config/agent-config.ts`). The switches below are therefore
+for binaries you do **not** wrap — extra helpers like `jq`, or binaries
+you deliberately leave unwrapped so you can restrict them with
+`argv-regex:` rules.
 
 There are three ways to add to the allowlist:
 
 ### Option A — `--bash-allow <csv>` (inline)
 
 ```bash
-cli-agent --tool git --bash-allow git,gh,jq …
+cli-agent --tool git --bash-allow gh,jq …
 ```
 
 Comma-separated list. Each entry is the bare binary name; the agent
 will accept any subcommand of that binary as long as the mutation
-gate also allows it.
+gate also allows it. (`git` needs no entry here — `--tool git`
+already auto-added it.)
 
 ### Option B — `--bash-allow-file <path>` (from a file)
 
@@ -181,6 +195,16 @@ The regex is anchored at the start; the agent's exact argv must match
 or `bash_run` rejects the call. This lets you allow `git commit` but
 forbid `git push --force` even with `--allow-mutations` on.
 
+> **Warning — entries are OR'd.** A command is allowed when **any**
+> allowlist entry matches. A bare-name entry (`git`) therefore makes
+> every `argv-regex:^git …` rule for the same binary moot — and
+> because `--tool git` auto-adds the bare `git` entry, you **cannot**
+> combine `--tool git` with an argv-regex restriction of git. To
+> restrict a binary to specific subcommands, allow it *only* via
+> `argv-regex:` and do not wrap it with `--tool`. The trade-off: an
+> unwrapped binary gets no capability document in the system prompt,
+> so the model relies on its general knowledge of that CLI.
+
 ### Why two switches instead of one?
 
 The mutation gate (Switch 1) is about **intent** — "I'm OK with the
@@ -191,12 +215,16 @@ Decoupling them gives you flexible combinations:
 - Mutation **off**, allowlist **populated** → agent can run read-only
   commands of allow-listed binaries (`git status`, `kubectl get`,
   `aws s3 ls`).
-- Mutation **on**, allowlist **empty** → agent has the native file
-  tools (`agt_file_write` etc.) but no `bash_run` at all. Useful when
-  you only want code edits, no shell invocations.
+- Mutation **on**, allowlist **empty** (no `--tool`, no `--bash-allow`)
+  → **UNRESTRICTED** (changed 2026-07-04): `bash_run` is bound and may run
+  ANY binary on `PATH`, with mutating subcommands unlocked. This is broad —
+  if you only want code edits with no shell at all, use `--mode basic`
+  (which loads the `agt_*` file tools but never `bash_run`), not an empty
+  allowlist.
 - Mutation **on**, allowlist **populated with `argv-regex:` entries**
   → fully unlocked but each binary is constrained to specific
-  subcommands.
+  subcommands — provided the binary is not *also* present as a
+  bare-name entry (see the OR warning above; `--tool` adds one).
 
 ---
 
@@ -212,7 +240,6 @@ database password, …), opt that variable in:
 ```bash
 cli-agent --tool gh \
           --allow-mutations \
-          --bash-allow gh \
           --bash-pass-secret GH_TOKEN \
           --bash-pass-secret GH_HOST \
           …
@@ -254,7 +281,7 @@ cli-agent --allow-mutations \
 - No `--bash-allow` is needed — you're not running any binary.
 - All writes are confined to the configured file root. By default,
   that's the directory you launched `cli-agent` from. Set
-  `AGENT_FILE_ROOT=…` or the `fileEdit.root` config key to point
+  `FILE_EDIT_ROOT=…` or the `fileEdit.root` config key to point
   somewhere else.
 
 ### Example B — "let the agent run git for me"
@@ -265,30 +292,31 @@ You want the agent to issue git commands including writes (`commit`,
 ```bash
 cli-agent --tool git \
           --allow-mutations \
-          --bash-allow git \
           "review the staged changes and create a commit with a sensible message"
 ```
 
 - `--tool git` introspects `git --help` and embeds git's subcommand
   surface into the system prompt, so the LLM knows *your* git's
-  capabilities.
+  capabilities — and it auto-adds `git` to the bash allowlist, so no
+  separate `--bash-allow` is needed.
 - `--allow-mutations` flips the mutation posture. Without it, the
   LLM is told to prefer read-only git subcommands.
-- `--bash-allow git` puts `git` on the bash allowlist. Without it,
-  `bash_run` rejects every git invocation.
 
-If you want git but **only** safe subcommands, keep the mutation gate
-on but tighten the allowlist:
+If you want git but **only** safe subcommands, drop `--tool git`
+(wrapping auto-adds a bare `git` entry that allows *every* git
+invocation — entries are OR'd) and allow git exclusively through an
+`argv-regex:` rule:
 
 ```bash
-cli-agent --tool git \
-          --allow-mutations \
+cli-agent --allow-mutations \
           --bash-allow 'argv-regex:^git (status|diff|add|commit|log|branch)\b' \
           …
 ```
 
 That allows committing and branching but rejects `git push --force`,
-`git reset --hard`, etc.
+`git reset --hard`, etc. Without the wrap, git has no capability
+document in the system prompt — the model falls back on its general
+git knowledge, which for a ubiquitous CLI like git is usually fine.
 
 ### Example C — "let the agent post to GitHub"
 
@@ -296,15 +324,14 @@ That allows committing and branching but rejects `git push --force`,
 export GH_TOKEN="ghp_…"
 cli-agent --tool gh \
           --allow-mutations \
-          --bash-allow gh \
           --bash-pass-secret GH_TOKEN \
           "open a PR for the current branch with the description from CHANGELOG.md"
 ```
 
-All three switches are needed:
+Two explicit switches, plus one that `--tool` handles for you:
 
 - **Mutation gate**: `gh pr create` is a write operation.
-- **Allowlist**: `gh` must be allow-listed for `bash_run` to run it.
+- **Allowlist**: satisfied automatically — `--tool gh` auto-adds `gh`.
 - **Secret pass-through**: `GH_TOKEN` is normally scrubbed; you have
   to opt it in by name.
 
@@ -335,9 +362,9 @@ If you turn the agent loose without the right switches, the rejection
 itself is informative:
 
 - "I cannot modify files in read-only mode" → mutation gate is off.
-- `bash_run`-level "command not on allowlist" → the binary isn't in
-  `--bash-allow` (or the allowlist regex doesn't match the agent's
-  argv).
+- `bash_run`-level "command not on allowlist" → the binary is neither
+  wrapped via `--tool` nor in `--bash-allow` (or the only matching
+  entry is an `argv-regex:` rule that doesn't match the agent's argv).
 - The wrapped binary itself returns an auth error → the credential
   isn't in `--bash-pass-secret`.
 
@@ -399,9 +426,9 @@ particular run, do a dry-run first:
 
 ```bash
 # Read-only first, see what the agent would do:
-cli-agent --tool git --bash-allow git "show me the commits I'd produce …"
+cli-agent --tool git "show me the commits I'd produce …"
 # Then re-run with mutations once the plan looks right:
-cli-agent --tool git --bash-allow git --allow-mutations "do it"
+cli-agent --tool git --allow-mutations "do it"
 ```
 
 ---

@@ -25,8 +25,9 @@ supplies language, planning, and judgement; the toolbox is what lets it
 *act* on your machine. Take the tools away and you have a clever
 conversationalist that can't touch anything. Add tools and it gains hands.
 
-Everything the model can call comes from four sources, which you switch on
-and off independently:
+Everything the model can call comes from four sources. Which of them load
+is decided by one dial — `--mode <chat|basic|tool|composite>` — plus what
+you attach on top:
 
 ```
                  ┌──────────────────────────────────────────────┐
@@ -47,17 +48,19 @@ and off independently:
                         Level 5 = all of them, orchestrated together
 ```
 
-Two of these are **group toggles** that default to *on*
-(built-in toolkit, agent-tools pack) plus composites; one is **opt-in per
-launch** (wrapped CLIs via `--tool`); and one is **something you build**
-(composites). The whole resolved set is called the **catalog**, and the
-catalog is what gets described to the model in its system prompt.
+The **mode** decides which groups load: `chat` loads nothing, `basic`
+loads only the agent-tools pack, `tool` adds the built-in toolkit, and
+`composite` (the default) loads everything, composite/virtual tools
+included. On top of the mode, wrapped CLIs are **opt-in per launch**
+(`--tool`) and composites are **something you build**. The whole resolved
+set is called the **catalog**, and the catalog is what gets described to
+the model in its system prompt.
 
 > **Important:** the levels below are *classes of capability*, not a
 > strict staircase you must climb in order. A fresh install already sits
 > at **Level 2** (it can read and search files out of the box). You go
 > *up* by attaching more (wrapped CLIs, composites, write access); you go
-> *down* by switching tool families off. Level 0 and Level 1 are mostly
+> *down* by picking a lower `--mode`. Level 0 and Level 1 are mostly
 > interesting as *deliberately stripped-down* configurations.
 
 ---
@@ -66,9 +69,9 @@ catalog is what gets described to the model in its system prompt.
 
 | Level | Name | The agent can… | What you turn on | Tools it gains |
 |------:|------|----------------|------------------|----------------|
-| **0** | [Pure conversation](#level-0--pure-conversation-no-tools) | Only talk: explain, draft, brainstorm, reason over text you paste in | `--no-builtin-tools --no-agent-tools --no-composites` (and no `--tool`) | *none* |
-| **1** | [Run local commands](#level-1--run-local-commands-the-built-in-toolkit) | Execute allow-listed shell commands and inspect what's allowed | built-in toolkit (default on) + a non-empty allowlist (`--bash-allow` / `--tool`) | `bash_run`, `bash_list_allowed`, `bash_which`, `tool_help` |
-| **2** | [Portable file / search / web skills](#level-2--portable-file-search--web-skills-the-agent-tools-pack) | Read & search files, fetch & search the web, keep a todo list — **with no external binary installed** | agent-tools pack (default on); `--allow-mutations` to also write files | `agt_glob`, `agt_grep`, `agt_file_*`, `agt_web_*`, `agt_todo_*`, `agt_multiedit`, `agt_patch` |
+| **0** | [Pure conversation](#level-0--pure-conversation-no-tools) | Only talk: explain, draft, brainstorm, reason over text you paste in | `--mode chat` (and no `--tool`) | *none* |
+| **1** | [Run local commands](#level-1--run-local-commands-the-built-in-toolkit) | Execute allow-listed shell commands and inspect what's allowed | `--mode tool` + a non-empty allowlist (`--bash-allow` / `--tool`); add `--disable-tool agt_*` entries for a strictly shell-only posture | `bash_run`, `bash_list_allowed`, `bash_which`, `tool_help` |
+| **2** | [Portable file / search / web skills](#level-2--portable-file-search--web-skills-the-agent-tools-pack) | Read & search files, fetch & search the web, keep a todo list — **with no external binary installed** | `--mode basic` (or nothing — the default mode includes the pack); `--allow-mutations` to also write files | `agt_glob`, `agt_grep`, `agt_file_*`, `agt_web_*`, `agt_todo_*`, `agt_multiedit`, `agt_patch` |
 | **3** | [Wrap an external command](#level-3--wrap-an-external-command---tool) | Drive any CLI on your `PATH` intelligently (`git`, `gh`, `kubectl`, `aws`, `ffmpeg`, …) — version-aware, from auto-discovered `--help` | `--tool <name>` (repeatable) | the wrapped CLIs, run through `bash_run`, with per-tool capability docs |
 | **4** | [Compose commands into a new tool](#level-4--compose-commands-into-a-new-tool-composites) | Package a curated multi-CLI assistant as a *single new tool* another agent can attach with one flag | `--treat-as-tool` + `--register-virtual` / `--emit-wrapper` (or the `composite-synthesize` subcommand) | a `--tool <composite-id>` that fronts several CLIs |
 | **5** | [Orchestrate complex OS operations](#level-5--orchestrate-complex-operations-over-the-os) | Combine wrapped CLIs + file/web skills + write access + composites to carry out multi-step jobs across your system, repeatably | everything above + `--allow-mutations` + `--profile` for presets | the full catalog, pinned and auditable |
@@ -95,7 +98,9 @@ catalog is empty, so they aren't part of the ladder:
 - **Structured JSONL logging** and the optional
   [LLM I/O inspector](#auditing-what-the-agent-actually-did) (`--inspect-io`).
 - **Strict configuration precedence** with no silent fallbacks:
-  `CLI flag > shell env > ~/.tool-agents/cli-agent/.env > local ./.env > profile > config.json`.
+  `CLI flag > shell env > ~/.tool-agents/cli-agent/.env > local ./.env > profile > config.json`
+  for the pinnable knobs (provider, model, temperature, mutations, mode, …).
+  See [the reference](../tools/cli-agent.md).
 
 ---
 
@@ -117,10 +122,10 @@ search the web — anything that requires touching the world. If you ask it
 to "summarise README.md", it can only tell you it has no way to read the
 file.
 
-**How to turn it on.** Disable all three tool groups and wrap no CLI:
+**How to turn it on.** One flag — `--mode chat` — and wrap no CLI:
 
 ```bash
-cli-agent --no-builtin-tools --no-agent-tools --no-composites \
+cli-agent --mode chat \
   "Explain what a LangGraph ReAct loop is, in three sentences."
 ```
 
@@ -156,13 +161,33 @@ wrap a CLI, which is Level 3 — wrapping a tool auto-adds it to the
 allowlist). With an empty allowlist the agent is told, truthfully, that no
 local commands are available to it.
 
-**How to turn it on.** Allow a few read-only commands explicitly:
+**How to turn it on.** `--mode tool` loads the built-in toolkit; then
+allow a few read-only commands explicitly:
 
 ```bash
-# Level 1 only: built-in shell, a tiny allowlist, agent-tools off
-cli-agent --no-agent-tools --bash-allow "uname,sw_vers,ls,wc" \
+# Level 1 focus: built-in shell + a tiny allowlist
+cli-agent --mode tool --bash-allow "uname,sw_vers,ls,wc" \
   "What OS am I on, and how many files are in the current directory?"
 ```
+
+> **Shell-only caveat.** Since the mode simplification (plan-015) there is
+> no single switch that loads the shell toolkit *without* the agent-tools
+> pack — `--mode tool` brings both, and that is an accepted consequence of
+> the four-mode design. For a *strictly* shell-only posture, disable the
+> pack's default-on read tools individually:
+>
+> ```bash
+> cli-agent --mode tool \
+>   --disable-tool agt_glob --disable-tool agt_grep \
+>   --disable-tool agt_file_read --disable-tool agt_file_list \
+>   --disable-tool agt_web_search --disable-tool agt_web_fetch \
+>   --bash-allow "uname,sw_vers,ls,wc" "…"
+> ```
+>
+> (or set the matching `agentTools.tools.*` keys to `false` once in
+> `config.json` instead of repeating the flags; the write tools and the
+> todo tools are already off without `--allow-mutations` /
+> `--enable-tool`).
 
 A one-shot transcript:
 
@@ -183,8 +208,11 @@ and [enabling-write-capabilities](enabling-write-capabilities.md).
 
 > **Allowlist syntax tip.** `--bash-allow` accepts bare binary names
 > (`git`) *and* `argv-regex:<pattern>` rules for fine-grained control
-> (e.g. allow `git log …` but not `git push …`). The write-capabilities
-> guide has worked examples.
+> (e.g. allow `git log …` but not `git push …`). Entries are OR'd: a
+> bare-name entry — including the one `--tool` auto-adds — allows every
+> invocation of that binary and overrides any `argv-regex:` restriction
+> for it, so to restrict a binary list it *only* via `argv-regex:` (and
+> don't wrap it). The write-capabilities guide has worked examples.
 
 ---
 
@@ -193,7 +221,8 @@ and [enabling-write-capabilities](enabling-write-capabilities.md).
 **What it is.** The `agt_*` pack — a curated set of first-class skills the
 agent carries **without needing any external binary installed.** This pack
 is *on by default*, which is why a fresh `cli-agent` can already read and
-search your files.
+search your files; `--mode basic` gives you *only* this pack (no shell, no
+composites).
 
 | Tool | Default | Writes? | Purpose |
 |------|---------|---------|---------|
@@ -255,12 +284,14 @@ sandbox root (`fileEdit.root`, default = your launch directory).
   share a per-session budget (`WEB_SEARCH_MAX_REQUESTS`, default 50).
 
 **Turning individual tools on/off.** Every tool has a per-tool override
-(e.g. `--disable-agt-grep`, `--enable-agt-todo-write`) and a matching env
-var (`CLI_AGENT_AGT_GREP=false`). Enable the todo tools when you want the
-agent to track its own multi-step plan:
+via the repeatable `--enable-tool <name>` / `--disable-tool <name>` flags
+(canonical names, e.g. `--disable-tool agt_grep`), plus a matching env var
+(`CLI_AGENT_AGT_GREP=false`) and `config.json` key (`agentTools.tools.*`).
+Enable the todo tools when you want the agent to track its own multi-step
+plan:
 
 ```bash
-cli-agent --enable-agt-todo-read --enable-agt-todo-write \
+cli-agent --enable-tool agt_todo_read --enable-tool agt_todo_write \
   "Plan and carry out a refactor of the config loader; keep a running todo list."
 ```
 
@@ -279,10 +310,12 @@ on your `PATH` with `--tool <name>` and, on first run, it:
 5. embeds that document into the system prompt.
 
 The model now knows *your* installed version's exact subcommands and flags,
-and runs them through `bash_run` (which is why **the built-in toolkit must
-stay on for wrapped CLIs to work** — `--no-builtin-tools` removes
-`bash_run` and with it the ability to execute wrapped tools). Each
-`--tool` you declare is auto-added to the bash allowlist.
+and runs them through `bash_run` (which is why **wrapped CLIs need
+`--mode tool` or `--mode composite`** — the two modes that load
+`bash_run`; combining `--tool` with `--mode chat` or `--mode basic` is
+rejected as a usage error). The default mode is `composite`, so plain
+`cli-agent --tool git` just works. Each `--tool` you declare is auto-added
+to the bash allowlist.
 
 **How to turn it on.**
 
@@ -436,8 +469,8 @@ file-write skill**, and the **shell** — exactly the cross-tool orchestration
 the ladder builds toward.
 
 **Make a Level-5 setup repeatable with a profile.** Profiles pin a whole
-preset (provider/model, which tools are exposed, default tool arguments)
-under a name:
+preset (provider/model, the mode via `cliParams.mode`, which tools are
+exposed, default tool arguments) under a name:
 
 ```bash
 # Capture your current working setup as a named profile
@@ -472,54 +505,65 @@ At Level 5 you're giving the agent real reach, so verify its work:
 
 ## Turning the dials: landing on exactly the level you want
 
-Five independent dials decide where on the ladder a session sits:
+Four independent dials decide where on the ladder a session sits:
 
 | Dial | Effect | Default |
 |------|--------|---------|
-| `--builtin-tools` / `--no-builtin-tools` | the cross-cutting toolkit (`bash_*`, `tool_help`) — **also gates `bash_run`, so off ⇒ wrapped CLIs can't run** | on |
-| `--agent-tools` / `--no-agent-tools` | the whole `agt_*` pack (files, search, web, todos) | on |
-| `--composites` / `--no-composites` | composite/virtual tools loaded from disk | on |
-| `--tool <name>` (repeatable) | wrap an external CLI (adds it to the allowlist + introspects it) | none |
+| `--mode <chat\|basic\|tool\|composite>` | which tool groups load — `chat` = no tools at all; `basic` = the `agt_*` pack only (no shell); `tool` = built-in toolkit (`bash_*`, `tool_help`) + `agt_*` pack; `composite` = everything, incl. composite/virtual tools | `composite` |
+| `--tool <name>` (repeatable) | wrap an external CLI (adds it to the allowlist + introspects it) — requires mode `tool` or `composite` | none |
 | `--allow-mutations` | unlock every write-capable tool and side-effecting command | off (read-only) |
+| `--enable-tool <name>` / `--disable-tool <name>` (repeatable) | switch a single `agt_*` tool on or off by its canonical name (e.g. `--disable-tool agt_grep`, `--enable-tool agt_todo_write`) | pack defaults |
 
-Each group toggle also has an env var (`CLI_AGENT_DISABLE_BUILTIN_TOOLS`,
-`CLI_AGENT_DISABLE_COMPOSITES`, `CLI_AGENT_DISABLE_AGENT_TOOLS`), a
-`config.json` key, and a profile key, resolved by the uniform chain:
+`--mode` is a pinnable knob like `provider` or `model`: besides the flag it
+has an env var (`CLI_AGENT_MODE`), a profile key (`cliParams.mode`), and a
+`config.json` key (`mode`), resolved by the single uniform chain:
 
 ```
-CLI flag  >  env var  >  ~/.tool-agents/cli-agent/.env  >  local ./.env  >  profile  >  config.json  >  default (load)
+CLI --mode  >  CLI_AGENT_MODE (shell > ~/.tool-agents/cli-agent/.env > local ./.env)  >  profile cliParams.mode  >  config.json mode  >  default: composite
 ```
+
+> **Removed (plan-015):** the old tool-group toggles —
+> `--builtin-tools`/`--no-builtin-tools`, `--agent-tools`/`--no-agent-tools`,
+> `--composites`/`--no-composites`, the 26 `--enable-agt-*`/`--disable-agt-*`
+> per-tool flags, the `CLI_AGENT_DISABLE_*` env vars, and the matching
+> `config.json`/profile group keys. Using any of them now fails fast with a
+> migration hint pointing at `--mode` and `--enable-tool`/`--disable-tool`.
+> The per-tool `CLI_AGENT_AGT_*` env vars and `agentTools.tools.*` config
+> keys are unchanged.
 
 **Recipes for each rung:**
 
 ```bash
 # Level 0 — pure chat
-cli-agent --no-builtin-tools --no-agent-tools --no-composites "…"
+cli-agent --mode chat "…"
 
-# Level 1 — shell only, read-only
-cli-agent --no-agent-tools --bash-allow "git,ls,cat" "…"
+# Level 1 — shell-focused, read-only (see the shell-only caveat at Level 1)
+cli-agent --mode tool --bash-allow "git,ls,cat" "…"
 
-# Level 2 — built-in file/search/web skills (the default), read-only
-cli-agent "…"
+# Level 2 — built-in file/search/web skills, read-only
+cli-agent --mode basic "…"   # exactly the agt_* pack, nothing else
+cli-agent "…"                # the default (composite) includes it too
 #   …add write access:
 cli-agent --allow-mutations "…"
 
-# Level 3 — wrap external CLIs
+# Level 3 — wrap external CLIs (the default mode, composite, is fine)
 cli-agent --tool git --tool gh "…"
 
 # Level 4 — build a composite, then attach it
 cli-agent composite-synthesize --tool git --tool gh --composite-name rel --register-virtual
 cli-agent --tool rel "…"
 
-# Level 5 — everything, pinned in a profile
+# Level 5 — everything, pinned in a profile (incl. cliParams.mode)
 cli-agent --profile incident-response "…"
 ```
 
 **How to verify what's actually loaded** before trusting a run:
 
 - The startup notice (and `--verbose`) tells you when the catalog is empty.
-- In the TUI, `/tools list` shows the wrapped CLIs and `/capabilities`
-  their freshness.
+- In the TUI, `/mode` prints the current mode (and `/mode <value>` switches
+  it, rebuilding the catalog on the fly — switching to `chat` or `basic` is
+  rejected while wrapped CLIs are loaded), `/tools list` shows the wrapped
+  CLIs and `/capabilities` their freshness.
 - `cli-agent profile-dry-run [--profile <name>]` prints the fully resolved
   config and the resulting tool catalog **without** launching the LLM.
 - `--inspect-io` then `/inspect show` reveals the exact `boundTools` the
@@ -593,7 +637,7 @@ inspect, replay your reasoning about it, and resume later if needed.
 
 - **[`docs/tools/cli-agent.md`](../tools/cli-agent.md)** — the complete
   reference: every flag, env var, config key, slash command, the
-  agent-tools pack, the tool-loading toggles, and composite tools.
+  agent-tools pack, the `--mode` knob, and composite tools.
 - **[configuring-cli-agent](configuring-cli-agent.md)** — get a provider
   wired up (decision tree + recipes for all 8).
 - **[enabling-write-capabilities](enabling-write-capabilities.md)** — the

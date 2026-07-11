@@ -104,50 +104,34 @@ describe('ProfileSchema', () => {
   });
 });
 
-describe('ProfileSchema — tools group toggles (plan-008)', () => {
-  it('accepts tools.composites / tools.builtin / tools.agentTools booleans', () => {
-    const result = ProfileSchema.safeParse({
-      schemaVersion: 1,
-      tools: { composites: false, builtin: false, agentTools: true },
-    });
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data.tools?.composites).toBe(false);
-      expect(result.data.tools?.builtin).toBe(false);
-      expect(result.data.tools?.agentTools).toBe(true);
-    }
-  });
-
-  it('accepts the toggles alongside allow/deny/order', () => {
-    const result = ProfileSchema.safeParse({
-      schemaVersion: 1,
-      tools: {
-        allow: ['file_read'],
-        deny: ['file_write'],
-        order: ['file_read'],
-        composites: true,
-        builtin: true,
-        agentTools: false,
-      },
-    });
-    expect(result.success).toBe(true);
-  });
-
+describe('ProfileSchema — legacy group-toggle keys removed (plan-015)', () => {
   it.each(['composites', 'builtin', 'agentTools'])(
-    'rejects a non-boolean tools.%s',
+    'rejects tools.%s (removed key; .strict())',
     (key) => {
       const result = ProfileSchema.safeParse({
         schemaVersion: 1,
-        tools: { [key]: 'yes' },
+        tools: { [key]: true },
       });
       expect(result.success).toBe(false);
     },
   );
 
+  it('still accepts allow/deny/order alone', () => {
+    const result = ProfileSchema.safeParse({
+      schemaVersion: 1,
+      tools: {
+        allow: ['bash_run'],
+        deny: ['agt_patch'],
+        order: ['bash_run'],
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
   it('still rejects an unknown key under tools (.strict())', () => {
     const result = ProfileSchema.safeParse({
       schemaVersion: 1,
-      tools: { composites: true, mysteryToggle: true },
+      tools: { mysteryToggle: true },
     });
     expect(result.success).toBe(false);
     if (!result.success) {
@@ -157,8 +141,32 @@ describe('ProfileSchema — tools group toggles (plan-008)', () => {
   });
 });
 
+describe('ProfileSchema — cliParams.mode (plan-015)', () => {
+  it.each(['chat', 'basic', 'tool', 'composite'])(
+    'accepts cliParams.mode: %s',
+    (mode) => {
+      const result = ProfileSchema.safeParse({
+        schemaVersion: 1,
+        cliParams: { mode },
+      });
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.data.cliParams?.mode).toBe(mode);
+      }
+    },
+  );
+
+  it('rejects an invalid cliParams.mode enum value', () => {
+    const result = ProfileSchema.safeParse({
+      schemaVersion: 1,
+      cliParams: { mode: 'shell' },
+    });
+    expect(result.success).toBe(false);
+  });
+});
+
 describe('KNOWN_CLI_PARAMS', () => {
-  it('includes the eight tier-5 pinnable knobs', () => {
+  it('includes the nine tier-5 pinnable knobs', () => {
     for (const knob of [
       'provider',
       'model',
@@ -168,6 +176,7 @@ describe('KNOWN_CLI_PARAMS', () => {
       'logLevel',
       'webSearchBackend',
       'allowMutations',
+      'mode',
     ]) {
       expect(KNOWN_CLI_PARAMS.has(knob)).toBe(true);
     }

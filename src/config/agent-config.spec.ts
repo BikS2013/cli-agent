@@ -570,22 +570,10 @@ describe('loadAgentConfig — agentTools defaults', () => {
 });
 
 describe('loadAgentConfig — agentTools env vars', () => {
-  it('CLI_AGENT_DISABLE_AGENT_TOOLS=1 disables the umbrella', async () => {
-    const cfg = await loadAgentConfig(
-      { provider: 'openai' },
-      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '1' }, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
-
-  it('CLI_AGENT_DISABLE_AGENT_TOOLS=0 keeps the umbrella on (default true)', async () => {
-    const cfg = await loadAgentConfig(
-      { provider: 'openai' },
-      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '0' }, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(true);
-  });
-
+  // plan-015: the CLI_AGENT_DISABLE_AGENT_TOOLS umbrella env var was
+  // hard-removed — any set value is rejected with a migration hint. The
+  // full legacy-surface rejection matrix lives in agent-config-mode.spec.ts;
+  // this file keeps the per-tool CLI_AGENT_AGT_* tier, which is unchanged.
   it.each([
     ['true', true], ['1', true], ['yes', true], ['on', true], ['TRUE', true],
     ['false', false], ['0', false], ['no', false], ['off', false], ['FALSE', false],
@@ -654,15 +642,6 @@ describe('loadAgentConfig — agentTools env vars', () => {
     ).rejects.toMatchObject({ code: 'E_CONFIG_MISSING' });
   });
 
-  it('throws ConfigurationError when CLI_AGENT_DISABLE_AGENT_TOOLS is unparseable', async () => {
-    await expect(
-      loadAgentConfig(
-        { provider: 'openai' },
-        { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: 'maybe' }, cwd: '/tmp' },
-      ),
-    ).rejects.toMatchObject({ code: 'E_CONFIG_MISSING' });
-  });
-
   it('treats empty-string env var as unset (defers to default)', async () => {
     const cfg = await loadAgentConfig(
       { provider: 'openai' },
@@ -673,23 +652,9 @@ describe('loadAgentConfig — agentTools env vars', () => {
 });
 
 describe('loadAgentConfig — agentTools precedence (CLI > env > default)', () => {
-  it('umbrella: CLI flag wins over env var', async () => {
-    // CLI says enabled=false; env says umbrella should be on (DISABLE=0)
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', agentTools: { enabled: false } },
-      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '0' }, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
-
-  it('umbrella: env wins over default when CLI is silent', async () => {
-    const cfg = await loadAgentConfig(
-      { provider: 'openai' },
-      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '1' }, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
-
+  // plan-015: the umbrella has no CLI/env/config surface anymore — the
+  // pack's presence comes from the mode knob (see agent-config-mode.spec.ts).
+  // The per-tool chain below is unchanged (FR-TOOLFLAG-3).
   it('per-tool: CLI flag wins over env var', async () => {
     // CLI says glob=true; env says glob=false. CLI must win.
     const cfg = await loadAgentConfig(
@@ -765,81 +730,10 @@ describe('loadAgentConfig — agentTools precedence (CLI > env > default)', () =
 });
 
 // ---------------------------------------------------------------------------
-// mapAgentToolFlags is the CLI-tier gatekeeper for agent-tools flags. It lives
-// in its own module (`src/cli-agent-tools-flags.ts`) — separate from cli.ts —
-// precisely so tests can import it WITHOUT triggering cli.ts's module-level
-// Commander parse side-effect. See the JSDoc on mapAgentToolFlags for the
-// conflict-detection contract.
+// mapAgentToolFlags (the CLI-tier gatekeeper for the generic
+// --enable-tool/--disable-tool pair, plan-015) is tested in its dedicated
+// spec file `src/cli-agent-tools-flags.spec.ts`.
 // ---------------------------------------------------------------------------
-import { mapAgentToolFlags } from '../cli-agent-tools-flags.js';
-
-describe('mapAgentToolFlags — CLI conflict detection', () => {
-  let originalArgv: string[];
-
-  beforeEach(() => {
-    originalArgv = process.argv;
-  });
-
-  afterEach(() => {
-    process.argv = originalArgv;
-  });
-
-  it('returns undefined when no agent-tools flags are present', () => {
-    process.argv = ['node', 'cli.js'];
-    expect(mapAgentToolFlags({})).toBeUndefined();
-  });
-
-  it('returns { enabled: false } when --no-agent-tools is parsed', () => {
-    process.argv = ['node', 'cli.js', '--no-agent-tools'];
-    // Commander would parse `--no-agent-tools` to `agentTools: false`.
-    const out = mapAgentToolFlags({ agentTools: false });
-    expect(out).toEqual({ enabled: false });
-  });
-
-  it('throws UsageError when both --agent-tools and --no-agent-tools are passed', () => {
-    process.argv = ['node', 'cli.js', '--agent-tools', '--no-agent-tools'];
-    // Commander records the LAST one (false), but mapAgentToolFlags must
-    // still detect the umbrella conflict from argv and throw.
-    expect(() => mapAgentToolFlags({ agentTools: false })).toThrow(/cannot be used together/);
-  });
-
-  it('throws UsageError when --enable-agt-grep and --disable-agt-grep are both passed', () => {
-    process.argv = ['node', 'cli.js', '--enable-agt-grep', '--disable-agt-grep'];
-    expect(() =>
-      mapAgentToolFlags({ enableAgtGrep: true, disableAgtGrep: true }),
-    ).toThrow(/--enable-agt-grep and --disable-agt-grep cannot be used together/);
-  });
-
-  it('extracts per-tool enable/disable into the partial shape', () => {
-    process.argv = ['node', 'cli.js', '--enable-agt-todo-read', '--disable-agt-grep'];
-    const out = mapAgentToolFlags({ enableAgtTodoRead: true, disableAgtGrep: true });
-    expect(out).toEqual({ tools: { todoRead: true, grep: false } });
-  });
-
-  it('maps --disable-agt-web-search / --enable-agt-web-fetch into the partial shape (plan-011)', () => {
-    process.argv = ['node', 'cli.js', '--disable-agt-web-search', '--enable-agt-web-fetch'];
-    const out = mapAgentToolFlags({ disableAgtWebSearch: true, enableAgtWebFetch: true });
-    expect(out).toEqual({ tools: { webSearch: false, webFetch: true } });
-  });
-
-  it('throws UsageError when --enable-agt-web-search and --disable-agt-web-search are both passed (plan-011)', () => {
-    process.argv = ['node', 'cli.js', '--enable-agt-web-search', '--disable-agt-web-search'];
-    expect(() =>
-      mapAgentToolFlags({ enableAgtWebSearch: true, disableAgtWebSearch: true }),
-    ).toThrow(/--enable-agt-web-search and --disable-agt-web-search cannot be used together/);
-  });
-
-  it('UsageError carries E_USAGE code (exit 2)', () => {
-    process.argv = ['node', 'cli.js', '--enable-agt-glob', '--disable-agt-glob'];
-    try {
-      mapAgentToolFlags({ enableAgtGlob: true, disableAgtGlob: true });
-      throw new Error('expected throw');
-    } catch (e) {
-      expect((e as { code?: string }).code).toBe('E_USAGE');
-      expect((e as { exitCode?: number }).exitCode).toBe(2);
-    }
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Configuration profiles (plan-005) — tier-5 integration tests.
@@ -1132,163 +1026,27 @@ async function clearConfigJson(): Promise<void> {
   }
 }
 
-describe('loadAgentConfig — tool-loading group toggles defaults (plan-008)', () => {
+describe('loadAgentConfig — mode default expansion (plan-015)', () => {
   beforeEach(async () => {
     await clearProfiles();
     await clearConfigJson();
   });
 
-  it('composites + builtinTools default to true (load) when nothing is set', async () => {
+  it('flagless invocation defaults to composite: all three groups on', async () => {
     const cfg = await loadAgentConfig(
       { provider: 'openai' },
       { shellEnv: {}, cwd: '/tmp' },
     );
     expect(cfg.composites).toBe(true);
     expect(cfg.builtinTools).toBe(true);
-  });
-});
-
-describe('loadAgentConfig — composites toggle precedence (plan-008)', () => {
-  beforeEach(async () => {
-    await clearProfiles();
-    await clearConfigJson();
-  });
-
-  it('CLI flag wins over env + config.json + profile', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
-    await placeConfigJson({ schemaVersion: 1, composites: true });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p', composites: false },
-      { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: '0' }, cwd: '/tmp' },
-    );
-    expect(cfg.composites).toBe(false);
-  });
-
-  it('env (CLI_AGENT_DISABLE_COMPOSITES=1) wins over config.json + profile', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
-    await placeConfigJson({ schemaVersion: 1, composites: true });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: '1' }, cwd: '/tmp' },
-    );
-    expect(cfg.composites).toBe(false);
-  });
-
-  it('config.json wins over profile when CLI + env are silent', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: true\n');
-    await placeConfigJson({ schemaVersion: 1, composites: false });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.composites).toBe(false);
-  });
-
-  it('profile(tools.composites) wins over the default when nothing higher is set', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  composites: false\n');
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.composites).toBe(false);
-  });
-
-  it('throws ConfigurationError when CLI_AGENT_DISABLE_COMPOSITES is unparseable', async () => {
-    await expect(
-      loadAgentConfig(
-        { provider: 'openai' },
-        { shellEnv: { CLI_AGENT_DISABLE_COMPOSITES: 'maybe' }, cwd: '/tmp' },
-      ),
-    ).rejects.toMatchObject({ code: 'E_CONFIG_MISSING' });
-  });
-});
-
-describe('loadAgentConfig — builtinTools toggle precedence (plan-008)', () => {
-  beforeEach(async () => {
-    await clearProfiles();
-    await clearConfigJson();
-  });
-
-  it('CLI flag wins over env + config.json + profile', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
-    await placeConfigJson({ schemaVersion: 1, builtinTools: true });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p', builtinTools: false },
-      { shellEnv: { CLI_AGENT_DISABLE_BUILTIN_TOOLS: '0' }, cwd: '/tmp' },
-    );
-    expect(cfg.builtinTools).toBe(false);
-  });
-
-  it('env (CLI_AGENT_DISABLE_BUILTIN_TOOLS=1) wins over config.json + profile', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
-    await placeConfigJson({ schemaVersion: 1, builtinTools: true });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: { CLI_AGENT_DISABLE_BUILTIN_TOOLS: '1' }, cwd: '/tmp' },
-    );
-    expect(cfg.builtinTools).toBe(false);
-  });
-
-  it('config.json wins over profile when CLI + env are silent', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: true\n');
-    await placeConfigJson({ schemaVersion: 1, builtinTools: false });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.builtinTools).toBe(false);
-  });
-
-  it('profile(tools.builtin) wins over the default when nothing higher is set', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  builtin: false\n');
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.builtinTools).toBe(false);
-  });
-});
-
-describe('loadAgentConfig — agentTools profile tier (plan-008)', () => {
-  beforeEach(async () => {
-    await clearProfiles();
-    await clearConfigJson();
-  });
-
-  it('profile(tools.agentTools=false) disables the umbrella when nothing higher is set', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: false\n');
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
-
-  it('config.json agentTools.enabled wins over the profile tier', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: false\n');
-    await placeConfigJson({ schemaVersion: 1, agentTools: { enabled: true } });
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
     expect(cfg.agentTools.enabled).toBe(true);
   });
-
-  it('env (CLI_AGENT_DISABLE_AGENT_TOOLS) wins over the profile tier', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: true\n');
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p' },
-      { shellEnv: { CLI_AGENT_DISABLE_AGENT_TOOLS: '1' }, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
-
-  it('CLI flag wins over the profile tier', async () => {
-    await placeProfileFile('p.yaml', 'name: p\nschemaVersion: 1\ntools:\n  agentTools: true\n');
-    const cfg = await loadAgentConfig(
-      { provider: 'openai', profile: 'p', agentTools: { enabled: false } },
-      { shellEnv: {}, cwd: '/tmp' },
-    );
-    expect(cfg.agentTools.enabled).toBe(false);
-  });
 });
+
+// ---------------------------------------------------------------------------
+// The plan-008 per-group toggle chains (composites / builtinTools /
+// agentTools umbrella across CLI/env/config/profile) were hard-removed by
+// plan-015. The mode knob's five-tier resolution, the mode→groups mapping,
+// the --tool × mode conflict, and the legacy-surface rejection matrix are
+// covered in `src/config/agent-config-mode.spec.ts`.
+// ---------------------------------------------------------------------------

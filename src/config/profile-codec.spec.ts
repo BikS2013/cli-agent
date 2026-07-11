@@ -186,3 +186,35 @@ describe('detectAmbiguity (E18)', () => {
     );
   });
 });
+
+describe('parseProfile — legacy group-toggle keys (plan-015)', () => {
+  it.each(['composites', 'builtin', 'agentTools'])(
+    "throws ConfigurationError with the cliParams.mode migration hint for tools.%s",
+    (key) => {
+      const text = `name: p\nschemaVersion: 1\ntools:\n  ${key}: true\n`;
+      try {
+        parseProfile(text, '/agent/profiles/p.yaml');
+        throw new Error('expected throw');
+      } catch (e) {
+        expect((e as { code?: string }).code).toBe('E_CONFIG_MISSING');
+        // The actionable hint must be in the user-visible MESSAGE …
+        expect((e as Error).message).toMatch(/removed \(plan-015\)/);
+        expect((e as Error).message).toContain('cliParams.mode');
+        expect((e as Error).message).toContain(`tools.${key}`);
+        // … and mirrored in details.detail per this codec's convention.
+        const detail = String(
+          (e as { details?: Record<string, unknown> }).details?.['detail'] ?? '',
+        );
+        expect(detail).toContain('cliParams.mode');
+      }
+    },
+  );
+
+  it('a profile pinning cliParams.mode round-trips', () => {
+    const text = 'name: p\nschemaVersion: 1\ncliParams:\n  mode: basic\n';
+    const profile = parseProfile(text, '/agent/profiles/p.yaml');
+    expect(profile.cliParams?.mode).toBe('basic');
+    const rendered = stringifyProfile(profile);
+    expect(parseProfile(rendered, '/agent/profiles/p.yaml').cliParams?.mode).toBe('basic');
+  });
+});

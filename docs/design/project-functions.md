@@ -100,9 +100,11 @@ FR-AGT-FILE-001.)
 `file_write`, `file_edit`, and `file_append` must be excluded from the LLM-visible catalog
 unless `--allow-mutations` is set. (plan-012: these are now the agent-tools-pack members
 `agt_file_write` / `agt_file_edit` / `agt_file_append`, mutation-gated in `group-builder.ts`;
-the gating semantics are unchanged — see FR-AGT-FILE-001.) `bash_run` must be visible when the allowlist is non-empty
-(regardless of `--allow-mutations`), but with a `[READ-ONLY-AGENT]` prefix warning when
-`--allow-mutations` is off.
+the gating semantics are unchanged — see FR-AGT-FILE-001.) `bash_run` must be visible whenever
+the built-in toolkit is loaded (mode `tool` or `composite`), regardless of `--allow-mutations` and
+regardless of the allowlist state (since 2026-07-04 an empty allowlist means UNRESTRICTED
+execution rather than hiding the tool — see FR-AGT-017), but with a `[READ-ONLY-AGENT]` prefix
+warning when `--allow-mutations` is off.
 
 ## FR-AGT-011: Configuration Precedence (Policy A — shell-wins)
 
@@ -153,7 +155,7 @@ this contract.
 
 ## FR-AGT-017: Bash Security Invariants
 
-- Allowlist enforcement before every spawn.
+- Allowlist enforcement before every spawn — **EXCEPT** when the allowlist is left completely unconfigured, which since 2026-07-04 means UNRESTRICTED (fail-open): every command on `PATH` is permitted, and cli-agent emits one stderr notice at session build. Any configured entry restores restrictive matching. (User-directed change; recorded in the project memory note `bash-allowlist-fail-open`. The other invariants below hold in BOTH modes.)
 - `execFile`-equivalent semantics (no shell string, no pipes/redirects/globbing).
 - Working directory sandbox enforced against `bash.allowedRoots`.
 - Child env stripped to `passEnv` list; credential-shaped vars stripped unconditionally.
@@ -292,21 +294,26 @@ in `src/agent/system-prompt.ts`. Composition order: `<base text>` +
 + `<--system inline text>`. The block is byte-stable across runs unless
 the registered set changes (umbrella off OR per-tool flags toggled).
 
-### FR-NEW-006 — Runtime opt-out mechanism (Status: Accepted)
+### FR-NEW-006 — Runtime opt-out mechanism (Status: Accepted; surfaces updated by Plan 015)
 
 The user can disable the new tools (and their description block) for a
 given run via:
 
-  - CLI flags: `--no-agent-tools` (umbrella) and `--enable-agt-<tool>` /
-    `--disable-agt-<tool>` per tool.
-  - Env vars: `CLI_AGENT_DISABLE_AGENT_TOOLS=1` (umbrella) and
-    `CLI_AGENT_AGT_<TOOL>=1|0` per tool.
-  - `config.json`: `agentTools.enabled: bool` (umbrella) and
-    `agentTools.tools.<tool>: bool` per tool.
+  - **Whole pack (umbrella):** the `--mode` knob — the `agt_*` pack loads in
+    `basic` / `tool` / `composite` mode and is absent in `chat` (Plan 015).
+    The former `--no-agent-tools` flag, `CLI_AGENT_DISABLE_AGENT_TOOLS` env
+    var, and `agentTools.enabled` config/profile key were REMOVED (they now
+    fail fast with a migration hint — see FR-DEPREC-1).
+  - **Per tool (CLI):** `--enable-tool <name>` / `--disable-tool <name>`
+    (repeatable; canonical `agt_*` name), replacing the removed
+    `--enable-agt-<tool>` / `--disable-agt-<tool>` flags (Plan 015).
+  - **Per tool (env):** `CLI_AGENT_AGT_<TOOL>=1|0` — UNCHANGED.
+  - **Per tool (`config.json`):** `agentTools.tools.<tool>: bool` — UNCHANGED.
 
-The four sources obey the project's standard four-tier precedence
+The per-tool sources obey the project's standard four-tier precedence
 (FR-AGT-011: shell env wins among env tiers; CLI flag overrides all).
-Granularity is **per-tool with a pack-level umbrella**.
+Granularity is **per-tool, with the whole-pack umbrella now expressed
+through `--mode`**.
 
 ### FR-NEW-007 — Mutation gating compliance (Status: Accepted)
 
@@ -380,13 +387,16 @@ snapshot produced by `loadAgentConfig`, not from `process.env`, so shell env,
 `~/.tool-agents/cli-agent/.env`, local `.env`, and CLI/config precedence stay
 centralized. Governance:
 
-  - They appear iff the agent-tools umbrella is on (`--agent-tools` / not
-    `--no-agent-tools`) AND their per-tool flag is on.
-  - Per-tool flags: `--enable/--disable-agt-web-search`,
-    `--enable/--disable-agt-web-fetch`; env `CLI_AGENT_AGT_WEB_SEARCH` /
-    `CLI_AGENT_AGT_WEB_FETCH` (tri-state); config.json
-    `agentTools.tools.webSearch` / `.webFetch` (default `true`).
-  - They are NOT affected by `--no-builtin-tools` (web is no longer built-in).
+  - They appear iff the `agt_*` pack is loaded (mode `basic` / `tool` /
+    `composite`, i.e. not `chat` — Plan 015) AND their per-tool flag is on.
+  - Per-tool flags: `--enable-tool agt_web_search` / `--disable-tool agt_web_search`,
+    `--enable-tool agt_web_fetch` / `--disable-tool agt_web_fetch` (Plan 015,
+    replacing the removed `--enable/--disable-agt-web-*` flags); env
+    `CLI_AGENT_AGT_WEB_SEARCH` / `CLI_AGENT_AGT_WEB_FETCH` (tri-state,
+    unchanged); config.json `agentTools.tools.webSearch` / `.webFetch`
+    (default `true`, unchanged).
+  - Their presence is governed by `--mode`, never by `--no-builtin-tools`
+    (which was removed by Plan 015; web was never built-in).
   - Profile name-based scoping works unchanged (`tools.deny: [agt_web_search]`).
   - The "never fabricate URLs" guidance now rides on the `agt_web_*` tool
     descriptions in the agent-tools prompt block; the built-in prompt block no
@@ -403,21 +413,23 @@ no new runtime dependency is added (the rejected `@mozilla/readability` / `jsdom
 / `dotenv` deps stay out). After this change the built-in toolkit contains ONLY `bash_run`,
 `bash_list_allowed`, `bash_which`, and `tool_help`. Governance:
 
-  - They appear iff the agent-tools umbrella is on (`--agent-tools` / not `--no-agent-tools`)
-    AND their per-tool flag is on.
+  - They appear iff the `agt_*` pack is loaded (mode `basic` / `tool` /
+    `composite`, i.e. not `chat` — Plan 015) AND their per-tool flag is on.
   - `agt_file_read` / `agt_file_list` are read-only (no `--allow-mutations` gate), default ON.
   - `agt_file_write` / `agt_file_edit` / `agt_file_append` are default ON but mutation-gated:
     they register only when the per-tool flag is on AND `cfg.allowMutations === true`
     (mirroring `agt_multiedit` / `agt_patch` and the former native `mutatingFile` gating).
     This preserves today's effective behavior exactly (read+list load by default; the three
     mutators load only with `--allow-mutations`).
-  - Per-tool flags: `--enable/--disable-agt-file-read` (and `-file-list`, `-file-write`,
-    `-file-edit`, `-file-append`); env `CLI_AGENT_AGT_FILE_READ` / `_LIST` / `_WRITE` /
-    `_EDIT` / `_APPEND` (tri-state); config.json `agentTools.tools.fileRead` / `.fileList` /
-    `.fileWrite` / `.fileEdit` / `.fileAppend` (default `true`). Four-tier precedence per
-    FR-AGT-011 (CLI flag > shell env > config.json > default).
-  - They are NOT affected by `--no-builtin-tools` (file tools are no longer built-in);
-    `--no-agent-tools` / `--disable-agt-file-*` govern them.
+  - Per-tool flags: `--enable-tool agt_file_read` / `--disable-tool agt_file_read`
+    (and `agt_file_list`, `agt_file_write`, `agt_file_edit`, `agt_file_append`)
+    — Plan 015, replacing the removed `--enable/--disable-agt-file-*` flags;
+    env `CLI_AGENT_AGT_FILE_READ` / `_LIST` / `_WRITE` / `_EDIT` / `_APPEND`
+    (tri-state, unchanged); config.json `agentTools.tools.fileRead` / `.fileList` /
+    `.fileWrite` / `.fileEdit` / `.fileAppend` (default `true`, unchanged).
+    Four-tier precedence per FR-AGT-011 (CLI flag > shell env > config.json > default).
+  - Their presence is governed by `--mode` (they load in modes ≥ `basic`),
+    never by the removed `--no-builtin-tools` / `--no-agent-tools` flags.
   - Profile name-based scoping works unchanged (`tools.deny: [agt_file_write]`).
   - The file-tool guidance now rides on the `agt_file_*` tool descriptions in the agent-tools
     prompt block; the built-in prompt block no longer mentions file tools, and the dead
@@ -1404,7 +1416,19 @@ redaction opt-out's risk and the no-auto-prune note. **Status: Implemented (Plan
 
 ---
 
-## Tool-Loading Toggles Subsystem (FR-TLT-*)
+## Tool-Loading Toggles Subsystem (FR-TLT-*) — SUPERSEDED BY PLAN 015
+
+> **RETIRED (2026-07-04).** The three group-level toggles and every one of
+> their surfaces (CLI flag pairs, `CLI_AGENT_DISABLE_*` env vars,
+> `config.json` `composites`/`builtinTools`/`agentTools.enabled` keys, and
+> profile `tools.composites`/`tools.builtin`/`tools.agentTools` keys) were
+> hard-removed by Plan 015 and replaced by the single `--mode` knob — see
+> "CLI Mode Simplification (FR-MODE-* / FR-TOOLFLAG-*)" below. Using a
+> removed surface now fails fast with a migration hint. The FR-TLT entries
+> are kept for historical traceability; the concepts that survive
+> (empty-toolset support, bash_run's group membership, per-tool agt_*
+> control) are re-registered under the Plan-015 FRs. Originally implemented
+> per `docs/design/plan-008-tool-loading-toggles.md`.
 
 Three independent, group-level tool-loading switches let the user suppress
 whole families of tools at session-build time, through CLI flags, environment
@@ -1418,7 +1442,7 @@ composite/virtual tool (`loadVirtualToolsSync`). Surfaces: CLI
 `--composites` / `--no-composites`; env `CLI_AGENT_DISABLE_COMPOSITES`
 (truthy = OFF); `config.json` `composites: boolean`; profile
 `tools.composites: boolean`. When suppressed, `loadVirtualToolsSync` is not
-invoked and no virtual handles are added to the catalog. **Status: Implemented (Plan 008).**
+invoked and no virtual handles are added to the catalog. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### FR-TLT-002 — Built-in tools group toggle
 
@@ -1429,8 +1453,7 @@ and `bash_run` when the bash allowlist is non-empty. Surfaces: CLI
 (truthy = OFF); `config.json` `builtinTools: boolean`; profile
 `tools.builtin: boolean`. When suppressed, none of those built-in tools are
 constructed. File and web tools are no longer part of this group after
-plan-011/012; they are governed by the agent-tools pack. **Status: Implemented
-(Plan 008; current membership amended by Plans 011/012).**
+plan-011/012; they are governed by the agent-tools pack. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### FR-TLT-003 — Agent-tools pack profile tier
 
@@ -1441,8 +1464,7 @@ inserted just above the default in the umbrella resolution. The governed pack
 includes the vendored `agt_*` tools plus first-party `agt_web_search`,
 `agt_web_fetch`, `agt_file_read`, `agt_file_list`, `agt_file_write`,
 `agt_file_edit`, and `agt_file_append`; file/web tools are not affected by
-`--no-builtin-tools`. **Status: Implemented (Plan 008; current membership
-amended by Plans 011/012).**
+`--no-builtin-tools`. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### FR-TLT-004 — Uniform precedence
 
@@ -1452,13 +1474,13 @@ The `CLI_AGENT_DISABLE_*` env vars follow the inverted-disable convention
 (truthy = OFF); an invalid (non-boolean) value raises `ConfigurationError`
 (exit 3) — no fallback. The default (load) is an explicit starting value, not
 a runtime fallback for missing required config; no new required config is
-introduced. **Status: Implemented (Plan 008).**
+introduced. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### FR-TLT-005 — `--no-builtin-tools` removes `bash_run` (wrapped-CLI caveat)
 
 Because `bash_run` is part of the built-in toolkit, suppressing the built-in
 group SHALL also remove `bash_run` — the path used to execute wrapped CLIs.
-This is documented so users who wrap CLIs keep the built-in group on. **Status: Implemented (Plan 008).**
+This is documented so users who wrap CLIs keep the built-in group on. **Status: Superseded by Plan 015 — the concept survives as FR-MODE-5 (chat/basic modes have no `bash_run`, and `--tool` in those modes fails fast).**
 
 ### FR-TLT-006 — Empty toolset is permitted
 
@@ -1466,13 +1488,13 @@ Disabling every group (with no wrapped CLI) SHALL produce an empty catalog and
 degrade the agent to a plain conversational LLM, WITHOUT raising an error. The
 catalog builder SHALL emit exactly one stderr notice and proceed. This is
 distinct from profile tool-scoping's empty-survivor error (E7), which still
-applies to `allow`/`deny`. **Status: Implemented (Plan 008).**
+applies to `allow`/`deny`. **Status: behavior retained — the empty-toolset state is now reached via `--mode chat` (Plan 015, FR-MODE-2).**
 
 ### FR-TLT-007 — Profile `tools.*` schema additions
 
 `ProfileToolsSchema` SHALL accept optional booleans `composites`, `builtin`,
 and `agentTools` under the `tools` sub-tree, while remaining `.strict()`
-(unknown keys under `tools` still rejected). **Status: Implemented (Plan 008).**
+(unknown keys under `tools` still rejected). **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### NFR-TLT-001 — Off-state byte-stability
 
@@ -1480,14 +1502,14 @@ When all three groups are at their defaults (load), the assembled tool catalog
 SHALL be byte-identical to the pre-plan-008 behaviour. The gate evaluates
 `cfg.builtinTools !== false` and `cfg.composites !== false`, so an unset/`true`
 value reproduces the prior construction exactly. Verified by the existing
-`registry.spec.ts` suite remaining green. **Status: Implemented (Plan 008).**
+`registry.spec.ts` suite remaining green. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### NFR-TLT-002 — TypeScript / ESM consistency, no new dependency
 
 All new code is TypeScript ESM consistent with `src/`; new `config.json` keys
 are camelCase (`composites`, `builtinTools`) and new env vars are
 `SCREAMING_SNAKE_CASE` (`CLI_AGENT_DISABLE_COMPOSITES`,
-`CLI_AGENT_DISABLE_BUILTIN_TOOLS`). No new runtime dependency is introduced. **Status: Implemented (Plan 008).**
+`CLI_AGENT_DISABLE_BUILTIN_TOOLS`). No new runtime dependency is introduced. **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### NFR-TLT-003 — Documentation completeness
 
@@ -1495,7 +1517,7 @@ The feature is documented in `docs/tools/cli-agent.md` (the
 `<toolLoadingToggles>` subsection), `docs/design/configuration-guide.md`
 (per-variable treatment + precedence + opt-out matrix),
 `docs/design/project-functions.md` (this section), and
-`docs/design/project-design.md` (dated section). **Status: Implemented (Plan 008).**
+`docs/design/project-design.md` (dated section). **Status: Superseded by Plan 015 (surface removed; see FR-MODE-*).**
 
 ### FR-TLT-008 — File and web tools are governed by agent-tools toggles
 
@@ -1504,7 +1526,7 @@ tools (`agt_file_read`, `agt_file_list`, `agt_file_write`, `agt_file_edit`,
 `agt_file_append`) SHALL be controlled by `agentTools.enabled`, their per-tool
 `--enable/--disable-agt-*` flags, and name-based profile scoping. They SHALL NOT
 be disabled by `--no-builtin-tools`. The three file mutators remain additionally
-gated by `allowMutations`. **Status: Implemented (Plans 011/012).**
+gated by `allowMutations`. **Status: Implemented (Plans 011/012); per-tool CLI surface renamed by Plan 015 (`--enable-tool`/`--disable-tool`); umbrella replaced by the mode knob.**
 
 ---
 
@@ -1608,11 +1630,14 @@ dependency is introduced. The default-prompt restructuring is a deliberate
 baseline re-record covered by updated `system-prompt.spec.ts` and new migration
 tests in `agent-config.spec.ts`. **Status: Implemented (Plan 009).**
 
-### Known minor follow-up — wrapped-CLI "via bash_run" framing under `--no-builtin-tools`
+### Known minor follow-up — wrapped-CLI "via bash_run" framing in `chat`/`basic` modes
 
-`--no-builtin-tools` removes `bash_run`, so the wrapped-CLI capabilities
-section's "available via bash_run" framing is moot in that (self-defeating)
-combination. Left as-is for this change; tracked as a minor follow-up. **Status: Deferred.**
+The built-in toolkit (including `bash_run`) is absent in `chat` and `basic`
+modes (Plan 015; formerly `--no-builtin-tools`), so the wrapped-CLI
+capabilities section's "available via bash_run" framing would be moot there.
+This is now largely defused: wrapping a CLI with `--tool` in `chat`/`basic`
+mode is itself a `UsageError` (FR-MODE-5), so the self-defeating combination
+cannot arise from the CLI. Tracked as a minor follow-up. **Status: Deferred.**
 
 ## Runner Runtime Assembly
 
@@ -1662,3 +1687,122 @@ payload. It SHALL require `package.json`, `README.md`, `LICENSE`, executable
 source, docs, test scripts, compiled spec/test/integration artifacts,
 TypeScript source files, fixture/test directories, lockfiles, and vendored
 upstream package metadata. **Status: Implemented (Plan 014).**
+
+## CLI Mode Simplification (FR-MODE-* / FR-TOOLFLAG-* / FR-DEPREC-*) — Plan 015
+
+Replaces the Tool-Loading Toggles Subsystem (FR-TLT-*, above, retired) with a
+single mode knob plus one generic per-tool flag pair. Provenance:
+`docs/reference/refined-request-cli-mode-simplification.md` (incl. resolved
+Open Questions) → `docs/reference/codebase-scan-cli-mode-simplification.md` →
+`docs/design/plan-015-cli-mode-simplification.md`.
+
+### FR-MODE-1 — Mode enum and CLI flag
+
+cli-agent SHALL provide `--mode <chat|basic|tool|composite>`. An invalid CLI
+value raises `UsageError` (exit 2) listing the four valid values (validated by
+`parseModeFlag`, `src/config/mode.ts`, before config loading). **Status:
+Implemented (Plan 015).**
+
+### FR-MODE-2 — Mode → tool-group expansion
+
+The resolved mode SHALL expand into the three internal group booleans
+(`modeToGroups`): chat = builtin OFF / composites OFF / agentTools OFF (empty
+catalog, one stderr notice, plain conversational LLM); basic = agentTools
+only; tool = builtin + agentTools; composite = all three. The internal
+`AgentConfig` representation (`builtinTools`, `composites`,
+`agentTools.enabled`) and its consumers (`buildToolCatalog`,
+`buildAgentToolsGroup`) are unchanged; the mode mapping is the ONLY producer
+of the triple, making `deriveModeFromGroups` an exact inverse. **Status:
+Implemented (Plan 015).**
+
+### FR-MODE-3 — Pinnable resolution chain
+
+Mode SHALL resolve as a pinnable knob: CLI `--mode` > env `CLI_AGENT_MODE`
+(layered .env tiers) > profile `cliParams.mode` (Zod enum) > `config.json`
+`mode` > default `composite`. Invalid env/config values raise
+`ConfigurationError` (exit 3) — no fallback. The `composite` default is a
+documented optional-knob starting value: a flagless invocation behaves
+identically to the pre-plan-015 all-groups-on default. **Status: Implemented
+(Plan 015).**
+
+### FR-MODE-4 — TUI `/mode` command
+
+The TUI SHALL provide `/mode [chat|basic|tool|composite]`: no argument shows
+the current mode (derived from the group booleans); a valid argument swaps
+the groups and rebuilds the tool catalog + system prompt + agent graph in
+place (mirroring `/allow-mutations`); an invalid value is an error with no
+state change; switching to chat/basic while wrapped CLIs are loaded is
+rejected with no state change. **Status: Implemented (Plan 015).**
+
+### FR-MODE-5 — `--tool` × chat/basic conflict
+
+Wrapped CLIs execute through `bash_run`, which chat/basic modes do not load.
+When the EFFECTIVE mode (from any surface) is chat or basic AND the MERGED
+wrapped-tools list (CLI + config.json `tools`) is non-empty, `loadAgentConfig`
+SHALL raise `UsageError` (exit 2) directing at `--mode tool` /
+`--mode composite`. **Status: Implemented (Plan 015).**
+
+### FR-MODE-6 — `profile-dry-run` mode attribution
+
+`profile-dry-run` SHALL report a `mode` knob row with correct source
+attribution across all tiers (cli-flag, env:CLI_AGENT_MODE, agent-dir-.env,
+local-.env, profile:<name>, config.json, built-in-default). **Status:
+Implemented (Plan 015).**
+
+### FR-TOOLFLAG-1 — Generic per-tool pair
+
+cli-agent SHALL provide repeatable `--enable-tool <name>` /
+`--disable-tool <name>` options keyed by the 13 canonical registered names
+(`agt_glob`, `agt_grep`, `agt_multiedit`, `agt_patch`, `agt_todo_read`,
+`agt_todo_write`, `agt_web_search`, `agt_web_fetch`, `agt_file_read`,
+`agt_file_list`, `agt_file_write`, `agt_file_edit`, `agt_file_append`),
+replacing the 26 removed `--enable-agt-*`/`--disable-agt-*` flags. **Status:
+Implemented (Plan 015).**
+
+### FR-TOOLFLAG-2 — Fail-fast validation
+
+An unknown tool name SHALL raise `UsageError` (exit 2) listing all 13 valid
+names; the same name in both flags SHALL raise `UsageError`. Duplicates
+within one flag are idempotent. (`mapAgentToolFlags`,
+`src/cli-agent-tools-flags.ts`; the exported name map is cross-checked
+against the `AGT_*_NAME` constants by its spec.) **Status: Implemented
+(Plan 015).**
+
+### FR-TOOLFLAG-3 — Lower per-tool tiers unchanged
+
+The per-tool env vars (`CLI_AGENT_AGT_*`) and `config.json`
+`agentTools.tools.*` keys SHALL continue to resolve exactly as before
+(CLI > env > config.json > default). Mutation gating is unchanged:
+`agt_file_write`/`agt_file_edit`/`agt_file_append`/`agt_multiedit`/`agt_patch`
+still additionally require `--allow-mutations` to register. **Status:
+Implemented (Plan 015).**
+
+### FR-DEPREC-1 — Hard removal with fail-fast migration errors
+
+The 32 legacy flags (3 group pairs + 26 per-tool flags) SHALL be absent from
+`--help` and SHALL fail with `UsageError` (exit 2) + a migration hint via an
+argv pre-scan (`src/cli-removed-flags.ts`) that runs BEFORE Commander parses.
+A SET legacy env var (`CLI_AGENT_DISABLE_COMPOSITES` /
+`CLI_AGENT_DISABLE_BUILTIN_TOOLS` / `CLI_AGENT_DISABLE_AGENT_TOOLS`, any
+value) SHALL raise `ConfigurationError` with the hint; a PRESENT legacy
+`config.json` key (`composites`, `builtinTools`, `agentTools.enabled`) SHALL
+raise `ConfigurationError` with the hint; a PRESENT legacy profile key
+(`tools.composites`/`tools.builtin`/`tools.agentTools`) SHALL raise
+`ConfigurationError` from the profile codec with an actionable message naming
+`cliParams.mode`. Nothing is silently ignored. **Status: Implemented
+(Plan 015).**
+
+### NFR-MODE-1 — Help baseline re-record
+
+`cli-agent --help` SHALL list `--mode`, `--enable-tool`, `--disable-tool` and
+none of the 32 removed flags; the NFR-CMP-001 byte baseline
+(`test_scripts/baselines/help-no-treat-as-tool.txt` + `.sha256`) was
+consciously re-recorded. **Status: Implemented (Plan 015).**
+
+### NFR-MODE-2 — Precedence-chain unification
+
+Because the group toggles (whose chain put `config.json` above the profile)
+are removed and `mode` resolves as a pinnable knob, the profile tier now sits
+at ONE position (above `config.json`) for every knob — eliminating the
+asymmetry recorded in "Issues - Pending Items.md" (item resolved). **Status:
+Implemented (Plan 015).**

@@ -18,6 +18,7 @@ import type { Document } from 'yaml';
 import { ConfigurationError } from '../errors.js';
 import { ProfileSchema } from './profile-schema.js';
 import type { Profile } from './profile-schema.js';
+import { MODE_MIGRATION_HINT } from './mode.js';
 
 /* ---------- Internal helpers ---------- */
 
@@ -81,6 +82,33 @@ export function parseProfile(text: string, filePath: string): Profile {
   rejectAliases(doc, filePath);
 
   const raw: unknown = doc.toJS();
+
+  // Legacy group-toggle key pre-check (plan-015, Resolution 2). The keys
+  // were removed from ProfileToolsSchema, so `.strict()` alone would reject
+  // them with a generic Zod "unrecognized key" message; this pre-check
+  // surfaces the actionable migration hint instead.
+  if (raw !== null && typeof raw === 'object') {
+    const rawTools = (raw as Record<string, unknown>)['tools'];
+    if (rawTools !== null && typeof rawTools === 'object') {
+      const legacyKeys = ['composites', 'builtin', 'agentTools'].filter((k) =>
+        Object.prototype.hasOwnProperty.call(rawTools, k),
+      );
+      if (legacyKeys.length > 0) {
+        // The explanation rides in checkedSources so it lands in the
+        // user-visible error MESSAGE (handleErrors prints only e.message);
+        // details.detail mirrors it per this codec's spec convention.
+        throw new ConfigurationError('profile file', [
+          `${filePath} — profile key(s) 'tools.${legacyKeys.join("', 'tools.")}' were removed (plan-015); ` +
+            `pin tool groups with cliParams.mode instead`,
+        ], {
+          detail:
+            `Profile key(s) 'tools.${legacyKeys.join("', 'tools.")}' were removed (plan-015). ` +
+            `Pin tool groups with cliParams.mode instead. ${MODE_MIGRATION_HINT}`,
+          legacyKeys,
+        });
+      }
+    }
+  }
 
   const result = ProfileSchema.safeParse(raw);
   if (!result.success) {

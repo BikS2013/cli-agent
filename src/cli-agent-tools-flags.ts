@@ -1,128 +1,111 @@
 /**
- * CLI flag mapper for the agent-tools pack.
+ * CLI flag mapper for the agent-tools pack (plan-015).
  *
  * Lives in its own module so tests can import it WITHOUT triggering the
  * Commander parse side-effect at the bottom of `src/cli.ts` (which would
  * call `process.exit` against vitest's argv).
  *
- * The mapper is the single CLI-tier gatekeeper for agent-tools flags:
- * conflict detection (umbrella enable+disable, per-tool enable+disable)
- * happens here and surfaces as `UsageError` (exit code 2). The four-tier
- * precedence chain (CLI > env > config.json > default) is then completed
- * inside `loadAgentConfig` via the `resolveAgentTools` helper.
+ * The mapper is the single CLI-tier gatekeeper for the generic per-tool
+ * pair `--enable-tool <name>` / `--disable-tool <name>` (which replaced
+ * the 26 per-tool `--enable-agt-*`/`--disable-agt-*` flags): unknown-name
+ * validation and conflict detection (the same tool named in both flags)
+ * happen here and surface as `UsageError` (exit code 2). The remaining
+ * tiers of the per-tool chain (env `CLI_AGENT_AGT_*` > config.json
+ * `agentTools.tools.*` > default) are then completed inside
+ * `loadAgentConfig` via the `resolveAgentTools` helper.
+ *
+ * Whether the pack loads AT ALL is no longer a CLI-tier concern: the
+ * umbrella is decided by the `--mode` knob (see `src/config/mode.ts`).
  */
 
 import { UsageError } from './errors.js';
 import type { AgentCliFlags } from './config/agent-config.js';
 
 /**
+ * Canonical registered tool name → per-tool config key
+ * (`AgentConfig.agentTools.tools.*`). The keys of this map are the ONLY
+ * names `--enable-tool`/`--disable-tool` accept; they mirror the
+ * `AGT_*_NAME` constants exported by the wrappers under
+ * `src/agent/tools/agent-tools/` (cross-checked by the mapper's spec so
+ * canonical-name drift is impossible).
+ */
+export const AGT_TOOL_NAME_TO_KEY = Object.freeze({
+  agt_glob: 'glob',
+  agt_grep: 'grep',
+  agt_multiedit: 'multiedit',
+  agt_patch: 'patch',
+  agt_todo_read: 'todoRead',
+  agt_todo_write: 'todoWrite',
+  agt_web_search: 'webSearch',
+  agt_web_fetch: 'webFetch',
+  agt_file_read: 'fileRead',
+  agt_file_list: 'fileList',
+  agt_file_write: 'fileWrite',
+  agt_file_edit: 'fileEdit',
+  agt_file_append: 'fileAppend',
+} as const);
+
+export type AgtToolName = keyof typeof AGT_TOOL_NAME_TO_KEY;
+
+function assertKnownToolName(
+  raw: string,
+  flag: '--enable-tool' | '--disable-tool',
+): AgtToolName {
+  if (Object.prototype.hasOwnProperty.call(AGT_TOOL_NAME_TO_KEY, raw)) {
+    return raw as AgtToolName;
+  }
+  throw new UsageError(
+    `Unknown tool name '${raw}' for ${flag}. Valid names: ` +
+      `${Object.keys(AGT_TOOL_NAME_TO_KEY).join(', ')}.`,
+    { flag, value: raw },
+  );
+}
+
+/**
  * Translate Commander's parsed options into the partial
  * `AgentCliFlags['agentTools']` shape consumed by `loadAgentConfig`.
  *
- * Commander's behavior for `.option('--no-agent-tools', ...)` paired with
- * `.option('--agent-tools', ...)`:
- *   - Neither flag passed   → `opts.agentTools` is `undefined`
- *   - `--agent-tools`        → `opts.agentTools === true`
- *   - `--no-agent-tools`     → `opts.agentTools === false`
- *   - Both flags passed      → Commander records the LAST one; we cannot
- *                              detect the conflict from the parsed object.
- *                              Therefore we inspect `process.argv` for the
- *                              umbrella conflict only (a focused string
- *                              search on the two umbrella flags).
+ * `--enable-tool` and `--disable-tool` are repeatable options collected
+ * into string arrays (Commander collector, same pattern as `--tool`).
+ * Duplicates within one array are harmless (idempotent). Returns
+ * `undefined` when neither flag was passed at all, so the per-tool
+ * resolver falls through to env / config / default cleanly. Throws
+ * `UsageError` (exit code 2) on an unknown tool name or when the same
+ * name appears in both flags — STRICT, no silent precedence between
+ * conflicting CLI flags.
  *
- * For per-tool flags, both `--enable-X` and `--disable-X` are independent
- * boolean options that default to `false` when absent and `true` when
- * present. If a user passes both, both keys are `true` simultaneously and
- * the conflict IS detectable from the parsed object — that's what the
- * pair-by-pair conflict check below relies on.
- *
- * Returns `undefined` when no agent-tools flags were passed at all (so
- * the resolver falls through to env / config / default cleanly). Returns
- * a partial object otherwise. Throws `UsageError` (exit code 2) on any
- * detected conflict — STRICT, no silent precedence between conflicting
- * CLI flags.
+ * NOTE: mutation gating is untouched by this mapper — enabling a mutating
+ * tool (e.g. `--enable-tool agt_patch`) still requires `--allow-mutations`
+ * for the wrapper to register (gated downstream in the catalog builder).
  */
-export function mapAgentToolFlags(opts: Record<string, unknown>): AgentCliFlags['agentTools'] | undefined {
-  // ---- Umbrella conflict detection ----
-  // Inspect raw argv because Commander silently keeps only the last value
-  // when --agent-tools and --no-agent-tools are both passed.
-  const argv = process.argv.slice(2);
-  const sawEnableUmbrella = argv.includes('--agent-tools');
-  const sawDisableUmbrella = argv.includes('--no-agent-tools');
-  if (sawEnableUmbrella && sawDisableUmbrella) {
-    throw new UsageError(
-      'Conflicting flags: --agent-tools and --no-agent-tools cannot be used together.',
-      { conflict: ['--agent-tools', '--no-agent-tools'] },
-    );
-  }
+export function mapAgentToolFlags(
+  opts: Record<string, unknown>,
+): AgentCliFlags['agentTools'] | undefined {
+  const enableRaw = opts['enableTool'];
+  const disableRaw = opts['disableTool'];
+  const enables = Array.isArray(enableRaw) ? enableRaw.map(String) : [];
+  const disables = Array.isArray(disableRaw) ? disableRaw.map(String) : [];
+  if (enables.length === 0 && disables.length === 0) return undefined;
 
-  // Resolve umbrella from the parsed value. Commander stores it under
-  // `agentTools` (camelCased from `--agent-tools` / `--no-agent-tools`).
-  let enabled: boolean | undefined;
-  const umbrellaRaw = opts['agentTools'];
-  if (typeof umbrellaRaw === 'boolean') {
-    enabled = umbrellaRaw;
-  } else {
-    enabled = undefined;
-  }
-
-  // ---- Per-tool conflict detection + value extraction ----
-  type ToolKey =
-    | 'glob' | 'grep' | 'multiedit' | 'patch' | 'todoRead' | 'todoWrite'
-    | 'webSearch' | 'webFetch'
-    | 'fileRead' | 'fileList' | 'fileWrite' | 'fileEdit' | 'fileAppend';
-  const pairs: Array<{
-    key: ToolKey;
-    enableOpt: string;
-    disableOpt: string;
-    enableFlag: string;
-    disableFlag: string;
-  }> = [
-    { key: 'glob',      enableOpt: 'enableAgtGlob',      disableOpt: 'disableAgtGlob',      enableFlag: '--enable-agt-glob',      disableFlag: '--disable-agt-glob' },
-    { key: 'grep',      enableOpt: 'enableAgtGrep',      disableOpt: 'disableAgtGrep',      enableFlag: '--enable-agt-grep',      disableFlag: '--disable-agt-grep' },
-    { key: 'multiedit', enableOpt: 'enableAgtMultiedit', disableOpt: 'disableAgtMultiedit', enableFlag: '--enable-agt-multiedit', disableFlag: '--disable-agt-multiedit' },
-    { key: 'patch',     enableOpt: 'enableAgtPatch',     disableOpt: 'disableAgtPatch',     enableFlag: '--enable-agt-patch',     disableFlag: '--disable-agt-patch' },
-    { key: 'todoRead',  enableOpt: 'enableAgtTodoRead',  disableOpt: 'disableAgtTodoRead',  enableFlag: '--enable-agt-todo-read', disableFlag: '--disable-agt-todo-read' },
-    { key: 'todoWrite', enableOpt: 'enableAgtTodoWrite', disableOpt: 'disableAgtTodoWrite', enableFlag: '--enable-agt-todo-write', disableFlag: '--disable-agt-todo-write' },
-    { key: 'webSearch', enableOpt: 'enableAgtWebSearch', disableOpt: 'disableAgtWebSearch', enableFlag: '--enable-agt-web-search', disableFlag: '--disable-agt-web-search' },
-    { key: 'webFetch',  enableOpt: 'enableAgtWebFetch',  disableOpt: 'disableAgtWebFetch',  enableFlag: '--enable-agt-web-fetch', disableFlag: '--disable-agt-web-fetch' },
-    { key: 'fileRead',   enableOpt: 'enableAgtFileRead',   disableOpt: 'disableAgtFileRead',   enableFlag: '--enable-agt-file-read',   disableFlag: '--disable-agt-file-read' },
-    { key: 'fileList',   enableOpt: 'enableAgtFileList',   disableOpt: 'disableAgtFileList',   enableFlag: '--enable-agt-file-list',   disableFlag: '--disable-agt-file-list' },
-    { key: 'fileWrite',  enableOpt: 'enableAgtFileWrite',  disableOpt: 'disableAgtFileWrite',  enableFlag: '--enable-agt-file-write',  disableFlag: '--disable-agt-file-write' },
-    { key: 'fileEdit',   enableOpt: 'enableAgtFileEdit',   disableOpt: 'disableAgtFileEdit',   enableFlag: '--enable-agt-file-edit',   disableFlag: '--disable-agt-file-edit' },
-    { key: 'fileAppend', enableOpt: 'enableAgtFileAppend', disableOpt: 'disableAgtFileAppend', enableFlag: '--enable-agt-file-append', disableFlag: '--disable-agt-file-append' },
-  ];
-
+  type ToolKey = (typeof AGT_TOOL_NAME_TO_KEY)[AgtToolName];
   const tools: Partial<Record<ToolKey, boolean>> = {};
-  let anyToolFlag = false;
-  for (const pair of pairs) {
-    const enableSet = opts[pair.enableOpt] === true;
-    const disableSet = opts[pair.disableOpt] === true;
-    if (enableSet && disableSet) {
+  const enabledNames = new Set<AgtToolName>();
+
+  for (const raw of enables) {
+    const name = assertKnownToolName(raw, '--enable-tool');
+    enabledNames.add(name);
+    tools[AGT_TOOL_NAME_TO_KEY[name]] = true;
+  }
+  for (const raw of disables) {
+    const name = assertKnownToolName(raw, '--disable-tool');
+    if (enabledNames.has(name)) {
       throw new UsageError(
-        `Conflicting flags: ${pair.enableFlag} and ${pair.disableFlag} cannot be used together.`,
-        { conflict: [pair.enableFlag, pair.disableFlag] },
+        `Conflicting flags: tool '${name}' is named in both --enable-tool and --disable-tool.`,
+        { conflict: [`--enable-tool ${name}`, `--disable-tool ${name}`] },
       );
     }
-    if (enableSet) {
-      tools[pair.key] = true;
-      anyToolFlag = true;
-    } else if (disableSet) {
-      tools[pair.key] = false;
-      anyToolFlag = true;
-    }
+    tools[AGT_TOOL_NAME_TO_KEY[name]] = false;
   }
 
-  // Return undefined when no agent-tools flag was passed AT ALL — leaves
-  // the four-tier precedence chain unaffected by the CLI tier.
-  if (enabled === undefined && !anyToolFlag) return undefined;
-
-  const out: NonNullable<AgentCliFlags['agentTools']> = {};
-  if (enabled !== undefined) {
-    (out as { enabled?: boolean }).enabled = enabled;
-  }
-  if (anyToolFlag) {
-    (out as { tools?: Partial<Record<ToolKey, boolean>> }).tools = tools;
-  }
-  return out;
+  return { tools };
 }

@@ -217,6 +217,14 @@ describe('buildSystemPrompt (pure composer)', () => {
     expect(out).toContain('NEVER fabricate');
   });
 
+  it('the notice directs the user at --mode, not the removed --no-* flags (plan-015)', async () => {
+    const out = await buildSystemPrompt('BASE', '', undefined, undefined, OFF_PRESENCE, true);
+    expect(out).toContain('--mode composite');
+    expect(out).not.toContain('--no-builtin-tools');
+    expect(out).not.toContain('--no-agent-tools');
+    expect(out).not.toContain('--no-composites');
+  });
+
   it('noToolsAvailable=false (default) ⇒ no notice even with the umbrella off', async () => {
     const out = await buildSystemPrompt('BASE', '', undefined, undefined, OFF_PRESENCE);
     expect(out).not.toContain('No tools are enabled');
@@ -262,9 +270,9 @@ describe('buildSystemPromptForCfg (loads from disk + composes)', () => {
   });
 
   it('empty registered toolset ⇒ injects the no-tools / anti-fabrication notice', async () => {
-    // Reproduces the --no-builtin-tools --no-agent-tools --no-composites case:
-    // zero registered tools. The model must be told it has no tools and must
-    // not fabricate command/file output.
+    // Reproduces the --mode chat case (plan-015; formerly the three --no-*
+    // group toggles): zero registered tools. The model must be told it has
+    // no tools and must not fabricate command/file output.
     const out = await buildSystemPromptForCfg(
       { systemPromptPath: basePath, systemAppendText: undefined, systemAppendFile: undefined, builtinTools: false },
       '',

@@ -40,9 +40,9 @@
           [--introspect-timeout-ms &lt;ms&gt;]  # per --help call; default 5000
           [--introspect-total-budget-ms &lt;ms&gt;]  # whole discovery pass; default 60000
           [--refresh-capabilities]        # force regenerate cached capability docs
-          [--composites | --no-composites]       # load composite (virtual) tools (default: load)
-          [--builtin-tools | --no-builtin-tools] # load bash_*/tool_help (default: load)
-          [--agent-tools | --no-agent-tools]     # load the agt_* pack incl. agt_web_search/fetch (default: load)
+          [--mode &lt;mode&gt;]                 # chat|basic|tool|composite — which tool groups load (default: composite)
+          [--enable-tool &lt;name&gt;]          # repeatable; enable an agt_* tool by canonical name (e.g. agt_todo_write)
+          [--disable-tool &lt;name&gt;]         # repeatable; disable an agt_* tool by canonical name (e.g. agt_web_fetch)
           [--verbose]
 
         cli-agent show-capabilities --tool &lt;name&gt;
@@ -67,12 +67,19 @@
         agt_file_append tools (plan-012), reusing the existing file sandbox. agt_file_read
         / agt_file_list are read-only and default ON; agt_file_write / agt_file_edit /
         agt_file_append default ON but are MUTATION-GATED (they register only with
-        --allow-mutations). All five are governed by --agent-tools (not --no-builtin-tools).
+        --allow-mutations). All five ride the agent-tools pack, which loads in every
+        mode except `chat` (see "Agent mode" below).
 
         Web search/fetch are provided by the agent-tools pack as the first-party
         agt_web_search / agt_web_fetch tools (plan-011), using the configured web
-        backend. They are read-only, default ON, and governed by --agent-tools
-        (not --no-builtin-tools).
+        backend. They are read-only, default ON, and ride the agent-tools pack
+        (present in every mode except `chat`).
+
+        Which tool GROUPS load is decided by the single `--mode` knob
+        (chat | basic | tool | composite, default composite — see "Agent mode
+        (tool-group loading)" below); `--allow-mutations` stays the orthogonal
+        read-only/read-write axis, and individual agt_* tools are toggled with
+        the repeatable `--enable-tool &lt;name&gt;` / `--disable-tool &lt;name&gt;` pair.
 
         All eight standard LLM providers are supported out of the box (see Provider
         Configuration below). The default provider is azure-openai.
@@ -116,6 +123,13 @@
                                     Manage the wrapped-CLI tool list; --save persists to config.json
             /allow-mutations on|off Toggle mutating tools (agt_file_write/edit/append,
                                     agt_multiedit/patch) and rebuild the catalog
+            /mode [chat|basic|tool|composite]
+                                    Show (no arg) or switch the agent mode; a valid
+                                    value rebuilds the tool catalog in place. Invalid
+                                    values are rejected with no state change; switching
+                                    to chat/basic while wrapped CLIs are loaded is
+                                    rejected (they run through bash_run, absent in
+                                    those modes)
 
         Capability inspection
             /capabilities           Per-tool freshness column (✓ fresh / ⚠ stale / ✗ missing)
@@ -318,27 +332,30 @@
         — the `bash_run` framing, the CORE RULES, the OUT-OF-SCOPE bullets, and
         the available-tools list — are NOT baked into the base. They are
         injected at runtime as a `## Built-in tools` section, ONLY when the
-        built-in tools are actually loaded (i.e. NOT when `--no-builtin-tools` /
-        `CLI_AGENT_DISABLE_BUILTIN_TOOLS` / `builtinTools:false` /
-        `tools.builtin:false` is in effect). This mirrors the agent-tools
-        (`agt_*`) block and keeps the prompt coherent with the loaded toolset:
-        with the built-in tools off, the model is no longer told about tools it
-        cannot call (see "`--no-builtin-tools` removes `bash_run`" under
-        "Tool-loading toggles").
+        built-in tools are actually loaded — i.e. when the effective mode is
+        `tool` or `composite`; in `chat` and `basic` modes the block is absent.
+        This mirrors the agent-tools (`agt_*`) block and keeps the prompt
+        coherent with the loaded toolset: with the built-in tools off, the
+        model is no longer told about tools it cannot call (see "chat/basic
+        modes remove `bash_run`" under "Agent mode (tool-group loading)").
 
         The `## Built-in tools` block is **adaptive**: its content describes
         EXACTLY the built-in tools actually registered this session, derived
         from the resolved tool names rather than a static superset. Concretely:
 
-        - The `bash_run` framing and its two confirmation/allowlist CORE RULES
-          appear ONLY when the command allowlist is non-empty (so `bash_run` is
-          bound). With an empty allowlist the block instead states that no local
-          commands are allow-listed and command execution is unavailable, and
-          omits those two rules.
+        - The `bash_run` framing and its two confirmation CORE RULES appear
+          whenever `bash_run` is bound (i.e. the built-in group is on; since
+          2026-07-04 an empty allowlist no longer unbinds it). The framing has
+          two forms: an ALLOW-LISTED form when entries are configured, and an
+          UNRESTRICTED form (with restraint guidance — prefer read-only, never
+          run destructive commands unless asked) when NO allowlist is
+          configured. Only a profile `deny` of `bash_run` produces the "command
+          execution is unavailable" form.
         - The general CORE RULES (capability docs / `tool_help`, read-only
           evidence, error-JSON handling, `__truncated` handling) and the
           read-only built-in tools (`bash_list_allowed`/`bash_which`,
-          `tool_help`) are always described when the umbrella is on. (plan-011:
+          `tool_help`) are always described when the built-in tools are
+          loaded (mode `tool` or `composite`). (plan-011:
           web moved to the agent-tools pack, so the built-in block no longer
           mentions `web_search`/`web_fetch` or the "never invent URLs" rule;
           plan-012: the file tools likewise moved, so the built-in block no
@@ -350,7 +367,7 @@
         Because the presence is derived from the post-scoping tool list, a
         profile `deny` of a built-in tool is reflected too. The net effect: the
         inspector's "Bound tool schemas" and the system-prompt tool prose agree
-        for the built-in toolkit across every gate (umbrella toggle, allowlist,
+        for the built-in toolkit across every gate (mode, allowlist,
         `--allow-mutations`, profile deny).
 
         Assembled-prompt order: base → built-in-tools block (if loaded) →
@@ -576,6 +593,11 @@
         --tool &lt;name&gt;
             (Repeatable) Name of an external CLI binary to wrap. Each named binary is
             added to the bash_run allowlist and introspected on first launch.
+            Wrapped CLIs execute through bash_run, which only exists in `tool`
+            and `composite` modes — combining --tool (or config.json `tools`)
+            with an effective mode of `chat` or `basic`, from ANY surface
+            (flag, env, profile, or config.json), raises UsageError (exit 2)
+            directing you to --mode tool or --mode composite.
 
         -p | --provider &lt;name&gt;
             LLM provider to use. One of: openai, anthropic, gemini, azure-openai,
@@ -689,38 +711,37 @@
             Force regeneration of all cached capability documents before processing the
             prompt.
 
-        --composites / --no-composites
-            Load (default) or suppress every composite/virtual tool. See
-            "Tool-loading toggles" below. Equivalent env var:
-            CLI_AGENT_DISABLE_COMPOSITES (truthy = OFF). Equivalent config.json
-            key: composites (boolean). Equivalent profile key: tools.composites.
-            Precedence: CLI flag &gt; env &gt; config.json &gt; profile &gt; default(load).
+        --mode &lt;mode&gt;
+            Select which tool GROUPS load for the session. One of: chat, basic,
+            tool, composite (default: composite). chat = no tool groups (plain
+            conversational LLM); basic = the agent-tools pack (agt_*) only;
+            tool = built-in toolkit (bash_*, tool_help) + agt_* pack;
+            composite = all three groups including composite/virtual tools.
+            See "Agent mode (tool-group loading)" below for the mapping table
+            and the migration notes. An invalid value raises UsageError
+            (exit 2) listing the four valid modes. Equivalent env var:
+            CLI_AGENT_MODE. Equivalent config.json key: mode (string).
+            Equivalent profile key: cliParams.mode. Precedence (pinnable-knob
+            chain): CLI flag &gt; env &gt; profile &gt; config.json &gt;
+            default(composite). An invalid env/config value raises
+            ConfigurationError (exit 3) — no fallback; the profile value is
+            schema-validated (enum).
 
-        --builtin-tools / --no-builtin-tools
-            Load (default) or suppress the built-in cross-cutting toolkit
-            (bash_*, tool_help). NOTE: web_search/web_fetch are NO LONGER part
-            of this toolkit (plan-011) — they moved to the agent-tools pack as
-            agt_web_search/agt_web_fetch, governed by --agent-tools, so
-            --no-builtin-tools does NOT remove web. NOTE: file_* are NO LONGER
-            part of this toolkit either (plan-012) — they moved to the
-            agent-tools pack as agt_file_read/list/write/edit/append, governed
-            by --agent-tools (and per-tool --disable-agt-file-*), so
-            --no-builtin-tools does NOT remove file ops. NOTE:
-            --no-builtin-tools also removes bash_run — the path used to run
-            wrapped CLIs (see the caveat under "Tool-loading toggles").
-            Equivalent env var:
-            CLI_AGENT_DISABLE_BUILTIN_TOOLS (truthy = OFF). Equivalent
-            config.json key: builtinTools (boolean). Equivalent profile key:
-            tools.builtin. Precedence: CLI flag &gt; env &gt; config.json &gt; profile
-            &gt; default(load).
-
-        --agent-tools / --no-agent-tools
-            Load (default) or suppress the agent-tools pack umbrella (agt_*).
-            See the agent-tools pack section. Equivalent env var:
-            CLI_AGENT_DISABLE_AGENT_TOOLS (truthy = OFF). Equivalent config.json
-            key: agentTools.enabled (boolean). Equivalent profile key:
-            tools.agentTools. Precedence: CLI flag &gt; env &gt; config.json &gt;
-            profile &gt; default(load).
+        --enable-tool &lt;name&gt; / --disable-tool &lt;name&gt;
+            (Both repeatable) Enable / disable a single agent-tools-pack tool
+            by its canonical registered name: agt_glob, agt_grep,
+            agt_multiedit, agt_patch, agt_todo_read, agt_todo_write,
+            agt_web_search, agt_web_fetch, agt_file_read, agt_file_list,
+            agt_file_write, agt_file_edit, agt_file_append. An unknown name
+            raises UsageError (exit 2) listing all 13 valid names; naming the
+            same tool in both flags raises UsageError (exit 2) — fail-fast, no
+            silent precedence. These flags occupy the CLI tier of the per-tool
+            chain (CLI flag &gt; env CLI_AGENT_AGT_* &gt; config.json
+            agentTools.tools.* &gt; default) and operate WITHIN the pack — they
+            do not resurrect the pack when the mode excludes it (chat), and
+            mutation gating is unchanged: agt_file_write/edit/append,
+            agt_multiedit, and agt_patch still additionally require
+            --allow-mutations.
 
         --verbose
             Emit structured debug logs to stderr during the agent run.
@@ -775,11 +796,42 @@
 
         tools
             Default array of CLI binary names to wrap, e.g. ["git","gh","kubectl"].
-            Each entry is auto-added to the bash allowlist at startup.
+            Each entry is auto-added to the bash allowlist at startup. Requires
+            an effective mode of tool or composite (wrapped CLIs run through
+            bash_run); with mode chat or basic a non-empty merged tools list
+            raises UsageError (exit 2).
+
+        mode  (config.json key; string)
+            Persisted default agent mode: "chat" | "basic" | "tool" |
+            "composite". Lowest explicit tier of the mode chain (CLI --mode &gt;
+            env CLI_AGENT_MODE &gt; profile cliParams.mode &gt; config.json mode &gt;
+            default "composite"). A value outside the enum raises
+            ConfigurationError (exit 3) — no fallback.
+
+        CLI_AGENT_MODE
+            Env form of the mode knob (same enum). Read through the layered
+            env tier (shell env &gt; ~/.tool-agents/cli-agent/.env &gt; local ./.env).
+            A value outside the enum raises ConfigurationError (exit 3).
+
+        REJECTED LEGACY KEYS (plan-015 — do not use): the former group-toggle
+        env vars CLI_AGENT_DISABLE_COMPOSITES / CLI_AGENT_DISABLE_BUILTIN_TOOLS /
+        CLI_AGENT_DISABLE_AGENT_TOOLS (a SET value — any value — raises
+        ConfigurationError with a migration hint) and the former config.json
+        keys `composites`, `builtinTools`, `agentTools.enabled` (presence
+        raises ConfigurationError with a migration hint). `agentTools.tools.*`
+        remains valid. See "Migration from the removed toggles (plan-015)"
+        under "Agent mode (tool-group loading)".
 
         bash.allow
             Additional bash allowlist entries (binary names or `argv-regex:&lt;pattern&gt;`
-            rules) following the cli-agent-builder spec.
+            rules) following the cli-agent-builder spec. UNRESTRICTED DEFAULT
+            (2026-07-04): when NO allowlist entry is configured anywhere (this
+            key empty, no `--bash-allow` / `--bash-allow-file` /
+            `BASH_ALLOWED_COMMANDS`, and no wrapped `--tool`), `bash_run` runs
+            in UNRESTRICTED mode and may execute ANY binary on PATH; cli-agent
+            prints a one-line stderr notice at startup. Adding any entry
+            restores restrictive (OR'd) matching. `--allow-mutations` and the
+            `cwd` sandbox still gate independently in both modes.
 
         bash.allowedRoots
             Filesystem roots inside which bash_run may set its cwd.
@@ -878,6 +930,16 @@
         # One-shot: use gh CLI to list open PRs
         cli-agent --tool gh "List all open pull requests in the current repo"
 
+        # Plain conversational LLM — no tools at all (empty-toolset state)
+        cli-agent --mode chat "Explain the difference between rebase and merge"
+
+        # agt_* pack only, with the todo pair switched on and grep switched off
+        cli-agent --mode basic --enable-tool agt_todo_write --disable-tool agt_grep \
+          "Draft a todo list for refactoring this repo"
+
+        # Built-in toolkit + agt_* pack, no composites (wrapped CLIs allowed)
+        cli-agent --mode tool --tool git "Summarize the last 3 commits"
+
         # Interactive session wrapping git and gh
         cli-agent --interactive --tool git --tool gh
 
@@ -943,23 +1005,31 @@
         load by default, the three mutators load only with `--allow-mutations`).
         After this change the built-in toolkit contains ONLY `bash_run`,
         `bash_list_allowed`, `bash_which`, and `tool_help`. Because the file
-        tools ride the agent-tools umbrella, they are NOT affected by
-        `--no-builtin-tools`; they are disabled only by `--no-agent-tools` or
-        their per-tool `--disable-agt-file-*` flags.
+        tools ride the agent-tools pack, they are independent of the built-in
+        toolkit: they load in every mode except `chat`, and individual tools
+        are switched off with `--disable-tool agt_file_*` (or the per-tool
+        env/config keys).
 
         `agt_web_search` / `agt_web_fetch` (plan-011) REUSE the existing
         cli-agent web backend (`src/agent/tools/web/backends/`). Both are
-        read-only and default ON. Because they ride the agent-tools umbrella,
-        they are NOT affected by `--no-builtin-tools`; they are disabled only by
-        `--no-agent-tools` or their per-tool `--disable-agt-web-*` flags. They
+        read-only and default ON. Because they ride the agent-tools pack, they
+        too are independent of the built-in toolkit and load in every mode
+        except `chat`; switch them off with `--disable-tool agt_web_search` /
+        `--disable-tool agt_web_fetch` (or the per-tool env/config keys). They
         share a single per-session request budget (`WEB_SEARCH_MAX_REQUESTS`,
         default 50).
+
+        Whether the pack loads AT ALL is decided by the mode knob: the pack is
+        present in `basic`, `tool`, and `composite` modes and absent in `chat`
+        (there is no umbrella flag or `agentTools.enabled` config key anymore —
+        plan-015 removed them; presence of the pack = mode ≥ basic).
 
         Each wrapped tool routes all security-sensitive operations through
         `cliAgentPermissionPolicy(cfg)` — the bridge factory in
         `src/agent/tools/agent-tools/permissions.ts` that delegates
-        `evaluateBash` to cli-agent's bash allowlist (fail-closed when the
-        allowlist is empty) and `evaluateFsWrite` to cli-agent's sandbox +
+        `evaluateBash` to cli-agent's bash allowlist (UNRESTRICTED — allow all
+        — when the allowlist is unconfigured, since 2026-07-04; restrictive
+        once any entry exists) and `evaluateFsWrite` to cli-agent's sandbox +
         mutation gate (denied unless `--allow-mutations` is on AND the path
         resolves under `fileEdit.root` / `fileEdit.allowPaths`). The upstream
         interface has no read gate; reads are jailed by `ToolContext.cwd`.
@@ -979,43 +1049,47 @@
         | `agt_patch`      | on (gated by `--allow-mutations`)          | yes       | apply unified-diff / opencode-style patch envelope |
         | `agt_todo_read`  | off                                        | no        | read session-scoped in-memory todo list |
         | `agt_todo_write` | off                                        | no        | write session-scoped in-memory todo list (NOT host-mutating; not gated) |
-        | `agt_file_read`  | on                                         | no        | first-party file read within the sandbox (reuses the cli-agent file sandbox; not affected by `--no-builtin-tools`) |
-        | `agt_file_list`  | on                                         | no        | first-party directory listing within the sandbox (reuses the cli-agent file sandbox; not affected by `--no-builtin-tools`) |
-        | `agt_file_write` | on (gated by `--allow-mutations`)          | yes       | first-party file write within the sandbox (reuses the cli-agent file sandbox; not affected by `--no-builtin-tools`) |
-        | `agt_file_edit`  | on (gated by `--allow-mutations`)          | yes       | first-party in-place file edit within the sandbox (reuses the cli-agent file sandbox; not affected by `--no-builtin-tools`) |
-        | `agt_file_append`| on (gated by `--allow-mutations`)          | yes       | first-party file append within the sandbox (reuses the cli-agent file sandbox; not affected by `--no-builtin-tools`) |
-        | `agt_web_search` | on                                         | no        | first-party web search (reuses the cli-agent web backend; not affected by `--no-builtin-tools`) |
-        | `agt_web_fetch`  | on                                         | no        | first-party URL fetch → readable text (reuses the cli-agent web backend; not affected by `--no-builtin-tools`) |
+        | `agt_file_read`  | on                                         | no        | first-party file read within the sandbox (reuses the cli-agent file sandbox) |
+        | `agt_file_list`  | on                                         | no        | first-party directory listing within the sandbox (reuses the cli-agent file sandbox) |
+        | `agt_file_write` | on (gated by `--allow-mutations`)          | yes       | first-party file write within the sandbox (reuses the cli-agent file sandbox) |
+        | `agt_file_edit`  | on (gated by `--allow-mutations`)          | yes       | first-party in-place file edit within the sandbox (reuses the cli-agent file sandbox) |
+        | `agt_file_append`| on (gated by `--allow-mutations`)          | yes       | first-party file append within the sandbox (reuses the cli-agent file sandbox) |
+        | `agt_web_search` | on                                         | no        | first-party web search (reuses the cli-agent web backend) |
+        | `agt_web_fetch`  | on                                         | no        | first-party URL fetch → readable text (reuses the cli-agent web backend) |
 
-        ### Opt-out flags (CLI)
+        ### Per-tool CLI flags — the generic `--enable-tool` / `--disable-tool` pair
 
-        | Flag                                              | Effect                                            |
-        |---------------------------------------------------|---------------------------------------------------|
-        | `--no-agent-tools`                                | umbrella OFF (entire pack disabled regardless of per-tool flags) |
-        | `--agent-tools`                                   | umbrella ON (default; rarely needed explicitly)   |
-        | `--enable-agt-glob`     / `--disable-agt-glob`    | per-tool override for `agt_glob`                  |
-        | `--enable-agt-grep`     / `--disable-agt-grep`    | per-tool override for `agt_grep`                  |
-        | `--enable-agt-multiedit`/ `--disable-agt-multiedit` | per-tool override for `agt_multiedit` (still gated by `--allow-mutations`) |
-        | `--enable-agt-patch`    / `--disable-agt-patch`   | per-tool override for `agt_patch` (still gated by `--allow-mutations`) |
-        | `--enable-agt-todo-read`/ `--disable-agt-todo-read` | per-tool override for `agt_todo_read`           |
-        | `--enable-agt-todo-write`/`--disable-agt-todo-write` | per-tool override for `agt_todo_write`         |
-        | `--enable-agt-file-read`/`--disable-agt-file-read` | per-tool override for `agt_file_read` (read-only; default on) |
-        | `--enable-agt-file-list`/`--disable-agt-file-list` | per-tool override for `agt_file_list` (read-only; default on) |
-        | `--enable-agt-file-write`/`--disable-agt-file-write` | per-tool override for `agt_file_write` (default on; still gated by `--allow-mutations`) |
-        | `--enable-agt-file-edit`/`--disable-agt-file-edit` | per-tool override for `agt_file_edit` (default on; still gated by `--allow-mutations`) |
-        | `--enable-agt-file-append`/`--disable-agt-file-append` | per-tool override for `agt_file_append` (default on; still gated by `--allow-mutations`) |
-        | `--enable-agt-web-search`/`--disable-agt-web-search` | per-tool override for `agt_web_search` (read-only; default on) |
-        | `--enable-agt-web-fetch`/`--disable-agt-web-fetch` | per-tool override for `agt_web_fetch` (read-only; default on) |
+        A single repeatable flag pair covers every tool in the pack, keyed by
+        the canonical registered tool name (underscores, exactly as the tool
+        appears in the catalog):
 
-        Passing both `--enable-agt-<tool>` and `--disable-agt-<tool>` for the
-        same tool raises a `UsageError` (exit 2). Precedence is **fail-fast**,
-        not silent winner-take-all.
+        ```
+        --enable-tool <name>     # repeatable; e.g. --enable-tool agt_todo_write
+        --disable-tool <name>    # repeatable; e.g. --disable-tool agt_grep
+        ```
 
-        ### Opt-out env vars
+        Valid names (all 13): `agt_glob`, `agt_grep`, `agt_multiedit`,
+        `agt_patch`, `agt_todo_read`, `agt_todo_write`, `agt_web_search`,
+        `agt_web_fetch`, `agt_file_read`, `agt_file_list`, `agt_file_write`,
+        `agt_file_edit`, `agt_file_append`.
+
+        - An UNKNOWN name raises `UsageError` (exit 2) whose message lists all
+          13 valid names.
+        - Naming the SAME tool in both `--enable-tool` and `--disable-tool`
+          raises `UsageError` (exit 2). Precedence is **fail-fast**, not
+          silent winner-take-all. (Duplicates within one flag are harmless.)
+        - The flags operate WITHIN the pack: they cannot resurrect the pack
+          when the effective mode is `chat` (no umbrella flag exists anymore —
+          pack presence is decided solely by the mode).
+        - Mutation gating is unchanged: `agt_file_write` / `agt_file_edit` /
+          `agt_file_append`, `agt_multiedit`, and `agt_patch` still
+          additionally require `--allow-mutations` even when explicitly
+          enabled.
+
+        ### Per-tool env vars
 
         | Env var                                | Effect                                                |
         |----------------------------------------|-------------------------------------------------------|
-        | `CLI_AGENT_DISABLE_AGENT_TOOLS=1`      | umbrella OFF (truthy disables the pack)               |
         | `CLI_AGENT_AGT_GLOB=true|false`        | per-tool override for `agt_glob`                      |
         | `CLI_AGENT_AGT_GREP=true|false`        | per-tool override for `agt_grep`                      |
         | `CLI_AGENT_AGT_MULTIEDIT=true|false`   | per-tool override for `agt_multiedit`                 |
@@ -1041,7 +1115,6 @@
         ```json
         {
           "agentTools": {
-            "enabled": true,
             "tools": {
               "glob": true,
               "grep": true,
@@ -1061,29 +1134,38 @@
         }
         ```
 
-        Every field is optional. Defaults shown above are applied AFTER all four
+        Every field is optional. Defaults shown above are applied AFTER all
         precedence tiers have been consulted; they are explicit starting values,
-        NOT runtime fallbacks for missing required config (per project convention).
+        NOT runtime fallbacks for missing required config (per project
+        convention). The legacy `agentTools.enabled` key was removed in
+        plan-015 — its presence in config.json raises `ConfigurationError`
+        with a migration hint (the `tools` sub-tree stays valid).
 
-        ### Precedence
+        ### Precedence (per-tool)
 
         Mirrors cli-agent's standard four-tier resolution chain:
 
         ```
-        CLI flag (--no-agent-tools / --enable-agt-* / --disable-agt-*)
-          > shell env var (CLI_AGENT_DISABLE_AGENT_TOOLS / CLI_AGENT_AGT_*)
+        CLI flag (--enable-tool <name> / --disable-tool <name>)
+          > shell env var (CLI_AGENT_AGT_*)
           > ~/.tool-agents/cli-agent/.env
           > local ./.env
-          > config.json (agentTools.enabled, agentTools.tools.*)
+          > config.json (agentTools.tools.*)
           > default
         ```
+
+        This chain decides each tool WITHIN the pack. Whether the pack loads
+        at all is decided upstream by the mode knob (`--mode` /
+        `CLI_AGENT_MODE` / profile `cliParams.mode` / config.json `mode`):
+        present in every mode except `chat`. See "Agent mode (tool-group
+        loading)" below.
 
         ### Mutation gating
 
         `agt_file_write`, `agt_file_edit`, `agt_file_append`, `agt_multiedit`,
         and `agt_patch` are excluded from the LLM-visible catalog when
-        `--allow-mutations` is off, regardless of per-tool flags or umbrella
-        state (FR-AGT-010 / FR-AGT-FILE-001). The three `agt_file_*` mutators
+        `--allow-mutations` is off, regardless of per-tool flags or the
+        effective mode (FR-AGT-010 / FR-AGT-FILE-001). The three `agt_file_*` mutators
         inherit the exact gating semantics of the former native `file_write` /
         `file_edit` / `file_append` tools, so the effective default behavior is
         unchanged: `agt_file_read` / `agt_file_list` load by default, the three
@@ -1099,104 +1181,174 @@
         recorded in `src/agent/tools/agent-tools-vendored/PROVENANCE.md`.
     </agentToolsPack>
     <toolLoadingToggles>
-        ## Tool-loading toggles (three independent group switches)
+        ## Agent mode (tool-group loading)
 
-        cli-agent groups its tools into three independently-loadable families.
-        Each family can be suppressed at session-build time through four
-        surfaces — a CLI flag, an environment variable, a `config.json` key,
-        and a configuration-profile key — resolved by a single uniform
-        precedence chain. By default ALL three families load (today's
-        behaviour is unchanged when no toggle is set).
+        cli-agent groups its tools into three families — the built-in
+        cross-cutting toolkit (`bash_*`, `tool_help`), the agent-tools pack
+        (`agt_*`), and the composites (virtual tools) — and a SINGLE knob
+        decides which of them load for a session: the agent mode
+        (`--mode <chat|basic|tool|composite>`, plan-015). `--allow-mutations`
+        remains the orthogonal read-only/read-write axis, and the repeatable
+        `--enable-tool` / `--disable-tool` pair adjusts individual `agt_*`
+        tools WITHIN the pack (see the agent-tools pack section above).
 
-        | Group | Members | Default | CLI | Env (truthy = OFF) | config.json | profile |
-        |---|---|---|---|---|---|---|
-        | **Built-in tools** (the cross-cutting toolkit) | `bash_list_allowed/which/run`, `tool_help` (web moved to the agt_* pack — plan-011; file tools moved to the agt_* pack — plan-012) | load | `--builtin-tools` / `--no-builtin-tools` | `CLI_AGENT_DISABLE_BUILTIN_TOOLS` | `builtinTools: boolean` | `tools.builtin: boolean` |
-        | **Composites** | every virtual/composite tool registered under `~/.tool-agents/cli-agent/composites/` (loaded by `loadVirtualToolsSync`) | load | `--composites` / `--no-composites` | `CLI_AGENT_DISABLE_COMPOSITES` | `composites: boolean` | `tools.composites: boolean` |
-        | **Agent-tools pack** (`agt_*`) | `agt_glob/grep/multiedit/patch/todo_read/todo_write` + first-party `agt_file_read/list/write/edit/append` + first-party `agt_web_search/agt_web_fetch` (see the agent-tools pack section above) | load | `--agent-tools` / `--no-agent-tools` | `CLI_AGENT_DISABLE_AGENT_TOOLS` | `agentTools.enabled: boolean` | `tools.agentTools: boolean` |
+        ### Mode → group mapping
 
-        ### Precedence (uniform for all three)
+        | Mode | Built-in toolkit (`bash_*`, `tool_help`) | Agent-tools pack (`agt_*`) | Composites |
+        |---|---|---|---|
+        | `chat` | — | — | — |
+        | `basic` | — | loaded | — |
+        | `tool` | loaded | loaded | — |
+        | `composite` (default) | loaded | loaded | loaded |
+
+        `composite` is the default: a flagless invocation loads all three
+        groups, identical in behavior to the pre-mode binary. Group members:
+        built-in toolkit = `bash_list_allowed` / `bash_which` / `bash_run` +
+        `tool_help` (web moved to the agt_* pack — plan-011; file tools —
+        plan-012); agent-tools pack = the 13 `agt_*` tools; composites = every
+        virtual/composite tool registered under
+        `~/.tool-agents/cli-agent/composites/` (loaded by
+        `loadVirtualToolsSync`).
+
+        ### Precedence (pinnable-knob chain)
+
+        The mode resolves exactly like the other pinnable knobs (provider,
+        model, allowMutations) — note the profile sits ABOVE config.json,
+        unlike the retired group-toggle chain:
 
         ```
-        CLI flag  >  env var (CLI_AGENT_DISABLE_*)  >  config.json  >  profile  >  default (load)
+        CLI --mode
+          > env CLI_AGENT_MODE  (layered tier: shell env > ~/.tool-agents/cli-agent/.env > local ./.env)
+          > profile cliParams.mode
+          > config.json "mode"
+          > default: composite
         ```
 
-        The `--no-*` CLI form wins outright; `--<group>` (the positive form)
-        forces the group ON even if a lower tier disabled it. The `CLI_AGENT_DISABLE_*`
-        env vars follow the inverted-disable convention (a truthy value — `1`,
-        `true`, `yes`, `on` — turns the group OFF); an invalid value raises
-        `ConfigurationError` (no fallback). These toggles are optional booleans
-        whose documented default is the current behaviour (load); the default is
-        an explicit starting value, NOT a runtime fallback for missing required
-        config.
+        The `composite` default is a documented optional-knob starting value,
+        NOT a runtime fallback for missing required config. `profile-dry-run`
+        reports a `mode` row with source attribution like every other knob.
 
-        ### `--no-builtin-tools` removes `bash_run` — wrapped-CLI caveat
+        ### Invalid values — fail fast, no fallback
 
-        The built-in cross-cutting toolkit INCLUDES `bash_run`, which is the
-        path the agent uses to execute the *wrapped* CLIs declared via
-        `--tool`. Therefore `--no-builtin-tools` (or any lower-tier equivalent)
-        also removes `bash_run`: with the built-in tools off, the agent can act
-        ONLY through composites and the agent-tools pack (whichever of those
-        remain enabled). If you wrap CLIs and want the agent to run them, keep
-        the built-in tools on.
+        - CLI tier (`--mode bogus`) → `UsageError`, exit 2, listing the four
+          valid values.
+        - Env tier (`CLI_AGENT_MODE`) or config.json tier (`mode`) →
+          `ConfigurationError`, exit 3, naming the surface — never a silent
+          downgrade to `composite`.
+        - Profile tier (`cliParams.mode`) is schema-validated (Zod enum), so
+          an invalid value fails profile parsing.
 
-        `--no-builtin-tools` now ALSO removes the built-in tool INSTRUCTIONS
-        from the system prompt — the entire `## Built-in tools` block (the
+        ### chat/basic modes remove `bash_run` — wrapped-CLI conflict
+
+        The built-in toolkit includes `bash_run`, the path the agent uses to
+        execute the *wrapped* CLIs declared via `--tool` (or config.json
+        `tools`). `chat` and `basic` do not load the built-in toolkit, so a
+        wrapped CLI combined with an effective mode of `chat` or `basic`
+        raises `UsageError` (exit 2) directing you to `--mode tool` or
+        `--mode composite`. The check applies to the EFFECTIVE mode from ANY
+        surface (flag, env, profile, config.json) and to the MERGED
+        wrapped-tools list (config.json `tools` included).
+
+        In `chat` and `basic` modes the built-in tool INSTRUCTIONS are removed
+        from the system prompt too — the entire `## Built-in tools` block (the
         `bash_run` framing, CORE RULES, OUT-OF-SCOPE, and the available-tools
-        list) is gated on the same toggle, so the model is not told about tools
-        it cannot call. When the umbrella is ON, that block's content further
-        adapts to the actually-registered built-in tools: the `bash_run` framing
-        is present only with a non-empty allowlist (the file tools moved to the
-        agt_* pack in plan-012, so the built-in block no longer describes them
-        or the `--allow-mutations`-gated mutating-file clause; that guidance now
-        rides on the `agt_file_*` descriptions in the agent-tools block — see
-        "Slim base + runtime-injected built-in-tools block" under "System Prompt
-        Selection").
-        The slim default base prompt carries no tool prose of its own, so
-        disabling the built-in tools yields a prompt with no built-in tool
-        instructions. Caveat: a CUSTOMIZED base that still hard-codes tool prose
-        owns that prose — the toggle cannot strip it from your custom text.
+        list) is gated on mode ≥ `tool`, so the model is not told about tools
+        it cannot call. When the block IS present, its content further adapts
+        to the actually-registered built-in tools: the `bash_run` framing
+        appears only with a non-empty allowlist (see "Slim base +
+        runtime-injected built-in-tools block" under "System Prompt
+        Selection"). The slim default base prompt carries no tool prose of its
+        own, so `chat`/`basic` yield a prompt with no built-in tool
+        instructions. Caveat: a CUSTOMIZED base that still hard-codes tool
+        prose owns that prose — the mode cannot strip it from your custom text.
 
-        ### Empty toolset is permitted (no error)
+        ### `--mode chat` — the empty-toolset state (no error)
 
-        Disabling every group (and wrapping no CLI) is allowed: the catalog is
-        empty and the agent degrades to a plain conversational LLM with no
-        tools. This is a deliberate, supported state — it is NOT an error and
-        does NOT throw. cli-agent emits ONE stderr notice at catalog-build time:
+        `--mode chat` with no wrapped CLI is the supported empty-toolset
+        state: the catalog is empty and the agent degrades to a plain
+        conversational LLM with no tools. It is NOT an error and does NOT
+        throw. cli-agent emits ONE stderr notice at catalog-build time:
 
         ```
         [cli-agent] note: no tools are loaded for this session (all tool groups disabled); the agent will run as a plain conversational LLM with no tools.
         ```
 
+        The no-tools system-prompt notice likewise tells the model to direct
+        the user at `--mode composite` or `--mode tool` (plus
+        `--allow-mutations` or a bash allowlist where needed) to enable tools.
         (This is distinct from profile tool-scoping's empty-survivor error,
         which still applies when an `allow`/`deny` list excludes everything.)
 
+        ### The TUI `/mode` command
+
+        In the raw-mode TUI, `/mode [chat|basic|tool|composite]` mirrors
+        `/allow-mutations`:
+
+        - `/mode` with no argument reports the current mode and usage.
+        - A valid argument switches the mode and rebuilds the LLM binding,
+          tool catalog, system prompt, and agent graph in place — the next
+          user prompt runs with the new toolset.
+        - An invalid value prints an error; no state change.
+        - Switching to `chat`/`basic` while wrapped CLIs are loaded is
+          rejected with no state change (they run through `bash_run`, absent
+          in those modes) — use `/mode tool` / `/mode composite`, or restart
+          without `--tool`.
+        - `/mode` is session-scoped: nothing is persisted to config.json or a
+          profile. `/allow-mutations` is orthogonal and unchanged.
+
         ### Interaction with profile `tools.allow` / `tools.deny` / `tools.order`
 
-        The three group toggles run FIRST (they decide which families are even
-        built). Profile `tools.allow/deny/order` scoping runs AFTER, on whatever
-        survived the toggles — so per-id allow/deny continues to operate exactly
+        The mode runs FIRST (it decides which families are even built).
+        Profile `tools.allow/deny/order` scoping runs AFTER, on whatever
+        survived the mode — so per-id allow/deny continues to operate exactly
         as before on the remaining tools.
 
-        ### config.json shape
+        ### config.json / profile shape
 
         ```json
-        {
-          "builtinTools": true,
-          "composites": true,
-          "agentTools": { "enabled": true }
-        }
+        { "mode": "tool" }
         ```
-
-        ### profile shape (under the `tools` sub-tree)
 
         ```yaml
-        tools:
-          builtin: true       # built-in cross-cutting toolkit
-          composites: true    # composite (virtual) tools
-          agentTools: true    # agent-tools pack (agt_*) umbrella
+        cliParams:
+          mode: tool        # chat | basic | tool | composite
         ```
 
-        All keys are optional; an omitted key defers to the next tier and
-        ultimately to the default (load).
+        The key is optional on every surface; omitted values defer down the
+        chain and ultimately to the default (`composite`).
+
+        ### Migration from the removed toggles (plan-015)
+
+        Plan-015 HARD-REMOVED the previous group-toggle surface — the three
+        flag pairs, the 26 per-tool `--enable-agt-*`/`--disable-agt-*` flags
+        (32 flags total), and the matching env vars / config.json keys /
+        profile keys. Nothing legacy is silently ignored — every removed
+        surface fails fast with a migration hint:
+
+        | Removed surface | Behavior now | Replacement |
+        |---|---|---|
+        | Flags `--composites`/`--no-composites`, `--builtin-tools`/`--no-builtin-tools`, `--agent-tools`/`--no-agent-tools` | `UsageError`, exit 2, migration hint (argv pre-scan in `src/cli-removed-flags.ts`, before Commander parses) | `--mode <chat\|basic\|tool\|composite>` |
+        | The 26 per-tool flags `--enable-agt-<tool>` / `--disable-agt-<tool>` | `UsageError`, exit 2, migration hint | `--enable-tool <name>` / `--disable-tool <name>` with the canonical `agt_*` name |
+        | Env vars `CLI_AGENT_DISABLE_COMPOSITES` / `CLI_AGENT_DISABLE_BUILTIN_TOOLS` / `CLI_AGENT_DISABLE_AGENT_TOOLS` | a SET value — ANY value — raises `ConfigurationError` (exit 3) with the hint | `CLI_AGENT_MODE` |
+        | config.json keys `composites`, `builtinTools`, `agentTools.enabled` | presence raises `ConfigurationError` with the hint (`agentTools.tools.*` stays valid) | config.json `mode` |
+        | Profile keys `tools.composites` / `tools.builtin` / `tools.agentTools` | presence raises `ConfigurationError` from the profile codec, pointing at `cliParams.mode` | profile `cliParams.mode` |
+
+        Posture equivalents:
+
+        | Old posture | New invocation |
+        |---|---|
+        | flagless (all three groups) | flagless, or `--mode composite` |
+        | `--no-composites` (builtin + agt_*) | `--mode tool` |
+        | `--no-builtin-tools --no-composites` (agt_* only) | `--mode basic` |
+        | all three groups off (empty toolset) | `--mode chat` |
+        | `--disable-agt-grep` (per-tool off) | `--disable-tool agt_grep` |
+        | "shell-only" (builtin ON, agt_* OFF) | no group-level equivalent anymore (accepted plan-015 consequence). Nearest: `--mode tool` plus one `--disable-tool agt_<name>` per pack tool (all 13 names), or persist `agentTools.tools.*: false` entries in config.json. |
+
+        Group combinations outside the four modes (e.g. composites without the
+        built-in toolkit) are intentionally no longer expressible at the group
+        level; use per-tool disables within the pack where a finer posture is
+        needed. The old group-toggle precedence chain (config.json above
+        profile) is gone with the keys themselves — the mode is a pinnable
+        knob, so the profile now sits ABOVE config.json.
     </toolLoadingToggles>
 </cliAgent>

@@ -30,6 +30,13 @@ import type {
   ProfileTools,
   ProfileToolArgs,
 } from './profile-schema.js';
+import {
+  AGENT_MODES,
+  isAgentMode,
+  modeToGroups,
+  MODE_MIGRATION_HINT,
+  type AgentMode,
+} from './mode.js';
 
 export const AGENT_TOOL_NAME = 'cli-agent';
 
@@ -118,14 +125,15 @@ export interface AgentConfigFile {
   /** Selects the BASE system prompt file. Same resolution rules as the
    * `--system-prompt` CLI flag (absolute / bare filename / relative). */
   readonly systemPromptFile?: string;
-  /** Agent-tools pack (curated subset of BikS2013/agent-tools). The
-   * umbrella controls the whole pack; each per-tool boolean opts the
-   * specific wrapper in or out of the registered catalog. All fields are
-   * OPTIONAL on the file shape — defaults are applied during resolution
-   * (see `loadAgentConfig`). The defaults are explicit starting values,
-   * NOT runtime fallbacks for missing required config. */
+  /** Agent-tools pack (curated subset of BikS2013/agent-tools). Each
+   * per-tool boolean opts the specific wrapper in or out of the registered
+   * catalog. All fields are OPTIONAL on the file shape — defaults are
+   * applied during resolution (see `loadAgentConfig`). The defaults are
+   * explicit starting values, NOT runtime fallbacks for missing required
+   * config. NOTE (plan-015): the former `enabled` umbrella key was removed
+   * — whether the pack loads at all is decided by the `mode` knob; a
+   * present `agentTools.enabled` key is rejected with a migration hint. */
   readonly agentTools?: {
-    readonly enabled?: boolean;
     readonly tools?: {
       readonly glob?: boolean;
       readonly grep?: boolean;
@@ -145,16 +153,13 @@ export interface AgentConfigFile {
       readonly fileAppend?: boolean;
     };
   };
-  /** Tool-loading group toggles (plan-008). config.json tier of the uniform
-   * precedence chain CLI flag > env > config.json > profile > default(load).
-   * Each is OPTIONAL on the file shape — `undefined` defers to the next tier
-   * (profile → default load). Explicit user settings, NOT runtime fallbacks
-   * for missing required config.
-   *   composites   → load every virtual/composite tool (loadVirtualToolsSync)
-   *   builtinTools → load the cross-cutting toolkit (bash_*, tool_help; file_*
-   *                  and web_* moved to the agt_ pack — plan-011/plan-012) */
-  readonly composites?: boolean;
-  readonly builtinTools?: boolean;
+  /** Agent mode knob (plan-015). config.json tier of the pinnable chain
+   * CLI --mode > env CLI_AGENT_MODE > profile cliParams.mode > config.json
+   * mode > default 'composite'. One of chat|basic|tool|composite; an
+   * invalid value is rejected during resolution (no fallback). NOTE: the
+   * former plan-008 group-toggle keys (`composites`, `builtinTools`) were
+   * removed — a present key is rejected with a migration hint. */
+  readonly mode?: string;
   /** Optional override for the tool-prompt overlay directory. When unset
    * the resolver computes `<agentDir>/tool-prompts/`. Same path-resolution
    * rules as the system prompt: absolute path → verbatim; bare folder
@@ -272,15 +277,15 @@ export interface AgentConfig {
       readonly fileAppend: boolean;
     };
   };
-  /** Resolved tool-loading group toggles (plan-008). ALWAYS present on the
-   * resolved config — the uniform precedence chain
-   * (CLI flag > env > config.json > profile > default(load)) applies the
-   * documented default `true` (load) at the end. The defaults are explicit
-   * starting values, NOT runtime fallbacks for missing required config.
+  /** Resolved tool-group booleans (internal representation). ALWAYS
+   * present on the resolved config. Since plan-015 these are produced
+   * EXCLUSIVELY by the mode knob's expansion (`modeToGroups`), so exactly
+   * four combinations are reachable (chat/basic/tool/composite) and
+   * `deriveModeFromGroups` is an exact inverse.
    *   composites   → when false, no virtual/composite tools are loaded.
    *   builtinTools → when false, the cross-cutting toolkit
-   *                  (file_*, web_*, bash_*, tool_help) is not built. NOTE this
-   *                  also removes bash_run — the path used to run wrapped CLIs. */
+   *                  (bash_*, tool_help) is not built. NOTE this also
+   *                  removes bash_run — the path used to run wrapped CLIs. */
   readonly composites: boolean;
   readonly builtinTools: boolean;
   /** Absolute path to the tool-prompt overlay directory. Always populated
@@ -356,14 +361,17 @@ export interface AgentCliFlags {
    * Omitting the flag falls through to env / config.json / the seeded
    * default at `<capabilitiesDir>/system-prompt.md`. */
   readonly systemPromptFile?: string;
-  /** Agent-tools pack flag overrides (CLI tier — highest priority). Each
-   * field is tri-state: `true` enables, `false` disables, `undefined`
-   * defers to the next tier (env → config.json → default). Conflicting
-   * pairs (e.g. enable+disable on the same tool) MUST be detected by the
-   * CLI mapper and surfaced as a `UsageError` BEFORE reaching this
-   * shape — `mapAgentToolFlags` in `src/cli.ts` is the gatekeeper. */
+  /** Agent-tools pack per-tool overrides (CLI tier — highest priority),
+   * produced by the generic `--enable-tool <name>` / `--disable-tool <name>`
+   * pair (plan-015). Each field is tri-state: `true` enables, `false`
+   * disables, `undefined` defers to the next tier (env → config.json →
+   * default). Conflicts (the same tool named in both flags) and unknown
+   * tool names MUST be detected by the CLI mapper and surfaced as a
+   * `UsageError` BEFORE reaching this shape — `mapAgentToolFlags` in
+   * `src/cli-agent-tools-flags.ts` is the gatekeeper. NOTE (plan-015): the
+   * former `enabled` umbrella member was removed — the pack's presence is
+   * decided by the `mode` knob. */
   readonly agentTools?: {
-    readonly enabled?: boolean;
     readonly tools?: {
       readonly glob?: boolean;
       readonly grep?: boolean;
@@ -381,16 +389,15 @@ export interface AgentCliFlags {
       readonly fileAppend?: boolean;
     };
   };
-  /** Tool-loading group toggles (plan-008) — CLI tier (highest priority).
-   * Tri-state: `true` loads the group, `false` suppresses it, `undefined`
-   * defers to the next tier (env → config.json → profile → default load).
-   * Commander maps `--composites` ⇒ `true`, `--no-composites` ⇒ `false`
-   * (and likewise for `--builtin-tools` / `--no-builtin-tools`).
-   *   composites   → every virtual/composite tool (loadVirtualToolsSync)
-   *   builtinTools → the cross-cutting toolkit (bash_*, tool_help; file_*
-   *                  and web_* moved to the agt_ pack — plan-011/plan-012) */
-  readonly composites?: boolean;
-  readonly builtinTools?: boolean;
+  /** Agent mode knob (plan-015) — CLI tier (highest priority) of the
+   * pinnable chain. Raw string from Commander, pre-validated by
+   * `parseModeFlag` in `src/cli.ts` (UsageError on a non-mode value);
+   * `resolveMode` re-validates defensively for non-Commander callers.
+   * `undefined` defers to env CLI_AGENT_MODE → profile cliParams.mode →
+   * config.json mode → default 'composite'. Replaces the removed plan-008
+   * group-toggle flags (`--composites`/`--builtin-tools`/`--agent-tools`
+   * and their `--no-*` forms). */
+  readonly mode?: string;
   /** Activate a named configuration profile (plan-005). When set the
    * loader resolves `<agentDir>/profiles/<name>.{yaml|yml|json}` and
    * threads `cliParams` into the per-knob precedence chain at tier 5.
@@ -845,17 +852,18 @@ const OTHER_ENV_KEYS = [
   'WEB_SEARCH_URL', 'WEB_SEARCH_API_KEY',
   'TAVILY_API_KEY', 'SERPAPI_API_KEY', 'BRAVE_API_KEY', 'WEB_SEARCH_MAX_REQUESTS',
   'CLI_AGENT_SYSTEM_PROMPT',
-  // --- Tool-loading group toggles (plan-008) ---
-  // Inverted-disable env tier (truthy = group OFF), matching the existing
-  // CLI_AGENT_DISABLE_AGENT_TOOLS convention. Tri-state parsing via
-  // parseAgentToolsBoolEnvVar; invalid value → ConfigurationError (no fallback).
-  //   CLI_AGENT_DISABLE_COMPOSITES     → suppress all virtual/composite tools
-  //   CLI_AGENT_DISABLE_BUILTIN_TOOLS  → suppress the cross-cutting toolkit
+  // --- Agent mode knob (plan-015) ---
+  // Pinnable chain: CLI --mode > env CLI_AGENT_MODE > profile cliParams.mode
+  // > config.json mode > default 'composite'. Invalid value →
+  // ConfigurationError (no fallback).
+  'CLI_AGENT_MODE',
+  // --- Legacy tool-group toggles (plan-008; REMOVED by plan-015) ---
+  // Kept in the snapshot ONLY so the layered env remains able to SEE a set
+  // value: presence of any of these is REJECTED in loadAgentConfig with a
+  // ConfigurationError carrying the mode migration hint — never silently
+  // ignored (Resolution 2 of the refined request).
   'CLI_AGENT_DISABLE_COMPOSITES',
   'CLI_AGENT_DISABLE_BUILTIN_TOOLS',
-  // --- Agent-tools pack ---
-  // Umbrella: when truthy (1/true/yes/on), disables the whole pack regardless
-  // of per-tool flags. Tri-state parsing via parseAgentToolsBoolEnvVar.
   'CLI_AGENT_DISABLE_AGENT_TOOLS',
   // Per-tool tri-state: 1/true/yes/on → enable; 0/false/no/off → disable;
   // unset → defer to lower tier (config.json → default).
@@ -1052,6 +1060,58 @@ export async function loadAgentConfig(
     };
   }
 
+  // ---- Legacy tool-group surface rejection (plan-015, Resolution 2) ----
+  // The plan-008 group toggles were replaced by the single `mode` knob. A
+  // SET legacy env var (any value) or a PRESENT legacy config.json key
+  // fails fast with a migration hint — never silently ignored (project
+  // no-fallback convention).
+  for (const legacyEnvKey of [
+    'CLI_AGENT_DISABLE_COMPOSITES',
+    'CLI_AGENT_DISABLE_BUILTIN_TOOLS',
+    'CLI_AGENT_DISABLE_AGENT_TOOLS',
+  ] as const) {
+    if (layered[legacyEnvKey] !== undefined) {
+      throw new ConfigurationError(legacyEnvKey, [
+        `env:${legacyEnvKey} was removed (plan-015). ${MODE_MIGRATION_HINT}`,
+      ]);
+    }
+  }
+  {
+    const rawConfig = configFile as unknown as Record<string, unknown> | null;
+    if (rawConfig !== null) {
+      const legacyConfigKeys: string[] = [];
+      if ('composites' in rawConfig) legacyConfigKeys.push('composites');
+      if ('builtinTools' in rawConfig) legacyConfigKeys.push('builtinTools');
+      const rawAgentTools = rawConfig['agentTools'];
+      if (
+        rawAgentTools !== null &&
+        typeof rawAgentTools === 'object' &&
+        'enabled' in (rawAgentTools as Record<string, unknown>)
+      ) {
+        legacyConfigKeys.push('agentTools.enabled');
+      }
+      if (legacyConfigKeys.length > 0) {
+        throw new ConfigurationError(legacyConfigKeys.join(', '), [
+          `config.json key(s) '${legacyConfigKeys.join("', '")}' were removed (plan-015). ${MODE_MIGRATION_HINT}`,
+        ]);
+      }
+    }
+  }
+
+  // ---- Agent mode (plan-015) ----
+  // Pinnable chain: CLI --mode > env CLI_AGENT_MODE > profile cliParams.mode
+  // > config.json mode > default 'composite'. The 'composite' default is a
+  // documented optional-knob starting value (NFR-4) — flagless behavior is
+  // identical to the pre-plan-015 all-groups-on default — NOT a runtime
+  // fallback for missing required config.
+  const mode = resolveMode(
+    flags.mode,
+    layered,
+    activeProfileData?.cliParams?.mode,
+    configFile?.mode,
+  );
+  const modeGroups = modeToGroups(mode);
+
   // Layer 4: CLI flags override everything.
   // Tier-5 insertion: `?? activeProfileData?.cliParams?.X` is added between
   // `layered[...]` and `configFile?.X` for each pinnable knob (plan-005 §12.G).
@@ -1097,6 +1157,20 @@ export async function loadAgentConfig(
   const configTools = configFile?.tools ?? [];
   const cliTools = flags.tools ?? [];
   const tools = [...new Set([...configTools, ...cliTools])];
+
+  // ---- --tool × mode conflict (plan-015, FR-MODE-5) ----
+  // Wrapped CLIs execute through bash_run, which only exists in 'tool' and
+  // 'composite' modes. The check runs on the EFFECTIVE mode and the MERGED
+  // wrapped-tools list, so modes sourced from env/profile/config and tools
+  // sourced from config.json are caught too.
+  if ((mode === 'chat' || mode === 'basic') && tools.length > 0) {
+    throw new UsageError(
+      `--tool is not available in '${mode}' mode: wrapped CLIs run through bash_run, ` +
+        `which is only loaded in 'tool' or 'composite' mode. Re-run with --mode tool or ` +
+        `--mode composite, or drop the wrapped tool(s): ${tools.join(', ')}.`,
+      { mode, tools },
+    );
+  }
 
   // Capabilities config
   const capConfig = configFile?.capabilities ?? {};
@@ -1245,35 +1319,22 @@ export async function loadAgentConfig(
     systemAppendFile: flags.systemFile,
     toolPromptsDir,
     toolPromptOverlays,
-    // Agent-tools pack — fully resolved through the precedence chain
-    // (CLI > env > config.json > profile > default). The resolver applies
-    // explicit defaults (NOT fallbacks for missing required config) at the
-    // end. Downstream code (registry / catalog builder) relies on this field
-    // always being present.
+    // Agent-tools pack — the pack's PRESENCE comes from the mode knob
+    // (plan-015); the per-tool booleans resolve through the unchanged
+    // chain CLI (--enable-tool/--disable-tool) > env (CLI_AGENT_AGT_*) >
+    // config.json (agentTools.tools.*) > default. Downstream code
+    // (registry / catalog builder) relies on this field always being present.
     agentTools: resolveAgentTools(
       flags.agentTools,
       layered,
       configFile,
-      activeProfileData?.tools?.agentTools,
+      modeGroups.agentToolsEnabled,
     ),
-    // Tool-loading group toggles (plan-008) — resolved through the uniform
-    // chain CLI flag > env(CLI_AGENT_DISABLE_*) > config.json > profile >
-    // default(load). Always present; the default `true` is a documented
-    // optional-toggle starting value, NOT a runtime fallback.
-    composites: resolveToolGroupToggle(
-      flags.composites,
-      'CLI_AGENT_DISABLE_COMPOSITES',
-      layered,
-      configFile?.composites,
-      activeProfileData?.tools?.composites,
-    ),
-    builtinTools: resolveToolGroupToggle(
-      flags.builtinTools,
-      'CLI_AGENT_DISABLE_BUILTIN_TOOLS',
-      layered,
-      configFile?.builtinTools,
-      activeProfileData?.tools?.builtin,
-    ),
+    // Tool-group booleans (internal representation) — produced EXCLUSIVELY
+    // by the mode knob's expansion (plan-015). The plan-008 per-group
+    // toggle chain was removed.
+    composites: modeGroups.composites,
+    builtinTools: modeGroups.builtinTools,
     activeProfile,
     activeProfileData,
   };
@@ -1363,35 +1424,16 @@ function resolveAgentTools(
   flags: AgentCliFlags['agentTools'] | undefined,
   layered: Record<string, string | undefined>,
   configFile: AgentConfigFile | null,
-  profileEnabled: boolean | undefined,
+  enabled: boolean,
 ): AgentConfig['agentTools'] {
   const cfgPack = configFile?.agentTools;
   const cfgTools = cfgPack?.tools;
 
-  // Umbrella: CLI flag > env (CLI_AGENT_DISABLE_AGENT_TOOLS) > config.json
-  //           > profile (tools.agentTools) > default(true)
-  // Note the env semantics: CLI_AGENT_DISABLE_AGENT_TOOLS=truthy means
-  // umbrella=false. We invert when consulting that env var. The profile
-  // tier (plan-008) sits just above the default, mirroring the uniform
-  // chain applied to the composites / builtinTools toggles.
-  let enabled: boolean;
-  if (flags?.enabled !== undefined) {
-    enabled = flags.enabled;
-  } else {
-    const envDisable = parseAgentToolsBoolEnvVar(
-      layered['CLI_AGENT_DISABLE_AGENT_TOOLS'],
-      'CLI_AGENT_DISABLE_AGENT_TOOLS',
-    );
-    if (envDisable !== undefined) {
-      enabled = !envDisable;
-    } else if (cfgPack?.enabled !== undefined) {
-      enabled = cfgPack.enabled;
-    } else if (profileEnabled !== undefined) {
-      enabled = profileEnabled;
-    } else {
-      enabled = true; // default starting value
-    }
-  }
+  // Umbrella (plan-015): the pack's presence is decided by the mode knob's
+  // expansion and passed in as `enabled` — there is no per-umbrella chain
+  // anymore. The legacy CLI_AGENT_DISABLE_AGENT_TOOLS env var and
+  // `agentTools.enabled` config key are REJECTED upstream in
+  // `loadAgentConfig` before this resolver runs.
 
   // Per-tool flags. Default starting values: glob/grep/multiedit/patch=true,
   // todoRead/todoWrite=false. Mutation gating happens DOWNSTREAM in the
@@ -1451,41 +1493,63 @@ function resolveAgentTools(
 }
 
 /**
- * Resolve a tool-loading group toggle (plan-008) through the uniform
- * precedence chain:
+ * Resolve the agent mode (plan-015) through the pinnable-knob chain:
  *
- *   CLI flag  >  env (inverted-disable)  >  config.json  >  profile  >  default(true)
+ *   CLI --mode  >  env CLI_AGENT_MODE (layered)  >  profile cliParams.mode
+ *   >  config.json mode  >  default 'composite'
  *
- * Mirrors the umbrella logic in {@link resolveAgentTools}. The env tier
- * follows the inverted-disable convention shared with
- * `CLI_AGENT_DISABLE_AGENT_TOOLS`: a truthy `CLI_AGENT_DISABLE_*` value
- * means the group is OFF, so the parsed boolean is negated. Env values are
- * strict-validated via `parseAgentToolsBoolEnvVar` (an invalid value throws
- * `ConfigurationError` — no fallback).
- *
- * The default (load = `true`) is a documented optional-toggle starting
- * value, NOT a runtime fallback for a missing *required* setting, so the
- * project's no-fallback rule is not triggered (no new required config).
- *
- * @param flagVal      CLI-flag value (tri-state; `undefined` defers).
- * @param disableEnvKey Name of the `CLI_AGENT_DISABLE_*` env var to consult.
- * @param layered      Layered env snapshot (shell > agent-dir .env > local .env).
- * @param configVal    config.json value (tri-state; `undefined` defers).
- * @param profileVal   Active-profile value (tri-state; `undefined` defers).
+ * The CLI tier is pre-validated by `parseModeFlag` in `src/cli.ts`
+ * (UsageError, exit 2); this resolver re-validates defensively for
+ * non-Commander callers (tests, subcommands). The profile tier is already
+ * Zod-validated (enum) by the profile schema. Env and config.json values
+ * are validated here: an invalid value raises `ConfigurationError` — no
+ * fallback. The `'composite'` default is a documented optional-knob
+ * starting value (flagless behavior identical to the pre-plan-015
+ * all-groups-on default), NOT a runtime fallback for missing required
+ * config.
  */
-function resolveToolGroupToggle(
-  flagVal: boolean | undefined,
-  disableEnvKey: string,
+function resolveMode(
+  flagMode: string | undefined,
   layered: Record<string, string | undefined>,
-  configVal: boolean | undefined,
-  profileVal: boolean | undefined,
-): boolean {
-  if (flagVal !== undefined) return flagVal;
-  const envDisable = parseAgentToolsBoolEnvVar(layered[disableEnvKey], disableEnvKey);
-  if (envDisable !== undefined) return !envDisable;
-  if (configVal !== undefined) return configVal;
-  if (profileVal !== undefined) return profileVal;
-  return true; // default starting value: load
+  profileMode: string | undefined,
+  configMode: string | undefined,
+): AgentMode {
+  if (flagMode !== undefined) {
+    if (!isAgentMode(flagMode)) {
+      throw new UsageError(
+        `Invalid --mode value '${flagMode}'. Valid modes: ${AGENT_MODES.join(', ')}.`,
+        { flag: '--mode', value: flagMode },
+      );
+    }
+    return flagMode;
+  }
+  const envMode = layered['CLI_AGENT_MODE'];
+  if (envMode !== undefined) {
+    if (!isAgentMode(envMode)) {
+      throw new ConfigurationError('CLI_AGENT_MODE', [
+        `env:CLI_AGENT_MODE must be one of ${AGENT_MODES.join('|')} (got '${envMode}')`,
+      ]);
+    }
+    return envMode;
+  }
+  if (profileMode !== undefined) {
+    // Zod-validated enum at profile load time; defensive re-check.
+    if (!isAgentMode(profileMode)) {
+      throw new ConfigurationError('profile.cliParams.mode', [
+        `profile cliParams.mode must be one of ${AGENT_MODES.join('|')} (got '${profileMode}')`,
+      ]);
+    }
+    return profileMode;
+  }
+  if (configMode !== undefined) {
+    if (!isAgentMode(configMode)) {
+      throw new ConfigurationError('mode', [
+        `config.json "mode" must be one of ${AGENT_MODES.join('|')} (got '${configMode}')`,
+      ]);
+    }
+    return configMode;
+  }
+  return 'composite'; // documented optional-knob starting value (NFR-4)
 }
 
 /**

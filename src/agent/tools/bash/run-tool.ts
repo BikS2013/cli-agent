@@ -29,10 +29,14 @@ export function createBashRunTool(cfg: AgentConfig, logger: Logger, allowMutatio
   const descPrefix = allowMutations
     ? '[MUTATING]'
     : '[READ-ONLY-AGENT]';
-  const dynamicDefault = `${descPrefix} Execute an allow-listed local command and capture its stdout/stderr. ` +
+  const unrestricted = matcher.isEmpty();
+  const allowlistClause = unrestricted
+    ? 'No allowlist is configured this session, so ANY binary on PATH may be called — be conservative.'
+    : 'Only binaries on the allowlist may be called.';
+  const dynamicDefault = `${descPrefix} Execute a local command and capture its stdout/stderr. ` +
     (allowMutations
-      ? 'Requires confirmed: true. Only binaries on the allowlist may be called.'
-      : 'Requires confirmed: true. The user has not enabled --allow-mutations; prefer read-only commands. Only allow-listed binaries may be called.');
+      ? `Requires confirmed: true. ${allowlistClause}`
+      : `Requires confirmed: true. The user has not enabled --allow-mutations; prefer read-only commands. ${allowlistClause}`);
   const reg = cfg.toolPromptOverlays;
   const description = getToolDescription(reg, TOOL_NAME, dynamicDefault);
   const schema = z.object({

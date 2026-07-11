@@ -71,7 +71,8 @@ logs, retry/abort, persistent history) is handled.
 4. **The model reasons** about your prompt with the wrapped CLIs'
    surfaces in context. When it decides to invoke one, the call goes
    through the standard `bash_run` tool — `execFile`-only (no shell),
-   allowlist-enforced, environment-stripped, output-capped, redacted
+   allowlist-gated (unrestricted when no allowlist is configured — see the
+   Security model), environment-stripped, output-capped, redacted
    in logs. Each call requires user confirmation by default.
 5. **The streaming TUI** renders tokens live, shows in-flight tool
    calls with timing, supports ESC-to-abort, multiline input editing,
@@ -106,6 +107,12 @@ cli-agent --tool git --tool gh
 
 # Or one-shot
 cli-agent --tool gh "list my open pull requests"
+
+# 5. Dial the toolset with --mode (default: composite = everything).
+#    chat = no tools at all; basic = file/search/web skills only;
+#    tool = shell toolkit + skills (wrapped CLIs work here and up)
+cli-agent --mode chat "explain what a LangGraph ReAct loop is"
+cli-agent --mode basic "find every TODO comment under src/"
 ```
 
 On first run the agent creates `~/.tool-agents/cli-agent/` with mode
@@ -288,7 +295,7 @@ cli-agent composite-show <name> --command [args...]   # print the resolved under
 Bare `cli-agent` invocation drops into a raw-mode terminal UI with
 token-by-token streaming, an animated spinner, in-flight tool-call
 indicators, ESC-to-abort, multiline input editing, input history, and
-a 15-command slash catalogue.
+a 17-command slash catalogue.
 
 ```
 $ cli-agent --tool git --tool gh
@@ -315,7 +322,7 @@ You> /quit
 |---|---|
 | Core | `/help`, `/quit` (`/exit`), `/new` (`/reset`), `/clear` |
 | History & memory | `/history`, `/last` (`/raw`), `/copy`, `/memory` |
-| Runtime switching | `/model [<id>]`, `/provider [<name>]`, `/tools <add\|remove\|list> [name] [--save]`, `/allow-mutations on\|off` |
+| Runtime switching | `/model [<id>]`, `/provider [<name>]`, `/mode [<chat\|basic\|tool\|composite>]`, `/tools <add\|remove\|list> [name] [--save]`, `/allow-mutations on\|off` |
 | Capability inspection | `/capabilities`, `/refresh-capabilities [<tool>]`, `/tool-help <tool> [<sub>]` |
 
 `/tools add gh --save` discovers the `gh` capability *inline* (with a
@@ -405,11 +412,17 @@ Suppress with `CLI_AGENT_QUIET_DISCOVERY=1`.
 
 ## Security model
 
-- **Bash allowlist defaults to empty.** Every wrapped binary is
-  declared explicitly via `--tool=<name>` (which adds it as a binary
-  rule), `--bash-allow=<csv>`, `BASH_ALLOWED_COMMANDS`, or
-  `config.json: bash.allow[]`. There is no global "allow everything"
-  flag.
+- **Bash allowlist — ⚠ UNRESTRICTED when unconfigured (changed 2026-07-04).**
+  When the allowlist is left completely empty (no `--tool=<name>`, no
+  `--bash-allow=<csv>`, no `BASH_ALLOWED_COMMANDS`, no
+  `config.json: bash.allow[]`), `bash_run` runs in **UNRESTRICTED** mode and
+  may execute **any** binary on `PATH` — cli-agent prints a one-line stderr
+  notice at startup when this is the case. Add **any** entry (a wrapped
+  `--tool`, a `--bash-allow` binary, or an `argv-regex:` rule) and the
+  allowlist becomes restrictive again, permitting only matching commands.
+  To keep the agent locked down, always configure at least one entry, or run
+  it in `--mode basic` (which loads the `agt_*` file/search/web skills but
+  never binds `bash_run`).
 - **`execFile`-only spawn.** The agent never calls `child_process.exec`
   or passes a single command string to a shell. Pipes, redirections,
   `&&`, backticks, glob expansion, and env-var expansion **do not
@@ -490,7 +503,7 @@ cli-agent/
 │   │   ├── run.ts                   # one-shot, streaming, REPL, TUI runtimes
 │   │   ├── system-prompt.ts
 │   │   └── logging.ts               # structured JSONL
-│   ├── tui/                         # raw-mode TUI + 15 slash commands
+│   ├── tui/                         # raw-mode TUI + 17 slash commands
 │   ├── errors.ts
 │   └── util/redact.ts
 ├── docs/

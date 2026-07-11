@@ -108,17 +108,23 @@ Factories read only from `cfg.providerEnv` (frozen snapshot). Never read `proces
 | `bash_run` | Deviation† | Execute allow-listed binary |
 | `tool_help` | No | Fetch capability doc or subcommand section |
 
-> **Current contract (plan-011/012):** web and file operations are no longer
-> built-in cross-cutting tools. `web_search` / `web_fetch` moved to
-> `agt_web_search` / `agt_web_fetch`; `file_read` / `file_list` /
-> `file_write` / `file_edit` / `file_append` moved to `agt_file_read` /
-> `agt_file_list` / `agt_file_write` / `agt_file_edit` / `agt_file_append`.
-> Those tools are governed by `--agent-tools` and per-tool `--disable-agt-*`
-> flags, not by `--no-builtin-tools`.
+> **Current contract (plan-011/012; surfaces updated by plan-015):** web and
+> file operations are no longer built-in cross-cutting tools. `web_search` /
+> `web_fetch` moved to `agt_web_search` / `agt_web_fetch`; `file_read` /
+> `file_list` / `file_write` / `file_edit` / `file_append` moved to
+> `agt_file_read` / `agt_file_list` / `agt_file_write` / `agt_file_edit` /
+> `agt_file_append`. Since plan-015 whether the `agt_*` pack loads at all is
+> decided by the `--mode` knob (present in `basic` / `tool` / `composite`,
+> absent in `chat`), and individual tools are toggled with
+> `--enable-tool <name>` / `--disable-tool <name>` — NOT by the removed
+> `--agent-tools` / `--no-builtin-tools` / `--disable-agt-*` flags.
 
 \* `agt_file_write`, `agt_file_edit`, `agt_file_append`, `agt_multiedit`, and
   `agt_patch` are off unless `--allow-mutations`.
-† `bash_run` is visible whenever the allowlist is non-empty, regardless of `--allow-mutations`.
+† `bash_run` is visible whenever the built-in toolkit is loaded (mode `tool`
+  or `composite`), regardless of `--allow-mutations`. Since 2026-07-04 an
+  empty allowlist no longer hides it — it means UNRESTRICTED execution
+  (see the 2026-07-04 fail-open design entry).
   Without `--allow-mutations`, the description carries `[READ-ONLY-AGENT]` prefix as a warning.
   This is a documented deviation from the standard spec (see configuration-guide.md).
 
@@ -287,6 +293,18 @@ level fragments stay in `~/.tool-agents/cli-agent/logs/` (the standard logger).
 ---
 
 ## 10. Agent-Tools Pack (curated subset of `BikS2013/agent-tools`)
+
+> **Historical design record (plan-003). Flag surfaces superseded by plan-015.**
+> The CLI opt-out surface described in this chapter — the `--no-agent-tools`
+> umbrella and the per-tool `--enable-agt-<tool>` / `--disable-agt-<tool>`
+> flags (and their `--enable-agt-X --disable-agt-X` conflict handling) — was
+> REMOVED by plan-015. The pack now loads by `--mode` (`basic`/`tool`/
+> `composite`; absent in `chat`) and individual tools toggle with
+> `--enable-tool <name>` / `--disable-tool <name>`. The per-tool
+> `CLI_AGENT_AGT_*` env vars and `agentTools.tools.*` config keys are
+> unchanged. See the dated "2026-07-04 — CLI Mode Simplification" entry at
+> the end of this document for the current surface. The pack's tools and
+> internal representation (this chapter's substance) are otherwise current.
 
 This section captures the technical design for embedding a curated 6-tool
 subset of the upstream `BikS2013/agent-tools` library into cli-agent as
@@ -3551,7 +3569,14 @@ prefers the original spec wording.
 
 ---
 
-## §16. Tool-Loading Toggles (plan-008)
+## §16. Tool-Loading Toggles (plan-008) — SUPERSEDED
+
+> **SUPERSEDED (2026-07-04) by "CLI Mode Simplification (plan-015)"** — see
+> the dated section at the end of this document. Every surface described
+> below (the three flag pairs, the `CLI_AGENT_DISABLE_*` env vars, the
+> `config.json` `composites`/`builtinTools`/`agentTools.enabled` keys, and
+> the profile `tools.*` group keys) was hard-removed; the single `--mode`
+> knob replaces them. This section is retained for historical traceability.
 
 **Date:** 2026-06-14 · **Based-on commit:** `c546d3891d273d3afdcf6271f6257cba3ce9022b`
 
@@ -3699,3 +3724,42 @@ prefers the original spec wording.
 - `prepublishOnly` runs `lint`, `typecheck`, `build`, `test`, `release:audit`, and `release:package` in sequence, so any failed gate blocks publish. `build` owns the clean `dist/` step and intentionally precedes `test` because the CLI help baseline tests execute `dist/cli.js`.
 
 **As-built surface.** Modified `package.json`, `scripts/copy-vendored-assets.mjs`, `README.md`, `docs/design/project-functions.md`, and this design file. Added `tsconfig.build.json`, `scripts/check-package-content.mjs`, and `docs/design/plan-014-release-ci-hardening.md`. No package dependency was added.
+
+---
+
+## 2026-07-04 — CLI Mode Simplification: the `--mode` knob (plan-015)
+
+**Provenance chain.** Refined request `docs/reference/refined-request-cli-mode-simplification.md` (three Open Questions resolved by the user: hard removal of the legacy flags AND the legacy env/config/profile group keys; four modes only) → codebase scan `docs/reference/codebase-scan-cli-mode-simplification.md` → plan `docs/design/plan-015-cli-mode-simplification.md`. Investigation and technical research skipped: the approach was fully settled in the refined request's established design context (Commander flag surface, the existing pinnable-knob resolver pattern, the `/allow-mutations` slash-command pattern). Supersedes §16 (plan-008). FRs registered as FR-MODE-1..6 / FR-TOOLFLAG-1..3 / FR-DEPREC-1 / NFR-MODE-1..2 in `docs/design/project-functions.md`; the FR-TLT-* entries are retired with pointers.
+
+**Problem.** Tool loading was controlled by ~15 configuration surfaces: three group-toggle flag pairs (6 flags), 26 per-tool `--enable-agt-*`/`--disable-agt-*` flags, three inverted-disable env vars, three `config.json` keys, and three profile keys — and the group-toggle chain put `config.json` ABOVE the profile while every pinnable knob put the profile above `config.json` (the precedence asymmetry recorded in "Issues - Pending Items.md").
+
+**Decision.**
+- **One mode enum, four values.** `--mode <chat|basic|tool|composite>` expands into the unchanged internal group booleans via `modeToGroups` (`src/config/mode.ts`): chat = none, basic = agt_* pack only, tool = builtin + agt_*, composite = all three. Default `composite` — a flagless invocation is behavior-identical to the pre-plan-015 all-groups-on default. `deriveModeFromGroups` is an exact inverse because the mode mapping is now the only producer of the triple; NO `mode` field was added to `AgentConfig` (avoiding the 23+ spec-fixture ripple the scan warned about).
+- **Pinnable resolution.** CLI `--mode` (UsageError on bad value) > env `CLI_AGENT_MODE` > profile `cliParams.mode` (Zod enum) > `config.json` `mode` > default `composite`; invalid env/config values raise `ConfigurationError` — no fallback (`resolveMode`, `src/config/agent-config.ts`). This kills the precedence asymmetry: the profile tier now has one position for every knob.
+- **Hard removal with fail-fast migration errors.** The 32 legacy flags are unregistered; an argv pre-scan (`src/cli-removed-flags.ts`) runs BEFORE `program.parseAsync` and throws `UsageError` (exit 2) with a shared `MODE_MIGRATION_HINT` — Commander's own unknown-option path exits 1 without a hint, hence the pre-scan. A SET legacy env var (any value), a PRESENT legacy `config.json` key, or a PRESENT legacy profile `tools.*` key raises `ConfigurationError` with the hint (the profile codec pre-checks the raw object so the user sees an actionable message instead of a generic Zod "unrecognized key" error). The three `CLI_AGENT_DISABLE_*` keys stay in `OTHER_ENV_KEYS` solely so the layered snapshot can SEE and reject them.
+- **Generic per-tool pair.** `--enable-tool <name>` / `--disable-tool <name>` (repeatable, canonical `agt_*` names, unknown-name and both-flags conflicts fail fast) replaces the 26 per-tool flags; the `CLI_AGENT_AGT_*` env vars and `agentTools.tools.*` config keys are untouched, as is mutation gating.
+- **`--tool` × chat/basic fails fast.** Wrapped CLIs execute through `bash_run`, absent below `tool` mode; the check runs in `loadAgentConfig` on the effective mode and the merged tools list, so env/profile/config-sourced modes and config-sourced tools are caught too (FR-MODE-5).
+- **TUI parity.** `/mode` shows or switches the mode and rebuilds the catalog in place (`src/tui/slash/mode.ts`, mirroring `/allow-mutations`), rejecting chat/basic while wrapped CLIs are loaded.
+- **Accepted consequence.** Group-level "shell-only" (builtin ON, agt_* OFF) is no longer expressible; the nearest equivalent is `--mode tool` plus per-tool `--disable-tool` entries (or persisted `agentTools.tools.*` keys).
+
+**As-built surface.** Added `src/config/mode.ts`, `src/cli-removed-flags.ts`, `src/tui/slash/mode.ts`, and specs `src/config/agent-config-mode.spec.ts`, `src/cli-agent-tools-flags.spec.ts`, `src/cli-removed-flags.spec.ts`, `src/tui/slash/mode.spec.ts`. Modified `src/config/agent-config.ts` (resolveMode; mode→groups expansion; legacy rejection; `--tool` conflict; `resolveToolGroupToggle` deleted; `resolveAgentTools` umbrella branch replaced by a passed-in boolean), `src/cli-agent-tools-flags.ts` (generic mapper + exported canonical-name map), `src/cli.ts` (32 options removed, 3 added, pre-scan wired with a `CliAgentError`-aware catch), `src/config/profile-schema.ts` (+`cliParams.mode`, −`tools.*` group keys) and `profile-codec.ts` (legacy-key pre-check), `src/commands/profile/dry-run.ts` (mode knob row), `src/agent/system-prompt.ts` (`NO_TOOLS_BLOCK` now directs at `--mode`), `src/tui/index.ts`, plus spec updates (`agent-config.spec.ts`, `profile-schema/codec.spec.ts`, `cli.spec.ts`, `system-prompt.spec.ts`, `dry-run.spec.ts`) and `test_scripts/verify-no-tools-notice.ts` (now exercises `--mode chat`). The `--help` byte baseline + `.sha256` were consciously re-recorded (NFR-CMP-001). Out-of-scope consumers (`buildToolCatalog`, `buildAgentToolsGroup`, composite subsystem) are untouched. Docs: `docs/tools/cli-agent.md`, `docs/design/configuration-guide.md`, `docs/guides/agent-competency-levels.md`, `docs/guides/enabling-write-capabilities.md`, `README.md` present the mode surface as primary.
+
+---
+
+## 2026-07-04 — Bash fail-open: unconfigured allowlist is UNRESTRICTED (user-directed)
+
+**Provenance.** Direct user instruction ("make it accept all the bash commands if the bash-allow is undefined"). No refinement/scan phase — the request was fully specified and the touchpoints were already mapped from the plan-015 work. Recorded in the project memory note `bash-allowlist-fail-open` because it reverses a documented security invariant.
+
+**Problem / decision.** Previously an empty bash allowlist was fail-CLOSED: `bash_run` was not even registered (`registry.ts` required `allowlistEntries.length > 0`), the matcher denied everything, and the permission bridge returned `allow:false` with reason "fail-closed". The user wants the opposite: when NO allowlist is configured anywhere (no `--bash-allow`/`--bash-allow-file`/`BASH_ALLOWED_COMMANDS`/`config.json` `bash.allow`, and no wrapped `--tool`), `bash_run` accepts **every** command on `PATH`. The moment ANY entry exists, restrictive OR'd matching resumes exactly as before.
+
+**Where it lands (code).**
+- `src/agent/tools/bash/allowlist.ts` — `buildAllowlistMatcher().test()` returns `true` when `entries.length === 0` (unrestricted); `isEmpty()` still reports the unconfigured state so callers can surface it.
+- `src/agent/tools/registry.ts` — `bash_run` is bound whenever the built-in group is on (dropped the `allowlistEntries.length > 0` guard); one stderr notice is emitted on the empty-allowlist case.
+- `src/agent/tools/agent-tools/permissions.ts` — `evaluateBash` removed the `matcher.isEmpty()` fail-closed branch (an empty matcher now allows via `matcher.test`); empty/whitespace commands are still rejected.
+- `src/agent/tools/bash/run-tool.ts` — description gains an unrestricted clause ("No allowlist is configured … ANY binary on PATH may be called — be conservative").
+- `src/agent/tools/bash/list-allowed-tool.ts` — result gains `unrestricted` + a `note` when the allowlist is empty.
+- `src/agent/system-prompt.ts` — `BuiltinToolsPresence` gains `bashUnrestricted`; a new UNRESTRICTED bash_run intro + CORE RULES variant (with restraint guidance) is selected when `bash_run` is bound and no allowlist is configured; `buildSystemPromptForCfg` derives the flag from `cfg.bash.allow.length === 0`.
+
+**Unchanged guardrails (both modes).** `--allow-mutations` still independently gates mutating file tools and the `[MUTATING]`/`[READ-ONLY-AGENT]` posture; the `cwd` sandbox (`bash.allowedRoots`), `execFile` semantics, env stripping, timeout, and output caps all still apply. FR-AGT-017 amended accordingly.
+
+**As-built surface.** The six source files above plus spec updates (`allowlist.spec.ts`, `registry.spec.ts` — `STANDARD_READONLY_NAMES` now includes `bash_run`, the gating describe flipped to binding + notice assertions, `permissions.spec.ts` — empty allowlist now asserts allow-all). Docs: `docs/design/configuration-guide.md` (bash allowlist section warning), `docs/tools/cli-agent.md` (adaptive-block + permission-bridge prose), `docs/guides/enabling-write-capabilities.md` (Switch 2 + combos), `docs/design/project-functions.md` (FR-AGT-017). Full suite green (1199 tests) and an end-to-end check confirmed `bash_run` executes an un-allowlisted binary with no allowlist configured.

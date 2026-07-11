@@ -208,12 +208,14 @@ function toolNames(catalog: ReturnType<typeof buildToolCatalog>): string[] {
 // Must match the readOnly[] array in registry.ts exactly. Web search/fetch
 // moved to the agt_ pack (plan-011); file_read/file_list moved to the agt_
 // pack as agt_file_read / agt_file_list (plan-012). The built-in toolkit is
-// therefore now exactly these three (bash inspection + tool_help); bash_run
-// is added only when the allowlist is non-empty.
+// therefore bash inspection + tool_help + bash_run. Since 2026-07-04
+// (fail-open change) bash_run is bound whenever the built-in group is on —
+// an EMPTY allowlist means UNRESTRICTED execution, no longer "unbound".
 // ---------------------------------------------------------------------------
 const STANDARD_READONLY_NAMES = [
   'bash_list_allowed',
   'bash_which',
+  'bash_run',
   'tool_help',
 ] as const;
 
@@ -554,7 +556,8 @@ describe('buildToolCatalog — integration: agt_file_* (plan-012)', () => {
   it('AC1: built-in catalog (umbrella off) contains ONLY bash + tool_help — no file_* and no agt_file_*', () => {
     const cfg = makeCfg({ allowMutations: true, agentToolsEnabled: false });
     const names = toolNames(buildToolCatalog(cfg, nullLogger));
-    // Exactly the three built-in read-only tools (no bash allow → no bash_run).
+    // Exactly the four built-in tools (bash_run is bound even with an empty
+    // allowlist since the 2026-07-04 fail-open change — unrestricted mode).
     expect(names.sort()).toEqual([...STANDARD_READONLY_NAMES].sort());
     // No legacy built-in file names.
     for (const legacy of ['file_read', 'file_list', 'file_write', 'file_edit', 'file_append']) {
@@ -681,17 +684,43 @@ describe('buildToolCatalog — integration: agentToolsMeta lockstep invariant', 
   });
 });
 
-describe('buildToolCatalog — integration: bash_run gating', () => {
-  it('empty bash.allow → bash_run is not in the catalog', () => {
+describe('buildToolCatalog — integration: bash_run binding (fail-open, 2026-07-04)', () => {
+  it('empty bash.allow → bash_run IS in the catalog (unrestricted mode)', () => {
     const cfg = makeCfg({ withBashAllow: false });
     const catalog = buildToolCatalog(cfg, nullLogger);
-    expect(toolNames(catalog)).not.toContain('bash_run');
+    expect(toolNames(catalog)).toContain('bash_run');
   });
 
-  it('non-empty bash.allow → bash_run IS in the catalog', () => {
-    const cfg = makeCfg({ withBashAllow: true });
-    const catalog = buildToolCatalog(cfg, nullLogger);
+  it('empty bash.allow emits the unrestricted stderr notice', () => {
+    const writes: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      writes.push(s);
+      return true;
+    };
+    try {
+      buildToolCatalog(makeCfg({ withBashAllow: false }), nullLogger);
+    } finally {
+      (process.stderr as unknown as { write: typeof orig }).write = orig;
+    }
+    expect(writes.join('')).toMatch(/no bash allowlist is configured — bash_run may execute ANY binary/);
+  });
+
+  it('non-empty bash.allow → bash_run IS in the catalog (restricted) and no unrestricted notice', () => {
+    const writes: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as unknown as { write: (s: string) => boolean }).write = (s: string) => {
+      writes.push(s);
+      return true;
+    };
+    let catalog;
+    try {
+      catalog = buildToolCatalog(makeCfg({ withBashAllow: true }), nullLogger);
+    } finally {
+      (process.stderr as unknown as { write: typeof orig }).write = orig;
+    }
     expect(toolNames(catalog)).toContain('bash_run');
+    expect(writes.join('')).not.toMatch(/may execute ANY binary/);
   });
 });
 
@@ -699,9 +728,9 @@ describe('buildToolCatalog — regression: baseline standard tool count', () => 
   /**
    * Regression guard: when all agent-tools flags are off and bash allow is
    * empty and allowMutations is false, the catalog must contain exactly
-   * the 5 read-only standard tools (web moved to the agt_* pack, plan-011).
-   * This test fails if a new standard tool is added without being reflected
-   * here — an intentional tripwire.
+   * the standard built-in tools (incl. bash_run, always bound since the
+   * 2026-07-04 fail-open change). This test fails if a new standard tool
+   * is added without being reflected here — an intentional tripwire.
    */
   it('all agt_* flags off + allowMutations=false + no bash allow → exactly the standard read-only tools', () => {
     const cfg = makeCfg({
